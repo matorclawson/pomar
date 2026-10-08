@@ -5,19 +5,19 @@ const assert = require('node:assert/strict');
 const yaml = readFileSync(join(__dirname, 'review-head.yml'), 'utf8');
 const script = yaml.split('          script: |\n')[1].split('\n').map(x => x.slice(12)).join('\n');
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const evaluate = new AsyncFunction('github', 'context', 'core', script);
+const evaluate = new AsyncFunction('github', 'context', 'core', 'process', script);
 const head = 'a'.repeat(40), other = 'b'.repeat(40);
-const review = (id, verdict = 'no-blocker', sha = head, seat = 'POMAR-CC', login = 'matorclawson') => ({
+const review = (id, verdict = 'no-blocker', sha = head, seat = 'POMAR-CC', login = 'review-publisher') => ({
   id, user: {login}, updated_at: `2026-01-01T00:00:${String(id).padStart(2, '0')}Z`,
   body: `Reviewing-Seat: ${seat}\nReviewed-Head: ${sha}\nReview-Verdict: ${verdict}`,
 });
-async function run({comments = [review(1)], body = 'Implementation-Seat: POMAR-Codex', payload = {}, statuses = [], changed = false} = {}) {
+async function run({publisher = 'review-publisher', comments = [review(1)], body = 'Implementation-Seat: POMAR-Codex', payload = {}, statuses = [], changed = false} = {}) {
   let reads = 0, failure; const writes = [];
   const github = {rest: {pulls: {get: async () => ({data: {state: 'open', head: {sha: changed && ++reads > 1 ? other : head}, body}})},
     issues: {listComments: 'comments'}, repos: {listCommitStatusesForRef: 'statuses', createCommitStatus: async value => writes.push(value)}},
     paginate: async method => method === 'comments' ? comments : statuses};
   const context = {repo: {owner: 'example', repo: 'project'}, payload: {pull_request: {number: 1}, ...payload}, serverUrl: 'https://github.com', runId: 1};
-  await evaluate(github, context, {info() {}, setFailed(message) {failure = message;}});
+  await evaluate(github, context, {info() {}, setFailed(message) {failure = message;}}, {env: {REVIEW_PUBLISHER: publisher}});
   return {writes, failure};
 }
 for (const [name, options, expected] of [
@@ -25,6 +25,8 @@ for (const [name, options, expected] of [
   ['stale head', {comments: [review(1, 'no-blocker', other)]}, 'failure'],
   ['new blocked supersedes old approval', {comments: [review(1), review(2, 'blocked')]}, 'failure'],
   ['new stale supersedes old approval', {comments: [review(1), review(2, 'no-blocker', other)]}, 'failure'],
+  ['missing publisher configuration', {publisher: ''}, 'failure'],
+  ['invalid publisher configuration', {publisher: 'not a login'}, 'failure'],
   ['missing review', {comments: []}, 'failure'],
   ['missing implementation seat', {body: ''}, 'failure'],
   ['duplicate implementation seat', {body: 'Implementation-Seat: POMAR-Codex\nImplementation-Seat: POMAR-CC'}, 'failure'],

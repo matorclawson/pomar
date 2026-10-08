@@ -26,6 +26,8 @@ jobs:
       # This workflow never checks out or executes pull-request code. The
       # github-script dependency and inline policy come from the trusted base.
       - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          REVIEW_PUBLISHER: ${{ vars.REVIEW_PUBLISHER }}
         with:
           script: |
             const {owner, repo} = context.repo;
@@ -33,6 +35,8 @@ jobs:
             if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid pull request number');
             const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number: number});
             if (pr.state !== 'open') return;
+            const publisher = process.env.REVIEW_PUBLISHER || '';
+            const configured = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(publisher);
             const seats = ['POMAR-Codex', 'POMAR-CC'];
             const fields = (text, key) => {
               const lines = []; let fence = null;
@@ -56,12 +60,13 @@ jobs:
             const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: number, per_page: 100});
             // Shared publishing identity is a known limit: the seat marker is
             // documentary authorship, not independent-account authentication.
-            const reviews = comments.filter(c => c.user?.login === 'matorclawson' &&
+            const reviews = comments.filter(c => c.user?.login === publisher &&
               fields(c.body, 'Reviewing-Seat').some(x => x.slice('Reviewing-Seat:'.length).trim() === reviewingSeat));
             reviews.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || b.id - a.id);
             const latest = reviews[0];
             let state = 'failure', description = 'Missing exact-head technical review';
-            if (!seats.includes(authorSeat)) description = 'Set one Implementation-Seat line in the PR body';
+            if (!configured) description = 'Configure the trusted REVIEW_PUBLISHER repository variable';
+            else if (!seats.includes(authorSeat)) description = 'Set one Implementation-Seat line in the PR body';
             else if (latest) {
               const head = value(latest.body, 'Reviewed-Head');
               const verdict = value(latest.body, 'Review-Verdict');
@@ -73,7 +78,7 @@ jobs:
             // A deletion event is a withdrawal, never an approval from an
             // older comment in the same event. A new explicit review clears it.
             const withdrawn = context.payload.action === 'deleted' &&
-              context.payload.comment?.user?.login === 'matorclawson' &&
+              context.payload.comment?.user?.login === publisher &&
               value(context.payload.comment?.body, 'Reviewing-Seat') === reviewingSeat;
             const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {owner, repo, ref: pr.head.sha, per_page: 100});
             const priorHold = statuses.find(s => s.context === 'review-head' && s.description?.startsWith('Review withdrawn at '));

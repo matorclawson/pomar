@@ -27,6 +27,11 @@ editing and deletion. It reads metadata only, never checks out PR code, and
 has no build, guest, secret, deployment or merge operation. Its sole write is
 the commit status. The native `make verify` gate remains separate.
 
+The repository owner configures the trusted publishing login in the repository
+variable `REVIEW_PUBLISHER`. Missing or malformed configuration fails closed;
+no private publishing identity is embedded in source or fixture data. This
+variable is configuration, not a credential.
+
 After this workflow lands on the default branch, require the exact status
 context `review-head` in the main branch rule, preserving every existing
 protection and native gate. That repository setting is a separate observed
