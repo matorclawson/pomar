@@ -1,0 +1,98 @@
+name: Review head
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Pull request number to recheck
+        required: true
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  statuses: write
+concurrency:
+  group: review-head-${{ github.event.pull_request.number || github.event.issue.number || inputs.pull_request }}
+  cancel-in-progress: true
+jobs:
+  review:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      # This workflow never checks out or executes pull-request code. The
+      # github-script dependency and inline policy come from the trusted base.
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          REVIEW_PUBLISHER: ${{ vars.REVIEW_PUBLISHER }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const number = Number(context.payload.pull_request?.number || context.payload.issue?.number || context.payload.inputs?.pull_request);
+            if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid pull request number');
+            const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number: number});
+            if (pr.state !== 'open') return;
+            const publisher = process.env.REVIEW_PUBLISHER || '';
+            const configured = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(publisher);
+            const seats = ['POMAR-Codex', 'POMAR-CC'];
+            const fields = (text, key) => {
+              const lines = []; let fence = null;
+              for (const line of (text || '').split(/\r?\n/)) {
+                const mark = line.match(/^ {0,3}(`{3,}|~{3,})/);
+                if (mark) {
+                  if (!fence) fence = mark[1];
+                  else if (mark[1][0] === fence[0] && mark[1].length >= fence.length && line.trim() === mark[1]) fence = null;
+                  continue;
+                }
+                if (!fence && line.startsWith(`${key}:`)) lines.push(line);
+              }
+              return lines;
+            };
+            const value = (text, key) => {
+              const lines = fields(text, key);
+              return lines.length === 1 ? lines[0].slice(key.length + 1).trim() : '';
+            };
+            const authorSeat = value(pr.body, 'Implementation-Seat');
+            const reviewingSeat = seats.find(x => x !== authorSeat);
+            const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number: number, per_page: 100});
+            // Shared publishing identity is a known limit: the seat marker is
+            // documentary authorship, not independent-account authentication.
+            const reviews = comments.filter(c => c.user?.login === publisher &&
+              fields(c.body, 'Reviewing-Seat').some(x => x.slice('Reviewing-Seat:'.length).trim() === reviewingSeat));
+            reviews.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || b.id - a.id);
+            const latest = reviews[0];
+            let state = 'failure', description = 'Missing exact-head technical review';
+            if (!configured) description = 'Configure the trusted REVIEW_PUBLISHER repository variable';
+            else if (!seats.includes(authorSeat)) description = 'Set one Implementation-Seat line in the PR body';
+            else if (latest) {
+              const head = value(latest.body, 'Reviewed-Head');
+              const verdict = value(latest.body, 'Review-Verdict');
+              if (value(latest.body, 'Reviewing-Seat') !== reviewingSeat || !/^[a-f0-9]{40}$/.test(head)) description = 'Malformed latest technical review';
+              else if (head !== pr.head.sha) description = 'Latest technical review names a different head';
+              else if (verdict === 'no-blocker') { state = 'success'; description = 'Latest technical review matches this exact head'; }
+              else description = verdict === 'blocked' ? 'Latest exact-head technical review is blocked' : 'Malformed latest review verdict';
+            }
+            // A deletion event is a withdrawal, never an approval from an
+            // older comment in the same event. A new explicit review clears it.
+            const withdrawn = context.payload.action === 'deleted' &&
+              context.payload.comment?.user?.login === publisher &&
+              value(context.payload.comment?.body, 'Reviewing-Seat') === reviewingSeat;
+            const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {owner, repo, ref: pr.head.sha, per_page: 100});
+            const priorHold = statuses.find(s => s.context === 'review-head' && s.description?.startsWith('Review withdrawn at '));
+            let cutoff = priorHold?.description.slice('Review withdrawn at '.length);
+            if (withdrawn) cutoff = new Date().toISOString();
+            if (cutoff && (!latest || Date.parse(latest.updated_at) <= Date.parse(cutoff))) {
+              state = 'failure'; description = `Review withdrawn at ${cutoff}`;
+            }
+            const {data: current} = await github.rest.pulls.get({owner, repo, pull_number: number});
+            if (current.state !== 'open' || current.head.sha !== pr.head.sha || current.body !== pr.body) {
+              throw new Error('Pull request changed while evaluating; rerun against current metadata');
+            }
+            await github.rest.repos.createCommitStatus({owner, repo, sha: pr.head.sha,
+              state, context: 'review-head', description,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`});
+            core.info(description);
+            if (state !== 'success') core.setFailed(description);
