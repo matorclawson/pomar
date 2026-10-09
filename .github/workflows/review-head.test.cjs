@@ -90,3 +90,14 @@ test('trusted base only, dependency immutable, runs not cancelled', () => {
   assert.match(yaml, /github-script@[a-f0-9]{40}/); assert.match(yaml, /cancel-in-progress: false/);
   assert.doesNotMatch(yaml, /actions\/checkout|secrets\.|eval\(/);
 });
+
+for (const raw of [' 12', '012', '12 ', '12\n', '12\t', '+12', '1e1', '12.0', '0', '9007199254740993', 12]) {
+  test(`noncanonical dispatch ${JSON.stringify(raw)} refuses before status writes`, async () => {
+    const r = await run({payload: {pull_request: null, inputs: {pull_request: raw}}});
+    assert.match(r.error.message, /canonical decimal/); assert.deepEqual(r.writes, []);
+  });
+}
+test('canonical dispatch shares the exact PR number and evaluates normally', async () => {
+  const r = await run({payload: {pull_request: null, inputs: {pull_request: '12'}}});
+  assert.ifError(r.error); assert.deepEqual(r.writes.map(x => x.state), ['pending', 'success']);
+});

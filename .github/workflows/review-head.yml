@@ -31,6 +31,14 @@ jobs:
         with:
           script: |
             const {owner, repo} = context.repo;
+            // Manual dispatch must use the exact same canonical number as the
+            // event concurrency group. No padded or alternate numeric spelling.
+            const dispatchNumber = context.payload.inputs?.pull_request;
+            if (dispatchNumber !== undefined && (typeof dispatchNumber !== 'string' ||
+                !/^[1-9][0-9]*$/.test(dispatchNumber) ||
+                !Number.isSafeInteger(Number(dispatchNumber)) || String(Number(dispatchNumber)) !== dispatchNumber)) {
+              throw new Error('Dispatch pull request number must be canonical decimal');
+            }
             const number = Number(context.payload.pull_request?.number || context.payload.issue?.number || context.payload.inputs?.pull_request);
             if (!Number.isSafeInteger(number) || number < 1) throw new Error('Invalid pull request number');
             const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number: number});

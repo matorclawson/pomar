@@ -16,11 +16,16 @@ Review-Verdict: no-blocker
 
 Use `blocked` to withhold or withdraw approval. Every new head needs a new review.
 Declarations are ordered by creation time, then comment ID. A malformed latest
-declaration refuses. An edited publisher comment is void even after all its
+declaration refuses. Every edited publisher comment is a void candidate even after all its
 markers are removed; conservatively this includes unrelated edited comments.
-Only a newer explicit, unedited review resolves it. Do not edit an old approval
-onto a new head. Quotes, code fences, HTML comments and paired HTML elements
-(including details) carry no declarations. PR reviews and inline review comments
+The newest candidate by creation decides the result. Editing an older comment
+cannot overtake a newer declaration. If the newest candidate is edited, only a
+newer explicit, unedited review resolves it. Do not edit an old approval
+onto a new head. Code fences, HTML comments, explicitly quoted lines and simple
+paired HTML elements (including details) carry no declarations. This is not a
+full Markdown parser: nested same-tag HTML and lazy blockquote continuation
+lines can still count. Keep protocol declarations only in plain standalone
+lines; publisher markers remain documentary, not independent authentication. PR reviews and inline review comments
 are outside this protocol. Both seats publish through one configured identity:
 seat/prefix markers document authorship, not independent authentication.
 
@@ -42,7 +47,9 @@ queued/cancelled run before its first write, or an edit after the last snapshot
 can temporarily leave an earlier success visible. This check is not an atomic
 merge guarantee. Rod must still confirm the latest exact-head review and no
 outstanding blocker in the per-PR Mergeable table before merging. A manual
-workflow dispatch with the PR number rechecks uncertain state.
+workflow dispatch with the PR number rechecks uncertain state. Dispatch accepts
+only canonical positive decimal text (for example `12`, never ` 12` or `012`),
+so its status-writing run shares the event concurrency group.
 
 The repository owner must first arrange approved workflow-capable publication,
 then configure the nonsecret `REVIEW_PUBLISHER` repository variable, observe a
@@ -51,7 +58,11 @@ real Actions run and adopt `review-head` as an additional required status.
 verified numeric `integration_id` in the ruleset (or expected source in classic
 protection). Do not accept statuses from any source. Preserve every existing
 rule and native gate. The Actions App source does not distinguish another
-trusted workflow using that same App; trusted workflow changes also need review.
+workflow using that same App. A writer can push an `on: push` workflow on an
+unprotected branch and publish this context through the Actions App too. The
+App pin therefore does not identify this particular workflow or authenticate
+the reviewing seat. Review write-capable workflow changes on all runnable
+branches, and check the actual review/run before merging.
 See [required check sources](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
 and [ruleset API](https://docs.github.com/en/rest/repos/rules).
 A source merge establishes none of these adoption steps or independent identities.
