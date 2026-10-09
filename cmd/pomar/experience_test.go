@@ -64,7 +64,7 @@ func TestFriendlyCommandsUseExplicitSocketAndExistingAPI(t *testing.T) {
 	for _, tc := range []struct {
 		args         []string
 		path, method string
-	}{{[]string{"status"}, "/v1/capacity", "GET"}, {[]string{"jobs"}, "/v1/attempts", "GET"}, {[]string{"run", "-id", "test-job", "--", "true"}, "/v1/attempts", "POST"}} {
+	}{{[]string{"status"}, "/v1/capacity", "GET"}, {[]string{"jobs"}, "/v1/attempts", "GET"}, {[]string{"run", "-id", "test-job", "--", "true"}, "/v1/attempts", "POST"}, {[]string{"run", "-id", "test-job", "true", "-root", "/guest"}, "/v1/attempts", "POST"}} {
 		var out, err bytes.Buffer
 		if rc := run(tc.args, &out, &err); rc != 0 {
 			t.Fatalf("%v: %d %s", tc.args, rc, err.String())

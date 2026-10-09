@@ -622,8 +622,17 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	var c *manager.Client
+	rootGiven, socketGiven := false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "root":
+			rootGiven = true
+		case "socket":
+			socketGiven = true
+		}
+	})
 	switch {
-	case explicitFlag(args, "root") && !explicitFlag(args, "socket") && *root != "":
+	case rootGiven && !socketGiven && *root != "":
 		c = manager.NewClient(*root)
 	case *socket != "":
 		c = manager.NewSocketClient(*socket)

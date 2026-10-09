@@ -173,7 +173,8 @@ func Install(bundle, prefix string) (Manifest, error) {
 	if err != nil {
 		return m, err
 	}
-	if !filepath.IsAbs(prefix) || filepath.Clean(prefix) == string(os.PathSeparator) {
+	prefix = filepath.Clean(prefix)
+	if !filepath.IsAbs(prefix) || prefix == string(os.PathSeparator) {
 		return m, fmt.Errorf("prefix must be an absolute user-owned directory")
 	}
 	if err = secureDirectory(prefix); err != nil {
