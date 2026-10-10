@@ -117,6 +117,7 @@ func Decode(raw []byte, expectedSHA string) (Manifest, error) {
 // must not give different meanings to different release tooling.
 func uniqueJSON(raw []byte) error {
 	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
 	var value func(int) error
 	value = func(depth int) error {
 		if depth > 32 {

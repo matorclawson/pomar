@@ -31,6 +31,25 @@ func TestHistoryRetainsUnknownEvidenceAndRefusesLiveOrDuplicateEntries(t *testin
 		t.Fatal("caller class leak accepted")
 	}
 }
+
+// ProfRod's independently executed counterexample: float64 decoding merged
+// these adjacent retained integers even though the history evidence changed.
+func TestHistoryDoesNotRoundUnknownLargeIntegerEvidence(t *testing.T) {
+	a := []byte(`[{"attempt":"original","state":"exited","future_evidence":9007199254740992}]`)
+	b := []byte(`[{"attempt":"original","state":"exited","future_evidence":9007199254740993}]`)
+	first, err := history(a, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := history(b, "")
+	if err != nil || first == second {
+		t.Fatal("changed large integer evidence passed preservation", err)
+	}
+	c, err := canonical(b)
+	if err != nil || !bytes.Contains(c, []byte("9007199254740993")) {
+		t.Fatal("numeric evidence rounded", string(c), err)
+	}
+}
 func TestKeyRequiresTheIndependentlyBoundPublicBytes(t *testing.T) {
 	pub := bytes.Repeat([]byte{7}, 32)
 	k := manager.KeyReply{Algorithm: "ed25519", PublicKey: base64.StdEncoding.EncodeToString(pub), KeyID: digest(pub)}

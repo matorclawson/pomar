@@ -357,7 +357,9 @@ func (n *Native) process(ctx context.Context) (int, string, error) {
 }
 func canonical(raw []byte) ([]byte, error) {
 	var v any
-	if uniqueJSON(raw) != nil || json.Unmarshal(raw, &v) != nil {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber() // Unknown evidence integers must never pass through float64.
+	if uniqueJSON(raw) != nil || d.Decode(&v) != nil {
 		return nil, fmt.Errorf("invalid bounded observation")
 	}
 	return json.Marshal(v)
