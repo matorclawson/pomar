@@ -5,6 +5,7 @@ package serviceupgrade
 import (
 	"context"
 	"fmt"
+	"os"
 )
 
 func Execute(ctx context.Context, action, bundle, sha, archive string) (any, error) {
@@ -17,6 +18,7 @@ func Execute(ctx context.Context, action, bundle, sha, archive string) (any, err
 		return nil, err
 	}
 	defer n.Close()
+	n.Progress = os.Stderr
 	switch action {
 	case "check":
 		if archive != "" {

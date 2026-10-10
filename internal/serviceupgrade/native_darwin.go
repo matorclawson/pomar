@@ -42,6 +42,7 @@ type Native struct {
 	fenced                   bool
 	beforeRecord             []byte
 	original                 Journal
+	Progress                 io.Writer
 	lock                     *os.File
 }
 
@@ -610,6 +611,13 @@ func (n *Native) Archive(ctx context.Context, before Observation) (string, error
 		return "", err
 	}
 	n.ArchivePath = path
+	// Surface custody before any service effect, including if the process is
+	// interrupted before its final JSON receipt can be returned.
+	if n.Progress != nil {
+		if _, err = fmt.Fprintf(n.Progress, "upgrade: retained archive %s\n", path); err != nil {
+			return path, fmt.Errorf("archive custody could not be reported")
+		}
+	}
 	if err = os.Chmod(path, 0700); err != nil {
 		return path, err
 	}
@@ -700,6 +708,10 @@ func (n *Native) noWriters(ctx context.Context, pid int) error {
 	if err != nil {
 		return err
 	}
+	return writerInventory(b, pid, n.M.OwnerUID)
+}
+
+func writerInventory(b []byte, pid int, ownerUID uint32) error {
 	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 {
@@ -717,7 +729,11 @@ func (n *Native) noWriters(ctx context.Context, pid int) error {
 			return fmt.Errorf("process inventory malformed")
 		}
 		name := strings.Join(f[3:], " ")
-		if (pid > 0 && pp == pid) || (f[2] == strconv.FormatUint(uint64(n.M.OwnerUID), 10) && p != pid && (name == bindir+"/pomar" || filepath.Base(name) == "pomar-host" || strings.Contains(name, "Virtualization"))) {
+		base := filepath.Base(name)
+		// A pre-drain source sync can survive its parent's exit. Prove those
+		// writers absent too; do not signal them or treat PID1 as safe custody.
+		writer := name == bindir+"/pomar" || base == "pomar-host" || strings.Contains(name, "Virtualization") || base == "git" || strings.HasPrefix(base, "git-") || base == "ssh"
+		if (pid > 0 && pp == pid) || (f[2] == strconv.FormatUint(uint64(ownerUID), 10) && p != pid && writer) {
 			return fmt.Errorf("service has surviving or unaccounted writers; no process was signalled")
 		}
 	}

@@ -156,3 +156,20 @@ func TestMissingLaunchdLabelRequiresACompleteSuccessfulInventory(t *testing.T) {
 		}
 	}
 }
+func TestReparentedSourceWritersBlockReplacementWithoutForeignSignals(t *testing.T) {
+	for _, name := range []string{"/usr/bin/git", "/usr/libexec/git-core/git-index-pack", "/usr/bin/ssh", bindir + "/pomar-host", "/System/Library/Frameworks/Virtualization.framework/VM"} {
+		raw := []byte("101 1 410 " + name + "\n")
+		if e := writerInventory(raw, 0, 410); e == nil {
+			t.Fatal("reparented owner writer missed", name)
+		}
+	}
+	if e := writerInventory([]byte("101 1 503 /usr/bin/git\n102 1 410 /usr/sbin/cfprefsd\n"), 0, 410); e != nil {
+		t.Fatal("unrelated account/service blocked", e)
+	}
+	if e := writerInventory([]byte("101 90 410 /bin/unknown-helper\n"), 90, 410); e == nil {
+		t.Fatal("unknown direct writer missed")
+	}
+	if e := writerInventory([]byte("bad inventory\n"), 0, 410); e == nil {
+		t.Fatal("uncertain inventory accepted")
+	}
+}
