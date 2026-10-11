@@ -59,8 +59,9 @@ func TestHTTPRefusalNamesAllResourceDeficits(t *testing.T) {
 	}
 }
 
-// Exercise the actual manager admission critical section: many requests cannot
-// each take the same remaining resources. No real helper/VM is started here.
+// Exercise admission and claim insertion while the test itself holds m.mu.
+// This checks accounting under that lock, not whether Start acquires the lock.
+// No real helper/VM is started here.
 func TestConcurrentClaimsShareBudgetRatherThanAnExclusiveHost(t *testing.T) {
 	for _, requests := range []int{2, 32} {
 		t.Run(fmt.Sprint(requests), func(t *testing.T) {

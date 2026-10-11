@@ -13,8 +13,9 @@ type Resources struct {
 	DiskBytes     int64 `json:"disk_bytes"`
 }
 
-// Failure is a claim-time predicate, not a persistent queue occurrence. The
-// manager attaches this host's identity. No private job IDs/arguments are needed.
+// Failure is a local claim-time predicate, not a persistent queue occurrence.
+// This legacy response does not identify a host; a pooled wait export must bind
+// host identity separately. No private job IDs/arguments are needed.
 type Failure struct {
 	Resource  string `json:"resource"`
 	Reason    string `json:"reason"` // existing API reason retained for clients
