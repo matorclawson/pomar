@@ -57,7 +57,9 @@ Apply acquires the product operation lock and repeats the checks. It checks
 space before archiving the two old binaries and exact install record in a private
 root-owned archive. It records durable intent before each effect. The existing
 manager's atomic owner drain prevents new admission; only the matched idle
-manager is unloaded. The control directory is closed across restart. No other
+manager is unloaded. The control directory is closed across restart. Directory
+modes change through a no-follow descriptor; the manager-created socket is never
+chmodded by the administrator. No other
 process is signalled. Only the two pinned binaries and install record change.
 Prior concurrency/reboot/check qualifications are explicitly invalidated before
 replacement and never inferred from a successful restart.
@@ -89,6 +91,16 @@ service, repeats post-install readbacks and then reopens admission. It does not
 rewrite result history or replace signing keys, images, kernel/rootfs, caller,
 policy, grants, classes or launch configuration. If those bindings changed or a
 new job was admitted, stop and reconcile with the service owner.
+
+Both archived binaries are hash-checked when the original rollback journal is
+loaded and again before stopping the current manager. The exact signing policy is
+retained in that journal and the target install record; another policy cannot be
+substituted during recovery.
+
+The current owner drain is in memory. Reboot-safe persistent admission state is
+a separate service change, and a host reboot during a transaction requires owner
+reconciliation before dependent jobs proceed. Crash-left `.pomar-upgrade-pending-*`
+files are retained for inspection; automatic cleanup is not part of this verb.
 
 Source/unit qualification of this implementation does not demonstrate a real
 root-owned service transition. An installable recipe also needs the exact

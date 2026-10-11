@@ -20,17 +20,19 @@ type Observation struct {
 }
 
 type Journal struct {
-	Schema      string      `json:"schema"`
-	ManifestSHA string      `json:"manifest_sha256"`
-	Phase       string      `json:"phase"`
-	Before      Observation `json:"before"`
-	Archive     string      `json:"archive"`
+	Schema        string      `json:"schema"`
+	ManifestSHA   string      `json:"manifest_sha256"`
+	Phase         string      `json:"phase"`
+	Before        Observation `json:"before"`
+	Archive       string      `json:"archive"`
+	SigningPolicy string      `json:"signing_policy"`
 }
 
 // Driver methods are narrow, checked operations, not caller-supplied commands.
 // Check and Observe are read-only. Stop must recheck the named process identity.
 // Replace and Restore refuse bytes outside the frozen baseline/target set.
 type Driver interface {
+	SigningPolicy() string
 	Check(context.Context) error
 	Observe(context.Context) (Observation, error)
 	Archive(context.Context, Observation) (string, error)
@@ -63,7 +65,7 @@ func Apply(ctx context.Context, d Driver, manifestSHA string) (Journal, error) {
 	if err != nil {
 		return Journal{}, err
 	}
-	j := Journal{"pomar.service-upgrade-journal/v1", manifestSHA, "prepared", before, archive}
+	j := Journal{Schema: "pomar.service-upgrade-journal/v1", ManifestSHA: manifestSHA, Phase: "prepared", Before: before, Archive: archive, SigningPolicy: d.SigningPolicy()}
 	step := func(phase string, act func() error) error {
 		// Retain intent before its effect: a crash cannot look like no change.
 		j.Phase = phase
@@ -106,7 +108,7 @@ func Apply(ctx context.Context, d Driver, manifestSHA string) (Journal, error) {
 }
 
 func Rollback(ctx context.Context, d Driver, j Journal, manifestSHA string) (Journal, error) {
-	if j.Schema != "pomar.service-upgrade-journal/v1" || j.ManifestSHA != manifestSHA || j.Archive == "" {
+	if j.Schema != "pomar.service-upgrade-journal/v1" || j.ManifestSHA != manifestSHA || j.Archive == "" || j.SigningPolicy != d.SigningPolicy() {
 		return j, fmt.Errorf("rollback requires the original frozen manifest and archive")
 	}
 	if err := d.Check(ctx); err != nil {
