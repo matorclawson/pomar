@@ -47,7 +47,7 @@ func TestStartRefusesUnentitledHelper(t *testing.T) {
 	}
 }
 
-func openAdmission(t *testing.T, h capacity.Host, sp venue.Space) (*Manager, *venue.Venue) {
+func openAdmission(t *testing.T, h capacity.Host, sp venue.Space, classes ...JobClass) (*Manager, *venue.Venue) {
 	t.Helper()
 	v, err := venue.Open(t.TempDir())
 	if err != nil {
@@ -58,7 +58,7 @@ func openAdmission(t *testing.T, h capacity.Host, sp venue.Space) (*Manager, *ve
 		t.Fatal(err)
 	}
 	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour,
-		Host: h, Space: func() (venue.Space, error) { return sp, nil }})
+		Host: h, Space: func() (venue.Space, error) { return sp, nil }, Classes: classes})
 	if err != nil {
 		t.Fatal(err)
 	}

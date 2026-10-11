@@ -177,7 +177,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 		}
 		var ref *capacity.Refusal
 		if errors.As(err, &ref) {
-			reply(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error(), "reason": ref.Reason})
+			reply(w, http.StatusServiceUnavailable, map[string]any{"error": err.Error(), "reason": ref.Reason, "failures": ref.Failures})
 			return
 		}
 		if err != nil {
@@ -259,6 +259,22 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			}
 		}
 		c.Classes = classes
+		var current []ClassCapacity
+		for _, k := range c.Current {
+			if m.mayUse(cl, k.Name) {
+				current = append(current, k)
+			}
+		}
+		c.Current = current
+		// Aggregate reserved/free is host-wide, like live, but demand and class
+		// failures must be taken from an authorised configured class.
+		if len(current) > 0 {
+			c.Allocation = current[0].Allocation
+		} else {
+			c.Allocation.Demand = capacity.Resources{}
+			c.Allocation.Failures = nil
+			c.Allocation.FitsCurrent = 0
+		}
 		reply(w, http.StatusOK, c)
 	})
 	return mux
