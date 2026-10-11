@@ -745,6 +745,20 @@ type Capacity struct {
 	// Draining is true while the owner has set the manager draining: no new
 	// start is admitted, and Live counts what is left to finish.
 	Draining bool `json:"draining"`
+	// Allocation is known nonterminal attempt accounting at this manager.
+	// It includes every class, including retained retired-class entries.
+	Allocation capacity.Allocation `json:"allocation"`
+	// Current is the number of additional attempts fitting beside current work
+	// for each configured class, including its per-host ceiling.
+	Current []ClassCapacity `json:"current"`
+	// Coverage is intentionally limited: retained agent environments and native
+	// jobs are not enrolled in the legacy attempt table by this report.
+	Coverage string `json:"coverage"`
+}
+
+type ClassCapacity struct {
+	Name       string              `json:"name"`
+	Allocation capacity.Allocation `json:"allocation"`
 }
 
 // Drain sets (on) or lifts (off) the drain, and reports the admission state:
@@ -774,19 +788,28 @@ func (m *Manager) Capacity() (Capacity, error) {
 	}
 	m.mu.Lock()
 	live, draining := 0, m.draining
+	var claims []capacity.Class
 	for _, e := range m.t.entries {
 		if !e.Terminal() {
 			live++
+			claims = append(claims, e.claimClass())
 		}
 	}
 	m.mu.Unlock()
 	d := capacity.Disk{Used: sp.Used, Avail: sp.Avail, Shared: sp.Shared}
 	var classes []capacity.Class
+	var current []ClassCapacity
 	for _, jc := range m.cfg.Classes {
 		classes = append(classes, jc.Class)
+		a, err := capacity.Evaluate(jc.Class, claims, m.cfg.Host, d)
+		if err != nil {
+			return Capacity{}, err
+		}
+		current = append(current, ClassCapacity{Name: jc.Class.Name, Allocation: a})
 	}
 	return Capacity{Class: m.cfg.Class, Host: m.cfg.Host, Space: sp, Live: live,
-		FitsIdle: capacity.Fits(m.cfg.Class, m.cfg.Host, d), Classes: classes, Draining: draining}, nil
+		FitsIdle: capacity.Fits(m.cfg.Class, m.cfg.Host, d), Classes: classes, Draining: draining,
+		Allocation: current[0].Allocation, Current: current, Coverage: "KNOWN_NONTERMINAL_ATTEMPTS_ONLY"}, nil
 }
 
 func (m *Manager) startTime(pid int) (string, error) {

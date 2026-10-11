@@ -160,6 +160,9 @@ func TestControlSocketScopesEveryAttemptRouteByClass(t *testing.T) {
 	if err := ctl.Do("GET", "/v1/capacity", nil, &c); err != nil || len(c.Classes) != 1 || c.Classes[0].Name != "ci" {
 		t.Fatalf("capacity through the control socket: %+v, %v", c.Classes, err)
 	}
+	if len(c.Current) != 1 || c.Current[0].Name != "ci" {
+		t.Fatalf("current capacity exposed an unauthorised class: %+v", c.Current)
+	}
 	for _, p := range []string{"/v1/caches", "/v1/reconcile", "/v1/vm-orphans"} {
 		if err := ctl.Do("GET", p, nil, nil); err == nil || !strings.Contains(err.Error(), "403") {
 			t.Errorf("host-wide %s through the control socket: %v, want 403", p, err)

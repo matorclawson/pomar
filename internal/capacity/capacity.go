@@ -7,6 +7,7 @@ package capacity
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -85,7 +86,7 @@ func (c Class) MemoryClaim() int64 { return c.MemoryBytes + c.VMOverheadBytes }
 func (c Class) Claim() int64 { return c.DiskPeakBytes + HeadroomBytes }
 
 func (c Class) validate() error {
-	if c.Name == "" || c.VCPU < 1 || c.MemoryBytes < 1 || c.DiskPeakBytes < 0 || c.TimeLimitSeconds < 0 || c.LogCapBytes < 0 || c.OutputCapBytes < 0 || c.OutputCapBytes > 64<<20 {
+	if c.Name == "" || c.VCPU < 1 || int64(c.VCPU) > math.MaxInt64/1000 || c.MemoryBytes < 1 || c.VMOverheadBytes < 0 || c.MemoryBytes > math.MaxInt64-c.VMOverheadBytes || c.DiskPeakBytes < 0 || c.DiskPeakBytes > math.MaxInt64-HeadroomBytes || c.Concurrency < 0 || c.TimeLimitSeconds < 0 || c.LogCapBytes < 0 || c.OutputCapBytes < 0 || c.OutputCapBytes > 64<<20 {
 		return fmt.Errorf("capacity: invalid class %+v", c)
 	}
 	return nil
@@ -177,6 +178,9 @@ const (
 type Refusal struct {
 	Reason string
 	Detail string
+	// Failures is complete for numerical capacity checks. Earlier clients keep
+	// their original reason; new clients need not infer CPU versus memory from it.
+	Failures []Failure
 }
 
 func (r *Refusal) Error() string { return "capacity: refused (" + r.Reason + "): " + r.Detail }
@@ -187,59 +191,23 @@ func (r *Refusal) Unwrap() error { return ErrRefused }
 // be written and so already missing from Avail: counting it twice errs toward
 // refusing.
 func Admit(c Class, live []Class, h Host, d Disk) error {
-	if err := c.validate(); err != nil {
+	a, err := Evaluate(c, live, h, d)
+	if err != nil || len(a.Failures) == 0 {
 		return err
 	}
-	cpu, mem, disk := c.VCPU, c.MemoryClaim(), c.Claim()
-	same := 1
-	for _, l := range live {
-		cpu += l.VCPU
-		mem += l.MemoryClaim()
-		if l.Name == c.Name {
-			same++
-		}
-		disk += l.Claim()
-	}
-	if c.Concurrency > 0 && same > c.Concurrency {
-		return &Refusal{ReasonClassConcurrency, fmt.Sprintf("%d attempts of class %s with this one, measured limit %d", same, c.Name, c.Concurrency)}
-	}
-	if cpu > h.CPUSlots {
-		if h.Budget {
-			return &Refusal{ReasonHostBudget, fmt.Sprintf("%d vCPU claimed with this attempt, a budget of %d", cpu, h.CPUSlots)}
-		}
-		return &Refusal{ReasonCPU, fmt.Sprintf("%d vCPU claimed with this attempt, %d slots", cpu, h.CPUSlots)}
-	}
-	if mem > h.MemoryBytes {
-		if h.Budget {
-			return &Refusal{ReasonHostBudget, fmt.Sprintf("%s claimed with this attempt, a budget of %s", gib(mem), gib(h.MemoryBytes))}
-		}
-		return &Refusal{ReasonMemory, fmt.Sprintf("%s claimed with this attempt, %s of slots", gib(mem), gib(h.MemoryBytes))}
-	}
-	if disk > d.Avail {
-		return &Refusal{ReasonDisk, fmt.Sprintf("%s claimed with this attempt (peak + %s each), %s free", gib(disk), gib(HeadroomBytes), gib(d.Avail))}
-	}
-	if d.Shared {
-		// The fill once every claim is written in full must stay at or
-		// under the floor.
-		total := d.Used + d.Avail
-		if total <= 0 || (d.Used+disk)*100 > MaxFillPercent*total {
-			return &Refusal{ReasonFloor, fmt.Sprintf("%s used + %s claimed would exceed %d%% of %s", gib(d.Used), gib(disk), MaxFillPercent, gib(total))}
-		}
-	}
-	return nil
+	f := a.Failures[0]
+	return &Refusal{Reason: f.Reason, Detail: fmt.Sprintf("%s: demand %d %s, available %d, deficit %d", f.Resource, f.Demand, f.Unit, f.Available, f.Deficit), Failures: a.Failures}
 }
 
 // Fits reports how many attempts of class c fit on an idle host: R-34's
 // min(CPU slots, memory slots, free ÷ (peak + headroom)), with the fill floor
 // on a shared disk. It is a plan figure only when c is measured.
 func Fits(c Class, h Host, d Disk) int {
-	n := 0
-	var live []Class
-	for Admit(c, live, h, d) == nil {
-		n++
-		live = append(live, c)
+	a, err := Evaluate(c, nil, h, d)
+	if err != nil {
+		return 0
 	}
-	return n
+	return a.FitsCurrent
 }
 
 func gib(b int64) string { return strconv.FormatFloat(float64(b)/float64(GiB), 'f', 1, 64) + " GiB" }

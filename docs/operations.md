@@ -92,3 +92,8 @@ Wait for jobs to finish, then stop the foreground manager with Ctrl-C. Never use
 this development convenience command to recover, restart or replace a permanent
 service. A stopped manager does not itself establish that every helper or guest
 has exited; inspect retained attempts and VM-orphan reports.
+## Current capacity and parallel jobs
+
+Managed jobs use aggregate resource admission, not an exclusive host lock.
+See [capacity admission](capacity-admission.md) for current reserved/free
+vectors, class-specific `fits_current` and quantified refusal reasons.
