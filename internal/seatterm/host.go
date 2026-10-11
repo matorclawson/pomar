@@ -199,6 +199,7 @@ type TermSession struct {
 }
 
 type pendingWrite struct {
+	from       *Client
 	epoch      uint64
 	data       []byte
 	cols, rows uint16 // a resize when data is nil
@@ -318,26 +319,55 @@ func (s *TermSession) writer() {
 			// be lost to this reset.
 			s.master.SetWriteDeadline(time.Time{})
 		}
-		s.mu.Unlock()
 		if !ok {
-			continue // a revoked or stale controller's write never lands
+			w.from.outcomes.Refused++ // a revoked or stale controller's write never lands
+			s.mu.Unlock()
+			continue
 		}
+		s.mu.Unlock()
+		var n int
+		var err error
 		if w.data == nil {
-			resize(s.tty, w.cols, w.rows)
+			err = resizeTTY(s.tty, w.cols, w.rows)
 			s.mu.Lock()
-			s.cols, s.rows = w.cols, w.rows
+			if err == nil {
+				s.cols, s.rows = w.cols, w.rows
+			}
 			for c := range s.viewers {
 				c.notify(Event{Kind: EventState})
 			}
 			s.mu.Unlock()
 		} else {
-			s.master.Write(w.data)
+			n, err = s.master.Write(w.data)
 		}
 		s.mu.Lock()
+		o := &w.from.outcomes
+		switch {
+		case err == nil:
+			o.Written++
+		case n > 0:
+			o.Partial++ // some bytes reached the program; what became of the rest is unknown, and nothing is resent
+		default:
+			o.Failed++
+		}
 		s.inflight = 0
 		s.fence.Broadcast()
 		s.mu.Unlock()
 	}
+}
+
+// Outcomes counts what became of a client's queued writes, input and
+// resizes: accepted into the queue is not the same as reaching the
+// program. A partial write's remainder is unknown, and nothing is resent.
+type Outcomes struct {
+	Written, Partial, Failed, Refused int
+}
+
+// Outcomes returns the client's write outcomes so far.
+func (c *Client) Outcomes() Outcomes {
+	c.s.mu.Lock()
+	defer c.s.mu.Unlock()
+	return c.outcomes
 }
 
 // Info is the session's current state.
@@ -430,6 +460,7 @@ type Client struct {
 	behind    bool
 	gone      bool
 	epoch     uint64 // the grant epoch while this client controls
+	outcomes  Outcomes
 }
 
 // Events is the client's ordered output; Signals says a gap or a state
@@ -574,13 +605,13 @@ func (c *Client) queue(w pendingWrite) error {
 	s := c.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.controller != c || c.epoch != s.epoch {
+	if c.gone || s.controller != c || c.epoch != s.epoch { // a detached client queues nothing, whatever it held
 		return ErrNotController
 	}
 	if s.exited {
 		return ErrSessionExited
 	}
-	w.epoch = c.epoch
+	w.epoch, w.from = c.epoch, c
 	select {
 	case s.writes <- w:
 		return nil
@@ -593,14 +624,7 @@ func (c *Client) queue(w pendingWrite) error {
 func (c *Client) Release() {
 	s := c.s
 	s.mu.Lock()
-	held := s.controller == c
-	if held {
-		s.epoch++
-		s.controller, c.epoch = nil, 0
-		for v := range s.viewers {
-			v.notify(Event{Kind: EventState})
-		}
-	}
+	held := c.releaseLocked()
 	s.mu.Unlock()
 	if held {
 		// A revocation is never held up by the journal: it is recorded when it can be.
@@ -608,16 +632,37 @@ func (c *Client) Release() {
 	}
 }
 
-// Detach removes the client, releasing any control it holds. It never stops
-// the session's program.
+// releaseLocked revokes the client's control, if it holds it.
+func (c *Client) releaseLocked() bool {
+	s := c.s
+	if s.controller != c {
+		return false
+	}
+	s.epoch++
+	s.controller, c.epoch = nil, 0
+	for v := range s.viewers {
+		v.notify(Event{Kind: EventState})
+	}
+	return true
+}
+
+// Detach removes the client, releasing any control it holds, in one step:
+// no grant can land between the two, so a detached client never controls
+// the session. It never stops the session's program.
 func (c *Client) Detach() {
-	c.Release()
 	s := c.s
 	s.mu.Lock()
-	if !c.gone {
+	held := c.releaseLocked()
+	first := !c.gone
+	if first {
 		c.gone = true
 		delete(s.viewers, c)
 	}
 	s.mu.Unlock()
-	s.host.record(AuditRecord{Operation: newID(), Action: "detach", Phase: "outcome", Principal: c.Principal, Session: s.ID, Outcome: "ok"})
+	if held {
+		s.host.record(AuditRecord{Operation: newID(), Action: "release", Phase: "outcome", Principal: c.Principal, Session: s.ID, Outcome: "ok"})
+	}
+	if first {
+		s.host.record(AuditRecord{Operation: newID(), Action: "detach", Phase: "outcome", Principal: c.Principal, Session: s.ID, Outcome: "ok"})
+	}
 }

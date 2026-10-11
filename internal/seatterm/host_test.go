@@ -324,3 +324,83 @@ func TestAnExitedSessionGrantsNothing(t *testing.T) {
 		t.Fatal("the exit wasn't journaled")
 	}
 }
+
+// Detaching revokes control and removes the client in one step: a detached
+// client controls nothing and queues nothing, whatever it held, and the
+// program keeps running (ZEOAPP's review of 6b4691ca, SOW 184).
+func TestADetachedClientControlsNothing(t *testing.T) {
+	h, _ := newHost(t)
+	s, _, err := h.Create("op-8", "operator", sh("sleep 30"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	c, _, _ := s.Attach("operator")
+	if _, err := c.Control(false, "test"); err != nil {
+		t.Fatal(err)
+	}
+	c.Detach()
+	if _, err := c.Control(false, "again"); err == nil {
+		t.Fatal("a detached client regained control")
+	}
+	if c.Input([]byte("x")) != ErrNotController || c.Resize(90, 30) != ErrNotController {
+		t.Fatal("a detached client queued input or a resize")
+	}
+	if in := s.Info(); in.Controller != "" || !in.Running {
+		t.Fatalf("state after detach: %+v", in)
+	}
+}
+
+// Detach racing Control on the same client never leaves the client in
+// control once both have returned.
+func TestDetachRacingControlNeverLeavesADetachedController(t *testing.T) {
+	h, _ := newHost(t)
+	s, _, err := h.Create("op-9", "operator", sh("sleep 60"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	for i := 0; i < 300; i++ {
+		principal := "client-" + strconv.Itoa(i)
+		c, _, err := s.Attach(principal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); c.Control(false, "race") }()
+		go func() { defer wg.Done(); c.Detach() }()
+		wg.Wait()
+		if in := s.Info(); in.Controller == principal {
+			t.Fatalf("round %d: a detached client holds control", i)
+		}
+		if c.Input([]byte("x")) == nil {
+			t.Fatalf("round %d: a detached client queued input", i)
+		}
+	}
+}
+
+// Queued is not written: the outcomes say what reached the program, and
+// writes refused for a revoked grant are counted, never resent.
+func TestWriteOutcomesAreCounted(t *testing.T) {
+	h, _ := newHost(t)
+	s, _, err := h.Create("op-10", "operator", sh("stty -echo; while read l; do printf 'got:%s\\n' \"$l\"; done"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	c, snap, _ := s.Attach("operator")
+	defer c.Detach()
+	if _, err := c.Control(false, "test"); err != nil {
+		t.Fatal(err)
+	}
+	c.Input([]byte("one\n"))
+	c.Resize(100, 30)
+	collect(t, c, snap.Data, "got:one")
+	for d := time.Now().Add(5 * time.Second); time.Now().Before(d); time.Sleep(20 * time.Millisecond) {
+		if o := c.Outcomes(); o.Written == 2 {
+			return
+		}
+	}
+	t.Fatalf("outcomes %+v", c.Outcomes())
+}

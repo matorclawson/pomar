@@ -17,11 +17,14 @@ func setSize(f *os.File, cols, rows uint16) error {
 // resize sets the window size through a brief reopen of the terminal side.
 // The parent never keeps that side open: if it did, the controlling side
 // would never see the end of the terminal's last process.
-func resize(tty string, cols, rows uint16) {
+func resize(tty string, cols, rows uint16) { resizeTTY(tty, cols, rows) }
+
+// resizeTTY is resize, reporting its outcome.
+func resizeTTY(tty string, cols, rows uint16) error {
 	f, err := os.OpenFile(tty, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
-		return
+		return err
 	}
-	setSize(f, cols, rows)
-	f.Close()
+	defer f.Close()
+	return setSize(f, cols, rows)
 }
