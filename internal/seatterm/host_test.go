@@ -616,5 +616,23 @@ func TestASlowJournalHoldsNothingUp(t *testing.T) {
 	if time.Since(start) > 100*time.Millisecond {
 		t.Fatalf("reading the session waited %v on the journal", time.Since(start))
 	}
+	// A create journaling slowly holds up neither listing nor its own retry.
+	go h.Create("op-16-b", "operator", sh("sleep 30"))
+	time.Sleep(100 * time.Millisecond)
+	start = time.Now()
+	h.List()
+	if _, _, err := h.Create("op-16-b", "operator", sh("sleep 30")); err != ErrCreating {
+		t.Fatalf("a retry while the first create journals: %v", err)
+	}
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("listing waited %v on a create's journal", time.Since(start))
+	}
 	delay.Store(false)
+	for d := time.Now().Add(5 * time.Second); time.Now().Before(d); time.Sleep(20 * time.Millisecond) {
+		if s2, created, err := h.Create("op-16-b", "operator", sh("sleep 30")); err == nil && !created {
+			s2.cmd.Process.Kill()
+			return
+		}
+	}
+	t.Fatal("the slow create never finished")
 }

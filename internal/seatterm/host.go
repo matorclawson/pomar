@@ -29,6 +29,7 @@ type SessionHost struct {
 	sessions map[string]*TermSession
 	byOp     map[opKey]created // creations, by principal and operation ID
 	opOrder  []opKey
+	starting int // sessions reserved and starting, counted against the bound
 	audit    func(AuditRecord) error
 	now      func() time.Time
 	// fenceBound and writeHook are fixed when the host is made; the tests
@@ -62,6 +63,7 @@ var (
 	ErrAudit              = errors.New("the audit record couldn't be written; nothing was granted")
 	ErrOperationConflict  = errors.New("this operation ID already created a session with a different spec")
 	ErrTerminateUncertain = errors.New("the program could not be confirmed stopped")
+	ErrCreating           = errors.New("this operation is still creating its session; ask again")
 )
 
 // AuditRecord is the metadata the host journals for every grant, revocation
@@ -90,7 +92,10 @@ type SessionSpec struct {
 var sessionWord = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // NewSessionHost returns a host that journals through audit, which must be
-// durable: a grant is refused when its intent can't be recorded.
+// durable: a grant is refused when its intent can't be recorded. The journal
+// is never called under a session's lock, but a journal that hangs does hold
+// up whatever is journaling: a create, an attach, a grant, and a session's
+// exit, whose Done closes only once its exit is journaled.
 func NewSessionHost(audit func(AuditRecord) error) *SessionHost {
 	return &SessionHost{sessions: map[string]*TermSession{}, byOp: map[opKey]created{}, audit: audit, now: time.Now, fenceBound: defaultFenceBound}
 }
@@ -120,19 +125,35 @@ func (h *SessionHost) Create(operation, principal string, spec SessionSpec) (*Te
 		return nil, false, errors.New("a session needs an operation ID, a principal, a name, a kind, its command and a bounded window size")
 	}
 	key, fp := opKey{principal, operation}, fingerprint(spec)
+	// The operation is reserved under the lock, and journaled and started
+	// outside it, so a slow journal or a slow start holds nothing else up.
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if e, ok := h.byOp[key]; ok {
-		if e.spec != fp {
+		h.mu.Unlock()
+		switch {
+		case e.spec != fp:
 			return nil, false, ErrOperationConflict
+		case e.s == nil:
+			return nil, false, ErrCreating
 		}
 		return e.s, false, nil
 	}
-	if len(h.sessions) >= MaxSessions { // live sessions only: an exited one leaves h.sessions
+	if len(h.sessions)+h.starting >= MaxSessions { // live sessions only: an exited one leaves h.sessions
+		h.mu.Unlock()
 		return nil, false, ErrTooMany
 	}
 	id := newID()
+	h.byOp[key] = created{spec: fp}
+	h.starting++
+	h.mu.Unlock()
+	abandon := func() {
+		h.mu.Lock()
+		delete(h.byOp, key)
+		h.starting--
+		h.mu.Unlock()
+	}
 	if err := h.record(AuditRecord{Operation: operation, Action: "create", Phase: "intent", Principal: principal, Session: id, Reason: spec.Kind}); err != nil {
+		abandon()
 		return nil, false, ErrAudit
 	}
 	s, err := startSession(h, id, spec)
@@ -142,12 +163,20 @@ func (h *SessionHost) Create(operation, principal string, spec SessionSpec) (*Te
 	}
 	h.record(AuditRecord{Operation: operation, Action: "create", Phase: "outcome", Principal: principal, Session: id, Outcome: outcome})
 	if err != nil {
+		abandon()
 		return nil, false, err
 	}
-	h.sessions[id] = s
+	h.mu.Lock()
+	h.starting--
+	// A program that has already exited never enters the live set: its own
+	// exit's forget may have run before this.
+	if s.Info().Running {
+		h.sessions[id] = s
+	}
 	h.byOp[key] = created{spec: fp, s: s}
 	h.opOrder = append(h.opOrder, key)
 	h.pruneOps()
+	h.mu.Unlock()
 	return s, true, nil
 }
 
@@ -169,7 +198,7 @@ func (h *SessionHost) pruneOps() {
 	for len(h.opOrder) > maxOps {
 		dropped := false
 		for i, k := range h.opOrder {
-			if e := h.byOp[k]; e.s == nil || !e.s.Info().Running {
+			if e := h.byOp[k]; e.s != nil && !e.s.Info().Running {
 				delete(h.byOp, k)
 				h.opOrder = append(h.opOrder[:i], h.opOrder[i+1:]...)
 				dropped = true
@@ -429,11 +458,11 @@ func (s *TermSession) writer() {
 		if w.data == nil {
 			err = resizeTTY(s.tty, w.cols, w.rows)
 			s.mu.Lock()
-			if err == nil {
+			if err == nil { // only an applied size changes the recorded one, and is announced
 				s.cols, s.rows = w.cols, w.rows
-			}
-			for c := range s.viewers {
-				c.notify(Event{Kind: EventState})
+				for c := range s.viewers {
+					c.notify(Event{Kind: EventState})
+				}
 			}
 			s.mu.Unlock()
 		} else {
