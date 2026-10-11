@@ -31,6 +31,10 @@ type SessionHost struct {
 	opOrder  []opKey
 	audit    func(AuditRecord) error
 	now      func() time.Time
+	// fenceBound and writeHook are fixed when the host is made; the tests
+	// shorten the one and set the other, before any session starts.
+	fenceBound time.Duration
+	writeHook  func()
 }
 
 // Bounds on a host, its sessions and their clients.
@@ -43,12 +47,9 @@ const (
 
 )
 
-// fenceBound bounds how long a take waits for the old controller's write
-// in flight to end. A variable only so the tests can shorten it.
-var fenceBound = 3 * time.Second
-
-// writeHook, when set by a test, runs as a write is marked in flight.
-var writeHook func()
+// defaultFenceBound bounds how long a take waits for the old controller's
+// write in flight to end.
+const defaultFenceBound = 3 * time.Second
 
 // Errors a client is refused with.
 var (
@@ -91,7 +92,7 @@ var sessionWord = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // NewSessionHost returns a host that journals through audit, which must be
 // durable: a grant is refused when its intent can't be recorded.
 func NewSessionHost(audit func(AuditRecord) error) *SessionHost {
-	return &SessionHost{sessions: map[string]*TermSession{}, byOp: map[opKey]created{}, audit: audit, now: time.Now}
+	return &SessionHost{sessions: map[string]*TermSession{}, byOp: map[opKey]created{}, audit: audit, now: time.Now, fenceBound: defaultFenceBound}
 }
 
 func newID() string {
@@ -215,7 +216,7 @@ func (h *SessionHost) Terminate(operation, principal, id string) error {
 		syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 		select {
 		case <-s.done:
-		case <-time.After(fenceBound):
+		case <-time.After(h.fenceBound):
 			outcome, err = "uncertain", ErrTerminateUncertain
 		}
 	}
@@ -411,9 +412,9 @@ func (s *TermSession) writer() {
 			// it sets its deadline under this same lock, so the cut can't
 			// be lost to this reset.
 			s.master.SetWriteDeadline(time.Time{})
-			if writeHook != nil {
+			if s.host.writeHook != nil {
 				s.mu.Unlock()
-				writeHook()
+				s.host.writeHook()
 				s.mu.Lock()
 			}
 		}
@@ -693,8 +694,8 @@ func (s *TermSession) waitFenceLocked(old uint64) bool {
 		return true
 	}
 	s.master.SetWriteDeadline(time.Now())
-	deadline := time.Now().Add(fenceBound)
-	timer := time.AfterFunc(fenceBound, func() {
+	deadline := time.Now().Add(s.host.fenceBound)
+	timer := time.AfterFunc(s.host.fenceBound, func() {
 		s.mu.Lock()
 		s.fence.Broadcast()
 		s.mu.Unlock()

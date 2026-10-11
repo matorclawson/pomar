@@ -215,7 +215,7 @@ func TestATakeoverFencesTheOldControllersQueuedInput(t *testing.T) {
 	if _, err := b.Control(true, "operator takeover"); err != nil {
 		t.Fatalf("takeover: %v", err)
 	}
-	if time.Since(start) > fenceBound+time.Second {
+	if time.Since(start) > defaultFenceBound+time.Second {
 		t.Fatal("the takeover wasn't bounded")
 	}
 	if a.Input([]byte("late")) != ErrNotController {
@@ -453,12 +453,10 @@ func TestATakeoverCutsAWriteToAProgramThatNeverReads(t *testing.T) {
 // bound, the take grants nothing and says so; the old controller stays
 // revoked.
 func TestATakeoverThatCantConfirmTheFenceGrantsNothing(t *testing.T) {
-	saved := fenceBound
-	fenceBound = 200 * time.Millisecond
-	release := make(chan struct{})
-	writeHook = func() { <-release }
-	defer func() { fenceBound, writeHook = saved, nil; close(release) }()
 	h, j := newHost(t)
+	release := make(chan struct{})
+	defer close(release)
+	h.fenceBound, h.writeHook = 200*time.Millisecond, func() { <-release }
 	s, _, err := h.Create("op-12", "operator", sh("sleep 30"))
 	if err != nil {
 		t.Fatal(err)
