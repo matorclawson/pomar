@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -291,8 +292,8 @@ func TestAClientThatFallsBehindIsResnapshotted(t *testing.T) {
 	}
 	select {
 	case e := <-c.Events():
-		if e.Offset < snap.To {
-			t.Fatalf("output from before the cut: %d < %d", e.Offset, snap.To)
+		if e.Offset != snap.To {
+			t.Fatalf("output after the cut starts at %d, not exactly at %d", e.Offset, snap.To)
 		}
 	case <-time.After(5 * time.Second):
 		// the program may have finished printing at the cut: that's fine
@@ -403,4 +404,219 @@ func TestWriteOutcomesAreCounted(t *testing.T) {
 		}
 	}
 	t.Fatalf("outcomes %+v", c.Outcomes())
+}
+
+// Against a program that never reads, a take still confirms the old
+// controller's write ended, by cutting it short; nothing of the old
+// controller's is in flight once control is granted.
+func TestATakeoverCutsAWriteToAProgramThatNeverReads(t *testing.T) {
+	h, _ := newHost(t)
+	s, _, err := h.Create("op-11", "operator", sh("stty raw -echo; exec sleep 600"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	time.Sleep(200 * time.Millisecond)
+	a, _, _ := s.Attach("seat")
+	defer a.Detach()
+	a.Control(false, "test")
+	for i := 0; i < 4; i++ {
+		a.Input(bytes.Repeat([]byte("."), MaxData))
+	}
+	for d := time.Now().Add(5 * time.Second); time.Now().Before(d); time.Sleep(10 * time.Millisecond) {
+		s.mu.Lock()
+		inflight := s.inflight
+		s.mu.Unlock()
+		if inflight != 0 {
+			break
+		}
+	}
+	b, _, _ := s.Attach("operator")
+	defer b.Detach()
+	start := time.Now()
+	epoch, err := b.Control(true, "takeover")
+	if err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("the takeover waited %v: the write in flight wasn't cut short", time.Since(start))
+	}
+	s.mu.Lock()
+	inflight := s.inflight
+	s.mu.Unlock()
+	if inflight != 0 && inflight < epoch {
+		t.Fatal("an old controller's write was still in flight when control was granted")
+	}
+}
+
+// When the old controller's write can't be confirmed ended within the
+// bound, the take grants nothing and says so; the old controller stays
+// revoked.
+func TestATakeoverThatCantConfirmTheFenceGrantsNothing(t *testing.T) {
+	saved := fenceBound
+	fenceBound = 200 * time.Millisecond
+	release := make(chan struct{})
+	writeHook = func() { <-release }
+	defer func() { fenceBound, writeHook = saved, nil; close(release) }()
+	h, j := newHost(t)
+	s, _, err := h.Create("op-12", "operator", sh("sleep 30"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	a, _, _ := s.Attach("seat")
+	defer a.Detach()
+	a.Control(false, "test")
+	a.Input([]byte("x"))
+	for d := time.Now().Add(5 * time.Second); time.Now().Before(d); time.Sleep(10 * time.Millisecond) {
+		s.mu.Lock()
+		inflight := s.inflight
+		s.mu.Unlock()
+		if inflight != 0 {
+			break
+		}
+	}
+	b, _, _ := s.Attach("operator")
+	defer b.Detach()
+	if _, err := b.Control(true, "takeover"); err != ErrFenceUncertain {
+		t.Fatalf("an unconfirmed fence: %v", err)
+	}
+	if in := s.Info(); in.Controller != "" {
+		t.Fatalf("control was granted without a confirmed fence: %+v", in)
+	}
+	if a.Input([]byte("y")) != ErrNotController {
+		t.Fatal("the old controller wasn't revoked")
+	}
+	if !j.has("take", "outcome", "uncertain") {
+		t.Fatal("the uncertain outcome wasn't journaled")
+	}
+}
+
+// An operation ID belongs to the principal that issued it, and a retry must
+// ask for the same session.
+func TestOperationsAreScopedToTheirPrincipal(t *testing.T) {
+	h, _ := newHost(t)
+	alice, _, err := h.Create("op-13", "alice", sh("sleep 30"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer alice.cmd.Process.Kill()
+	mallory, created, err := h.Create("op-13", "mallory", sh("sleep 30"))
+	if err != nil || !created || mallory == alice {
+		t.Fatalf("another principal's operation ID returned alice's session: %v %v", created, err)
+	}
+	defer mallory.cmd.Process.Kill()
+	if _, _, err := h.Create("op-13", "alice", sh("sleep 31")); err != ErrOperationConflict {
+		t.Fatalf("a retry with a different spec: %v", err)
+	}
+}
+
+// Nothing of the host's environment reaches a session its spec doesn't
+// name.
+func TestASessionGetsNoneOfTheHostsEnvironment(t *testing.T) {
+	t.Setenv("POMAR_SEATTERM_HOST_ONLY", "must-not-leak")
+	h, _ := newHost(t)
+	s, _, err := h.Create("op-14", "operator", SessionSpec{Name: "shell", Kind: "shell",
+		Command: Command{Path: "/usr/bin/env", UID: -1, GID: -1}, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-s.Done()
+	c, snap, _ := s.Attach("operator")
+	defer c.Detach()
+	if bytes.Contains(snap.Data, []byte("must-not-leak")) {
+		t.Fatal("the host's environment reached the session")
+	}
+}
+
+// The session bound counts live sessions: exited ones leave it, and a
+// retry of an exited session's operation still returns it.
+func TestExitedSessionsLeaveTheLiveBound(t *testing.T) {
+	h, _ := newHost(t)
+	for i := 0; i < MaxSessions+4; i++ {
+		s, _, err := h.Create("op-exit-"+strconv.Itoa(i), "operator", sh("exit 0"))
+		if err != nil {
+			t.Fatalf("session %d: %v", i, err)
+		}
+		<-s.Done()
+		for d := time.Now().Add(2 * time.Second); time.Now().Before(d) && len(h.List()) > 0; time.Sleep(5 * time.Millisecond) {
+		}
+	}
+	again, created, err := h.Create("op-exit-0", "operator", sh("exit 0"))
+	if err != nil || created || again.Info().Running {
+		t.Fatalf("a retry of an exited session's operation: %v %v", created, err)
+	}
+	var live []*TermSession
+	for i := 0; i < MaxSessions; i++ {
+		s, _, err := h.Create("op-live-"+strconv.Itoa(i), "operator", sh("sleep 30"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		live = append(live, s)
+	}
+	defer func() {
+		for _, s := range live {
+			s.cmd.Process.Kill()
+		}
+	}()
+	if _, _, err := h.Create("op-live-over", "operator", sh("sleep 30")); err != ErrTooMany {
+		t.Fatalf("one more live session than the bound: %v", err)
+	}
+}
+
+// Terminate stops the program and journals it; clients' event channels
+// close when the program has exited, and on detach.
+func TestTerminateStopsTheProgramAndClosesClients(t *testing.T) {
+	h, j := newHost(t)
+	s, _, err := h.Create("op-15", "operator", sh("sleep 60"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _, _ := s.Attach("viewer")
+	if err := h.Terminate("op-15-stop", "operator", s.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the program wasn't stopped")
+	}
+	for range c.Events() {
+	}
+	if !j.has("terminate", "outcome", "ok") {
+		t.Fatal("terminate wasn't journaled")
+	}
+	d, _, _ := s.Attach("late")
+	d.Detach()
+	for range d.Events() {
+	}
+}
+
+// A slow journal never holds the session's lock: the session's state stays
+// readable, and its output keeps flowing, while a grant is being journaled.
+func TestASlowJournalHoldsNothingUp(t *testing.T) {
+	slow := &journal{}
+	var delay atomic.Bool
+	h := NewSessionHost(func(r AuditRecord) error {
+		if delay.Load() {
+			time.Sleep(500 * time.Millisecond)
+		}
+		return slow.add(r)
+	})
+	s, _, err := h.Create("op-16", "operator", sh("sleep 30"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	c, _, _ := s.Attach("operator")
+	defer c.Detach()
+	delay.Store(true)
+	go c.Control(false, "slow")
+	time.Sleep(700 * time.Millisecond) // past the intent's record, inside the outcome's
+	start := time.Now()
+	s.Info()
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("reading the session waited %v on the journal", time.Since(start))
+	}
+	delay.Store(false)
 }

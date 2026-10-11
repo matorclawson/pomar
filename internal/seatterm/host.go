@@ -2,6 +2,7 @@ package seatterm
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 // SessionHost holds a seat's terminal sessions in its guest, in place of a
@@ -25,7 +27,8 @@ import (
 type SessionHost struct {
 	mu       sync.Mutex
 	sessions map[string]*TermSession
-	byOp     map[string]string // creation operation ID -> session ID
+	byOp     map[opKey]created // creations, by principal and operation ID
+	opOrder  []opKey
 	audit    func(AuditRecord) error
 	now      func() time.Time
 }
@@ -37,18 +40,27 @@ const (
 	RetainBytes = 1 << 20 // a session's retained output
 	viewerQueue = 256     // output chunks queued for one client
 	inputQueue  = 64      // input and resize writes queued for the PTY
-	fenceBound  = 3 * time.Second
+
 )
+
+// fenceBound bounds how long a take waits for the old controller's write
+// in flight to end. A variable only so the tests can shorten it.
+var fenceBound = 3 * time.Second
+
+// writeHook, when set by a test, runs as a write is marked in flight.
+var writeHook func()
 
 // Errors a client is refused with.
 var (
-	ErrNotController  = errors.New("this client doesn't hold control of the session")
-	ErrControlled     = errors.New("another client controls the session; take control explicitly")
-	ErrInputBusy      = errors.New("the session's input queue is full; nothing was queued")
-	ErrSessionExited  = errors.New("the session's program has exited")
-	ErrTooMany        = errors.New("the bound on sessions or clients is reached")
-	ErrFenceUncertain = errors.New("the previous controller's write couldn't be confirmed fenced; control was not granted")
-	ErrAudit          = errors.New("the audit record couldn't be written; nothing was granted")
+	ErrNotController      = errors.New("this client doesn't hold control of the session")
+	ErrControlled         = errors.New("another client controls the session; take control explicitly")
+	ErrInputBusy          = errors.New("the session's input queue is full; nothing was queued")
+	ErrSessionExited      = errors.New("the session's program has exited")
+	ErrTooMany            = errors.New("the bound on sessions or clients is reached")
+	ErrFenceUncertain     = errors.New("the previous controller's write couldn't be confirmed fenced; control was not granted")
+	ErrAudit              = errors.New("the audit record couldn't be written; nothing was granted")
+	ErrOperationConflict  = errors.New("this operation ID already created a session with a different spec")
+	ErrTerminateUncertain = errors.New("the program could not be confirmed stopped")
 )
 
 // AuditRecord is the metadata the host journals for every grant, revocation
@@ -79,7 +91,7 @@ var sessionWord = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // NewSessionHost returns a host that journals through audit, which must be
 // durable: a grant is refused when its intent can't be recorded.
 func NewSessionHost(audit func(AuditRecord) error) *SessionHost {
-	return &SessionHost{sessions: map[string]*TermSession{}, byOp: map[string]string{}, audit: audit, now: time.Now}
+	return &SessionHost{sessions: map[string]*TermSession{}, byOp: map[opKey]created{}, audit: audit, now: time.Now}
 }
 
 func newID() string {
@@ -98,19 +110,24 @@ func (h *SessionHost) record(r AuditRecord) error {
 	return h.audit(r)
 }
 
-// Create starts a session, once per operation ID: a retry with the same ID
-// returns the session it made, and never starts a second program.
+// Create starts a session, once per principal and operation ID: a retry
+// with the same pair returns the session it made, and never starts a
+// second program; a retry asking for a different spec is refused.
 func (h *SessionHost) Create(operation, principal string, spec SessionSpec) (*TermSession, bool, error) {
-	if operation == "" || !sessionWord.MatchString(spec.Name) || !sessionWord.MatchString(spec.Kind) || spec.Command.Path == "" ||
+	if operation == "" || principal == "" || !sessionWord.MatchString(spec.Name) || !sessionWord.MatchString(spec.Kind) || spec.Command.Path == "" ||
 		spec.Cols < 1 || spec.Cols > MaxCols || spec.Rows < 1 || spec.Rows > MaxRows {
-		return nil, false, errors.New("a session needs an operation ID, a name, a kind, its command and a bounded window size")
+		return nil, false, errors.New("a session needs an operation ID, a principal, a name, a kind, its command and a bounded window size")
 	}
+	key, fp := opKey{principal, operation}, fingerprint(spec)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if id, ok := h.byOp[operation]; ok {
-		return h.sessions[id], false, nil
+	if e, ok := h.byOp[key]; ok {
+		if e.spec != fp {
+			return nil, false, ErrOperationConflict
+		}
+		return e.s, false, nil
 	}
-	if len(h.sessions) >= MaxSessions {
+	if len(h.sessions) >= MaxSessions { // live sessions only: an exited one leaves h.sessions
 		return nil, false, ErrTooMany
 	}
 	id := newID()
@@ -126,8 +143,84 @@ func (h *SessionHost) Create(operation, principal string, spec SessionSpec) (*Te
 	if err != nil {
 		return nil, false, err
 	}
-	h.sessions[id], h.byOp[operation] = s, id
+	h.sessions[id] = s
+	h.byOp[key] = created{spec: fp, s: s}
+	h.opOrder = append(h.opOrder, key)
+	h.pruneOps()
 	return s, true, nil
+}
+
+// opKey scopes an operation ID to the principal that issued it, so one
+// principal's ID never returns another's session.
+type opKey struct{ principal, operation string }
+
+type created struct {
+	spec string // the spec's fingerprint: a retry must ask for the same thing
+	s    *TermSession
+}
+
+// maxOps bounds the remembered creations. A live session's creation is
+// always kept; an exited one's is dropped oldest first beyond the bound,
+// after which a retry of that operation would start a new session.
+const maxOps = 256
+
+func (h *SessionHost) pruneOps() {
+	for len(h.opOrder) > maxOps {
+		dropped := false
+		for i, k := range h.opOrder {
+			if e := h.byOp[k]; e.s == nil || !e.s.Info().Running {
+				delete(h.byOp, k)
+				h.opOrder = append(h.opOrder[:i], h.opOrder[i+1:]...)
+				dropped = true
+				break
+			}
+		}
+		if !dropped {
+			return
+		}
+	}
+}
+
+func fingerprint(s SessionSpec) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%q\x00%q\x00%q\x00%q\x00%q\x00%q\x00%d\x00%d\x00%d\x00%d",
+		s.Name, s.Kind, s.Command.Path, s.Command.Args, s.Command.Env, s.Command.Dir, s.Command.UID, s.Command.GID, s.Cols, s.Rows)))
+	return hex.EncodeToString(sum[:])
+}
+
+// forget removes an exited session from the live set. Its creation stays
+// remembered, so a retry of the operation returns it, exited.
+func (h *SessionHost) forget(id string) {
+	h.mu.Lock()
+	delete(h.sessions, id)
+	h.mu.Unlock()
+}
+
+// Terminate stops a session's program: a hangup to its process group, then
+// a kill if it is still running after the grace period. Viewing or
+// controlling a session grants no terminate: the caller authorises it. It
+// returns once the program has exited, or ErrTerminateUncertain.
+func (h *SessionHost) Terminate(operation, principal, id string) error {
+	s, ok := h.Session(id)
+	if !ok {
+		return errors.New("no live session with that ID")
+	}
+	if err := h.record(AuditRecord{Operation: operation, Action: "terminate", Phase: "intent", Principal: principal, Session: id}); err != nil {
+		return ErrAudit
+	}
+	outcome, err := "ok", error(nil)
+	syscall.Kill(-s.cmd.Process.Pid, syscall.SIGHUP)
+	select {
+	case <-s.done:
+	case <-time.After(3 * time.Second):
+		syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case <-s.done:
+		case <-time.After(fenceBound):
+			outcome, err = "uncertain", ErrTerminateUncertain
+		}
+	}
+	h.record(AuditRecord{Operation: operation, Action: "terminate", Phase: "outcome", Principal: principal, Session: id, Outcome: outcome})
+	return err
 }
 
 // Session returns a session by its ID.
@@ -186,7 +279,7 @@ type TermSession struct {
 
 	mu         sync.Mutex
 	fence      *sync.Cond // signalled when an in-flight write ends
-	log        []byte     // retained output, the bytes [base, end)
+	log        ring       // retained output, the bytes [base, end)
 	base, end  uint64
 	exited     bool
 	exitCode   int
@@ -222,7 +315,9 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	}
 	c := spec.Command
 	cmd := exec.Command(c.Path, c.Args...)
-	cmd.Env, cmd.Dir = c.Env, c.Dir
+	// A nil environment is empty, never the host's own: nothing of the
+	// host reaches a session that its spec doesn't name.
+	cmd.Env, cmd.Dir = append([]string{}, c.Env...), c.Dir
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
 	if c.UID >= 0 && c.GID >= 0 {
@@ -269,10 +364,12 @@ func (s *TermSession) pump() {
 	s.epoch++ // nothing more is written to a terminal without a program
 	for c := range s.viewers {
 		c.notify(Event{Kind: EventState})
+		c.closeEventsLocked() // the output is drained: nothing more will come
 	}
 	s.mu.Unlock()
 	close(s.writes)
 	s.master.Close()
+	s.host.forget(s.ID) // an exited session no longer counts against the live bound
 	s.host.record(AuditRecord{Operation: newID(), Action: "exit", Phase: "outcome", Session: s.ID, Outcome: "ok", Reason: fmt.Sprintf("exit %d", code)})
 	close(s.done) // after the exit is journaled, so whoever sees Done finds it
 }
@@ -284,12 +381,8 @@ func (s *TermSession) output(b []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	off := s.end
-	s.log = append(s.log, b...)
+	s.base += uint64(s.log.write(b))
 	s.end += uint64(len(b))
-	if over := len(s.log) - RetainBytes; over > 0 {
-		s.log = append([]byte(nil), s.log[over:]...)
-		s.base += uint64(over)
-	}
 	s.lastOutput = s.host.now()
 	for c := range s.viewers {
 		if c.behind {
@@ -298,7 +391,7 @@ func (s *TermSession) output(b []byte) {
 		select {
 		case c.events <- Event{Kind: EventOutput, Offset: off, Data: append([]byte(nil), b...)}:
 		default:
-			c.behind = true
+			c.behind, c.gapAt = true, off
 			c.notify(Event{Kind: EventGap, Offset: off})
 		}
 	}
@@ -318,6 +411,11 @@ func (s *TermSession) writer() {
 			// it sets its deadline under this same lock, so the cut can't
 			// be lost to this reset.
 			s.master.SetWriteDeadline(time.Time{})
+			if writeHook != nil {
+				s.mu.Unlock()
+				writeHook()
+				s.mu.Lock()
+			}
 		}
 		if !ok {
 			w.from.outcomes.Refused++ // a revoked or stale controller's write never lands
@@ -413,7 +511,7 @@ type Snapshot struct {
 
 func (s *TermSession) snapshotLocked() Snapshot {
 	return Snapshot{Kind: "replay", From: s.base, To: s.end, Complete: s.base == 0, Cols: s.cols, Rows: s.rows,
-		Data: append([]byte(nil), s.log...), Generation: s.ID}
+		Data: s.log.bytes(), Generation: s.ID}
 }
 
 // Attach adds a viewing client and returns it with its snapshot. Viewing
@@ -423,16 +521,23 @@ func (s *TermSession) Attach(principal string) (*Client, Snapshot, error) {
 	if err := s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "intent", Principal: principal, Session: s.ID}); err != nil {
 		return nil, Snapshot{}, ErrAudit
 	}
+	// The outcome is journaled after the lock is released: a slow journal
+	// never holds up the PTY's reader, a revocation or another client.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(s.viewers) >= MaxViewers {
+		s.mu.Unlock()
 		s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "refused", Reason: "viewer bound"})
 		return nil, Snapshot{}, ErrTooMany
 	}
 	c := &Client{Principal: principal, s: s, events: make(chan Event, viewerQueue), signal: make(chan struct{}, 1)}
 	s.viewers[c] = struct{}{}
+	if s.exited {
+		c.closeEventsLocked() // nothing will come from a program that has exited
+	}
+	snap := s.snapshotLocked()
+	s.mu.Unlock()
 	s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "ok"})
-	return c, s.snapshotLocked(), nil
+	return c, snap, nil
 }
 
 // EventKind names a client event.
@@ -458,6 +563,8 @@ type Client struct {
 	events    chan Event
 	signal    chan struct{} // gap and state notices, which never queue behind output
 	behind    bool
+	gapAt     uint64 // the offset of the first output the client missed
+	closed    bool   // its Events channel is closed
 	gone      bool
 	epoch     uint64 // the grant epoch while this client controls
 	outcomes  Outcomes
@@ -491,7 +598,10 @@ func (c *Client) Resnapshot() Snapshot {
 drain:
 	for {
 		select {
-		case <-c.events:
+		case _, ok := <-c.events:
+			if !ok {
+				break drain // closed: the session ended or the client left
+			}
 		default:
 			break drain
 		}
@@ -504,35 +614,40 @@ drain:
 // controls the session. With take true the current controller is revoked
 // first, and control is granted only once that controller's write in
 // flight, if any, is confirmed ended; its queued writes never land. The
-// grant's intent is journaled before anything changes.
+// grant's intent is journaled before anything changes, and its outcome after
+// the session's lock is released. A write the take cuts short may already
+// have been partly delivered: Outcomes counts it as partial, and nothing of
+// it is resent.
 func (c *Client) Control(take bool, reason string) (uint64, error) {
 	s := c.s
 	action := "grant"
 	if take {
 		action = "take"
 	}
+	reason = boundReason(reason)
 	op := newID()
 	if err := s.host.record(AuditRecord{Operation: op, Action: action, Phase: "intent", Principal: c.Principal, Session: s.ID, Reason: reason}); err != nil {
 		return 0, ErrAudit
 	}
-	outcome := func(result string, epoch uint64, why string) {
-		s.host.record(AuditRecord{Operation: op, Action: action, Phase: "outcome", Principal: c.Principal, Session: s.ID, Epoch: epoch, Outcome: result, Reason: why})
-	}
+	epoch, result, why, err := c.control(take)
+	// journaled after the lock is released, as for Attach
+	s.host.record(AuditRecord{Operation: op, Action: action, Phase: "outcome", Principal: c.Principal, Session: s.ID, Epoch: epoch, Outcome: result, Reason: why})
+	return epoch, err
+}
+
+func (c *Client) control(take bool) (uint64, string, string, error) {
+	s := c.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
 	case c.gone:
-		outcome("refused", 0, "detached")
-		return 0, ErrNotController
+		return 0, "refused", "detached", ErrNotController
 	case s.exited:
-		outcome("refused", 0, "exited")
-		return 0, ErrSessionExited
+		return 0, "refused", "exited", ErrSessionExited
 	case s.controller == c:
-		outcome("ok", s.epoch, "already controls")
-		return s.epoch, nil
+		return s.epoch, "ok", "already controls", nil
 	case s.controller != nil && !take:
-		outcome("refused", 0, "controlled")
-		return 0, ErrControlled
+		return 0, "refused", "controlled", ErrControlled
 	}
 	old := s.epoch
 	s.epoch++ // from here, nothing queued under the old epoch reaches the PTY
@@ -542,22 +657,33 @@ func (c *Client) Control(take bool, reason string) (uint64, error) {
 		prev.notify(Event{Kind: EventState})
 	}
 	if !s.waitFenceLocked(old) {
-		outcome("uncertain", 0, "previous write not confirmed ended")
-		return 0, ErrFenceUncertain
+		return 0, "uncertain", "previous write not confirmed ended", ErrFenceUncertain
 	}
 	// The wait released the lock: anyone who took control meanwhile, or an
 	// exit, wins, and this request is refused rather than overriding it.
 	if s.controller != nil || s.exited || c.gone {
-		outcome("refused", 0, "changed while fencing")
-		return 0, ErrControlled
+		return 0, "refused", "changed while fencing", ErrControlled
 	}
 	s.epoch++
 	s.controller, c.epoch = c, s.epoch
 	for v := range s.viewers {
 		v.notify(Event{Kind: EventState})
 	}
-	outcome("ok", s.epoch, "")
-	return s.epoch, nil
+	return s.epoch, "ok", "", nil
+}
+
+// boundReason keeps a journaled reason short and printable.
+func boundReason(r string) string {
+	out := make([]rune, 0, len(r))
+	for _, c := range r {
+		if len(out) == 200 {
+			break
+		}
+		if unicode.IsPrint(c) {
+			out = append(out, c)
+		}
+	}
+	return string(out)
 }
 
 // waitFenceLocked waits, bounded, for a write made under epoch old to end,
@@ -657,6 +783,7 @@ func (c *Client) Detach() {
 	if first {
 		c.gone = true
 		delete(s.viewers, c)
+		c.closeEventsLocked()
 	}
 	s.mu.Unlock()
 	if held {
@@ -664,5 +791,64 @@ func (c *Client) Detach() {
 	}
 	if first {
 		s.host.record(AuditRecord{Operation: newID(), Action: "detach", Phase: "outcome", Principal: c.Principal, Session: s.ID, Outcome: "ok"})
+	}
+}
+
+// ring is a session's retained output: the last RetainBytes bytes, kept
+// without copying the whole buffer on every write.
+type ring struct {
+	buf      []byte
+	start, n int
+}
+
+// write appends b and returns how many of the oldest bytes it dropped.
+func (r *ring) write(b []byte) int {
+	if r.buf == nil {
+		r.buf = make([]byte, RetainBytes)
+	}
+	c := len(r.buf)
+	if len(b) >= c {
+		dropped := r.n + len(b) - c
+		copy(r.buf, b[len(b)-c:])
+		r.start, r.n = 0, c
+		return dropped
+	}
+	e := (r.start + r.n) % c
+	k := copy(r.buf[e:], b)
+	copy(r.buf, b[k:])
+	r.n += len(b)
+	dropped := 0
+	if r.n > c {
+		dropped = r.n - c
+		r.start, r.n = (r.start+dropped)%c, c
+	}
+	return dropped
+}
+
+// bytes returns the retained bytes, oldest first.
+func (r *ring) bytes() []byte {
+	out := make([]byte, r.n)
+	if r.n == 0 {
+		return out
+	}
+	k := copy(out, r.buf[r.start:min(r.start+r.n, len(r.buf))])
+	copy(out[k:], r.buf[:r.n-k])
+	return out
+}
+
+// Gap reports whether the client fell behind, and the offset of the first
+// output it missed.
+func (c *Client) Gap() (bool, uint64) {
+	c.s.mu.Lock()
+	defer c.s.mu.Unlock()
+	return c.behind, c.gapAt
+}
+
+// closeEventsLocked closes the client's Events channel, once: on detach,
+// and when the session's program has exited and its output is drained.
+func (c *Client) closeEventsLocked() {
+	if !c.closed {
+		c.closed = true
+		close(c.events)
 	}
 }
