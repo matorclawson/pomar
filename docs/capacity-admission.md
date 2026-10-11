@@ -59,3 +59,26 @@ claims; multi-host placement must bind each independently qualified host and
 policy. Increasing a protected budget or class ceiling requires the host's
 reviewed configuration and installation procedure plus qualification; this
 read or a source PR does not change the installed service.
+
+## Host-independent fleet boundary
+
+The fleet goal is one submission interface: callers supply the job, class and
+required execution capabilities, without choosing a physical host or passing
+its account, socket or workspace paths. Each enrolled Pomar host contributes
+its own capacity. Placement selects a compatible host with current room, and
+that host atomically checks and reserves the claim. Fitting jobs can run on the
+same host or on different hosts; there is no fleet-wide execution lock.
+
+Tailnet connectivity supplies reachability. Host enrollment binds the manager's
+identity, authorized transport, executor capabilities and capacity policy.
+Discovering a reachable machine does not by itself establish these bindings.
+The pool must support additional enrolled hosts without hard-coded host names.
+When no eligible host fits, a wait names the hosts considered and their actual
+limiting resources. A lost dispatch response retains the original placement;
+it does not authorize a second attempt on another host.
+
+This is the planned fleet contract. The current CLI and capacity response are
+local-manager interfaces, and do not yet implement discovery, remote placement
+or a pooled wait export. In particular, the legacy refusal has no host identity.
+Local accounting is a prerequisite for the fleet, not evidence that distributed
+placement is already available.
