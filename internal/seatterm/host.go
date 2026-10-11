@@ -273,8 +273,8 @@ func (s *TermSession) pump() {
 	s.mu.Unlock()
 	close(s.writes)
 	s.master.Close()
-	close(s.done)
 	s.host.record(AuditRecord{Operation: newID(), Action: "exit", Phase: "outcome", Session: s.ID, Outcome: "ok", Reason: fmt.Sprintf("exit %d", code)})
+	close(s.done) // after the exit is journaled, so whoever sees Done finds it
 }
 
 // output retains b and hands it to every client in order. A client whose
