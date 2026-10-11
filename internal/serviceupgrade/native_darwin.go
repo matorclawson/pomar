@@ -159,7 +159,7 @@ func (n *Native) targetSignature(ctx context.Context, path, name string) error {
 	} else {
 		id := "ac.zeo.pomar." + name
 		requirement := fmt.Sprintf(`identifier "%s" and certificate leaf = H"%s"`, id, n.M.CertificateSHA1)
-		if _, err := command(ctx, nil, "/usr/bin/codesign", "--verify", "--strict", "-R", requirement, path); err != nil {
+		if _, err := command(ctx, nil, "/usr/bin/codesign", "--verify", "--strict", "-R", inlineRequirement(requirement), path); err != nil {
 			return fmt.Errorf("internally signed %s candidate required", name)
 		}
 	}
@@ -651,7 +651,7 @@ func (n *Native) Archive(ctx context.Context, before Observation) (string, error
 	return path, nil
 }
 func (n *Native) Save(j Journal) error {
-	if n.lock == nil || j.Archive != n.ArchivePath || j.ManifestSHA != n.SHA {
+	if n.lock == nil || j.Archive != n.ArchivePath || j.ManifestSHA != n.SHA || j.SigningPolicy != n.M.SigningPolicy {
 		return fmt.Errorf("journal archive binding refused")
 	}
 	if err := privateRoot(n.ArchivePath); err != nil {
@@ -684,24 +684,10 @@ func (n *Native) Fence(ctx context.Context) error {
 	return nil
 }
 func (n *Native) closeControl() error {
-	if err := directory(runDir, n.M.OwnerUID, 0); err != nil {
-		return err
-	}
-	if err := os.Chmod(runDir, 0700); err != nil {
-		return err
-	}
-	st, err := os.Lstat(ctlSocket)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	meta, ok := st.Sys().(*syscall.Stat_t)
-	if !ok || st.Mode()&os.ModeSocket == 0 || meta.Uid != n.M.OwnerUID {
-		return fmt.Errorf("control socket custody differs")
-	}
-	return os.Chmod(ctlSocket, 0600)
+	// The manager owns runDir and can replace ctl.sock. Never chmod a child
+	// pathname here: chmod follows a symlink, including one aimed outside the
+	// service. Fence only the fixed directory through its no-follow descriptor.
+	return controlDirectoryMode(runDir, n.M.OwnerUID, 0700)
 }
 func (n *Native) noWriters(ctx context.Context, pid int) error {
 	b, err := command(ctx, nil, "/bin/ps", "-axww", "-o", "pid=,ppid=,uid=,comm=")
@@ -819,12 +805,12 @@ func targetRecord(raw []byte, m Manifest, archive string) ([]byte, error) {
 	var lines []string
 	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		k, _, _ := strings.Cut(line, "=")
-		if strings.HasPrefix(k, "prev_") || k == "pin" || k == "retained_host_pin" || k == "check_ok" || k == "reboot_ok" || k == "concurrency" || k == "validation" || k == "upgraded" || k == "sha256_pomar" || k == "sha256_pomar-host" || strings.HasPrefix(k, "cdhash_") {
+		if strings.HasPrefix(k, "prev_") || k == "pin" || k == "retained_host_pin" || k == "signing_policy" || k == "check_ok" || k == "reboot_ok" || k == "concurrency" || k == "validation" || k == "upgraded" || k == "sha256_pomar" || k == "sha256_pomar-host" || strings.HasPrefix(k, "cdhash_") {
 			continue
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "pin="+m.Target.Pin, "retained_host_pin="+m.Target.HostPin, "sha256_pomar="+m.Target.Binaries["pomar"].SHA256, "sha256_pomar-host="+m.Target.Binaries["pomar-host"].SHA256, "prev_pin="+r["pin"], "prev_archive="+archive, "validation=product binary replacement; prior qualification invalidated; independent host qualification required")
+	lines = append(lines, "pin="+m.Target.Pin, "retained_host_pin="+m.Target.HostPin, "signing_policy="+m.SigningPolicy, "sha256_pomar="+m.Target.Binaries["pomar"].SHA256, "sha256_pomar-host="+m.Target.Binaries["pomar-host"].SHA256, "prev_pin="+r["pin"], "prev_archive="+archive, "validation=product binary replacement; prior qualification invalidated; independent host qualification required")
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 func invalidatedRecord(raw []byte) ([]byte, error) {
@@ -964,10 +950,9 @@ func (n *Native) Verify(ctx context.Context, before Observation) (err error) {
 	}
 	// Allow actual caller GET readbacks under the verified global drain. A
 	// failed verification recloses the directory; starts remain drain-refused.
-	if err = os.Chmod(ctlSocket, 0660); err != nil {
-		return err
-	}
-	if err = os.Chmod(runDir, 0750); err != nil {
+	// The manager creates its socket at 0660. Reopen only the directory; a
+	// manager-owned child must never become a root chmod target.
+	if err = controlDirectoryMode(runDir, n.M.OwnerUID, 0750); err != nil {
 		return err
 	}
 	defer func() {
@@ -1014,6 +999,11 @@ func (n *Native) Open(ctx context.Context) error {
 func (n *Native) Restore(ctx context.Context, j Journal) error {
 	if !n.rollback || n.lock == nil || j.Archive != n.ArchivePath {
 		return fmt.Errorf("original rollback binding required")
+	}
+	// Verify every recovery binary before stopping a working manager, even if
+	// the archive was already checked when the journal was loaded.
+	if err := archivedBinaries(n.ArchivePath, n.M.Baseline, 0); err != nil {
+		return err
 	}
 	if pid, birth, err := n.process(ctx); err == nil {
 		b, err := owner(ctx, "list")
@@ -1068,11 +1058,14 @@ func (n *Native) LoadRollback(path string) (Journal, error) {
 	if err != nil {
 		return j, err
 	}
-	if uniqueJSON(b) != nil || json.Unmarshal(b, &j) != nil || j.Archive != path || j.ManifestSHA != n.SHA || j.Schema != "pomar.service-upgrade-journal/v1" {
+	if uniqueJSON(b) != nil || json.Unmarshal(b, &j) != nil || j.Archive != path || j.ManifestSHA != n.SHA || j.Schema != "pomar.service-upgrade-journal/v1" || j.SigningPolicy != n.M.SigningPolicy {
 		return j, fmt.Errorf("archive journal binding differs")
 	}
 	if j.Before.Pin != n.M.Baseline.Pin || j.Before.KeyID != n.M.KeyID || !hex64.MatchString(j.Before.History) || !hex64.MatchString(j.Before.Capacity) || !hex64.MatchString(j.Before.OwnerCapacity) || !hex64.MatchString(j.Before.CallerCapacity) || !hex64.MatchString(j.Before.CallerHistory) || j.Before.PID <= 1 || j.Before.Birth == "" {
 		return j, fmt.Errorf("archive original observation binding differs")
+	}
+	if err := archivedBinaries(path, n.M.Baseline, 0); err != nil {
+		return j, err
 	}
 	n.beforeRecord, err = pinnedFile(filepath.Join(path, "install-record"), n.M.InstallRecord)
 	if err != nil {

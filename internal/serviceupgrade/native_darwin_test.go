@@ -74,7 +74,7 @@ func TestRecordTransitionClearsQualificationsAndRetainsUnknownBindings(t *testin
 	if e != nil {
 		t.Fatal(e)
 	}
-	if r["check_ok"] != "" || r["reboot_ok"] != "" || r["concurrency"] != "" || r["future_binding"] != "keep" || r["key_id"] != m.KeyID || r["sha256_pomar-shim-linux-arm64"] != "keep-shim" || r["pin"] != m.Target.Pin || r["retained_host_pin"] != m.Target.HostPin {
+	if r["check_ok"] != "" || r["reboot_ok"] != "" || r["concurrency"] != "" || r["future_binding"] != "keep" || r["key_id"] != m.KeyID || r["sha256_pomar-shim-linux-arm64"] != "keep-shim" || r["pin"] != m.Target.Pin || r["retained_host_pin"] != m.Target.HostPin || r["signing_policy"] != m.SigningPolicy {
 		t.Fatal(r)
 	}
 	pending, e := invalidatedRecord(raw)

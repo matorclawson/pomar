@@ -24,6 +24,7 @@ func (f *fakeDriver) event(name string) error {
 	return nil
 }
 func (f *fakeDriver) Check(context.Context) error { return f.event("check") }
+func (f *fakeDriver) SigningPolicy() string       { return "internal_certificate" }
 func (f *fakeDriver) Observe(context.Context) (Observation, error) {
 	f.reads++
 	if err := f.event("observe"); err != nil {
@@ -112,7 +113,7 @@ func TestJournalFailureDoesNotPerformItsEffect(t *testing.T) {
 }
 
 func TestRollbackRequiresTheOriginalBindingAndVerifiedBaseline(t *testing.T) {
-	j := Journal{"pomar.service-upgrade-journal/v1", "original", "installing", Observation{}, "retained-archive"}
+	j := Journal{Schema: "pomar.service-upgrade-journal/v1", ManifestSHA: "original", Phase: "installing", Archive: "retained-archive", SigningPolicy: "internal_certificate"}
 	f := &fakeDriver{}
 	if _, err := Rollback(context.Background(), f, j, "different"); err == nil || len(f.events) != 0 {
 		t.Fatal(f.events, err)
@@ -132,5 +133,18 @@ func TestCompletionJournalFailureReportsThatAdmissionAlreadyOpened(t *testing.T)
 	j, e := Apply(context.Background(), f, "original")
 	if e == nil || j.Phase != "complete" || !contains(f.events, "open") || !strings.Contains(e.Error(), "admission reopened") {
 		t.Fatal(j, e, f.events)
+	}
+}
+
+func TestJournalRetainsSigningPolicyAndRollbackRefusesAnotherPolicy(t *testing.T) {
+	f := &fakeDriver{}
+	j, err := Apply(context.Background(), f, "original")
+	if err != nil || j.SigningPolicy != "internal_certificate" || f.j.SigningPolicy != j.SigningPolicy {
+		t.Fatal(j, f.j, err)
+	}
+	j.SigningPolicy = "development_transition"
+	f = &fakeDriver{}
+	if _, err := Rollback(context.Background(), f, j, "original"); err == nil || len(f.events) != 0 {
+		t.Fatal("rollback policy mismatch allowed effects", f.events, err)
 	}
 }
