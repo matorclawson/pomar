@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -33,13 +34,20 @@ type Server struct {
 	j           *journal
 	lock        *os.File
 	unrecovered []Unrecovered
+	hostname    string // where, for ls and show
+	uid         int
+	user        string
 
-	mu       sync.Mutex
-	named    map[string]*seatterm.TermSession // each name's latest generation
-	reserved map[string]bool                  // names a create is starting
-	creates  map[string]string                // principal and operation, to the name it created
-	ops      map[string]*opResult             // send and stop results, by principal and operation
-	opOrder  []string
+	mu        sync.Mutex
+	named     map[string]*seatterm.TermSession // each name's latest generation
+	reserved  map[string]bool                  // names a create is starting
+	creates   map[string]string                // principal and operation, to the name it created
+	ops       map[string]*opResult             // send and stop results, by principal and operation
+	opOrder   []string
+	gen       map[string]int      // each name's generations so far
+	gens      map[string]int      // each session's generation of its name, by session ID
+	adapters  map[string]*adapter // state channels, by session ID
+	readyUsed map[string]uint64   // by session ID: the adapter report a when-ready send last used
 }
 
 // opResult is what one send or stop did. A retry with the same operation
@@ -50,6 +58,21 @@ type opResult struct {
 	Session string `json:"session"`
 	Outcome string `json:"outcome"`
 	Detail  string `json:"detail,omitempty"`
+	// A send's: how it was written, its input's ID (its operation's), the
+	// grant epoch after it, and its acknowledgements, each a later stage:
+	// queued in Pomar's input queue, written to the program's terminal, and
+	// accepted by the program as its adapter reported (yes, pending, or
+	// unsupported without a state channel).
+	Mode     string `json:"mode,omitempty"`
+	InputID  string `json:"input_id,omitempty"`
+	Epoch    uint64 `json:"epoch,omitempty"`
+	Queued   bool   `json:"queued,omitempty"`
+	Written  bool   `json:"written,omitempty"`
+	Accepted string `json:"accepted,omitempty"`
+	// A stop's readback.
+	Leader      string `json:"leader,omitempty"`
+	Group       string `json:"group,omitempty"`
+	GroupKilled bool   `json:"group_killed,omitempty"`
 }
 
 // opFingerprint binds an operation's dedupe record to exactly what it was
@@ -92,8 +115,13 @@ func Open(root string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{root: root, serve: newID(), started: time.Now().UTC(), lock: lock,
-		named: map[string]*seatterm.TermSession{}, reserved: map[string]bool{}, creates: map[string]string{}, ops: map[string]*opResult{}}
+	s := &Server{root: root, serve: newID(), started: time.Now().UTC(), lock: lock, uid: os.Geteuid(),
+		named: map[string]*seatterm.TermSession{}, reserved: map[string]bool{}, creates: map[string]string{}, ops: map[string]*opResult{},
+		gen: map[string]int{}, gens: map[string]int{}, adapters: map[string]*adapter{}, readyUsed: map[string]uint64{}}
+	s.hostname, _ = os.Hostname()
+	if u, err := user.LookupId(strconv.Itoa(s.uid)); err == nil {
+		s.user = u.Username
+	}
 	if s.j, err = openJournal(root, s.serve); err != nil {
 		lock.Close()
 		return nil, err
@@ -220,6 +248,16 @@ const (
 	KindUncertain  = "uncertain"
 	KindInternal   = "internal"
 	KindInProgress = "in_progress"
+	// KindStale is a request that named a session generation or grant epoch
+	// the session no longer has: read it again, then decide.
+	KindStale = "stale"
+	// KindUnsupported is a request the session can't honour as asked: a
+	// when-ready send to a session without a state channel. It is never
+	// carried out some other way.
+	KindUnsupported = "unsupported"
+	// KindNotReady is a when-ready send whose session's adapter didn't
+	// report it ready for input in time: nothing was written.
+	KindNotReady = "not_ready"
 )
 
 // APIError is every refusal's body.
@@ -266,11 +304,26 @@ type CreateRequest struct {
 	Dir       string   `json:"dir"`
 	Cols      uint16   `json:"cols"`
 	Rows      uint16   `json:"rows"`
+	// StateChannel gives the session a socket, named by StateEnv in its
+	// environment, on which an adapter reports its agent state.
+	StateChannel bool `json:"state_channel,omitempty"`
+}
+
+// SessionView is a session as ls and show give it: the session host's
+// state, where and as whom it runs, its name's generation, and its outcome.
+type SessionView struct {
+	seatterm.SessionInfo
+	Host         string `json:"host"`
+	UID          int    `json:"uid"`
+	User         string `json:"user,omitempty"`
+	Generation   int    `json:"generation"` // 1 for a name's first session, then one more for each that took the name
+	Outcome      string `json:"outcome"`    // running, or exited (with exit_code)
+	StateChannel bool   `json:"state_channel"`
 }
 
 // Created is a create's reply.
 type Created struct {
-	seatterm.SessionInfo
+	SessionView
 	Created bool `json:"created"` // false: this operation had already created it
 }
 
@@ -279,7 +332,26 @@ type SendRequest struct {
 	Operation string `json:"operation"`
 	Text      string `json:"text"`
 	Take      bool   `json:"take"`
+	// Session and Epoch, when set, are the generation and grant epoch the
+	// caller last read: a send to a session that has changed since is
+	// refused as stale, never written.
+	Session string  `json:"session,omitempty"`
+	Epoch   *uint64 `json:"epoch,omitempty"`
+	// WhenReady holds the text until the session's adapter reports it
+	// waiting for input (a report newer than any a send used), for up to
+	// ReadyWaitMS. Without a state channel it is refused as unsupported.
+	WhenReady   bool `json:"when_ready,omitempty"`
+	ReadyWaitMS int  `json:"ready_wait_ms,omitempty"`
+	// AcceptWaitMS waits, after the write, for the adapter to report the
+	// input accepted.
+	AcceptWaitMS int `json:"accept_wait_ms,omitempty"`
 }
+
+// Bounds on a send's waits.
+const (
+	defaultReadyWait = 30 * time.Second
+	maxWait          = 10 * time.Minute
+)
 
 // StopRequest is POST /v1/sessions/{name}/stop.
 type StopRequest struct {
@@ -288,18 +360,22 @@ type StopRequest struct {
 
 // Listing is GET /v1/sessions.
 type Listing struct {
-	Serve       string                 `json:"serve"`
-	Started     time.Time              `json:"started"`
-	Root        string                 `json:"root"`
-	Sessions    []seatterm.SessionInfo `json:"sessions"`
-	Unrecovered []Unrecovered          `json:"unrecovered"`
-	Survives    string                 `json:"survives"`
+	Serve       string        `json:"serve"`
+	Started     time.Time     `json:"started"`
+	Root        string        `json:"root"`
+	Host        string        `json:"host"`
+	UID         int           `json:"uid"`
+	User        string        `json:"user,omitempty"`
+	Sessions    []SessionView `json:"sessions"`
+	Unrecovered []Unrecovered `json:"unrecovered"`
+	Survives    string        `json:"survives"`
 }
 
 func (s *Server) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
-		l := Listing{Serve: s.serve, Started: s.started, Root: s.root, Sessions: s.list(), Unrecovered: s.unrecovered,
+		l := Listing{Serve: s.serve, Started: s.started, Root: s.root, Host: s.hostname, UID: s.uid, User: s.user,
+			Sessions: s.list(), Unrecovered: s.unrecovered,
 			Survives: "clients and dropped connections; not a restart of this service, and not a reboot"}
 		if l.Unrecovered == nil {
 			l.Unrecovered = []Unrecovered{}
@@ -309,7 +385,7 @@ func (s *Server) mux() *http.ServeMux {
 	mux.HandleFunc("POST /v1/sessions", s.create)
 	mux.HandleFunc("GET /v1/sessions/{name}", func(w http.ResponseWriter, r *http.Request) {
 		if t := s.lookup(w, r); t != nil {
-			reply(w, http.StatusOK, t.Info())
+			reply(w, http.StatusOK, s.view(t))
 		}
 	})
 	mux.HandleFunc("GET /v1/sessions/{name}/screen", func(w http.ResponseWriter, r *http.Request) {
@@ -324,19 +400,31 @@ func (s *Server) mux() *http.ServeMux {
 }
 
 // list is every named session's latest generation, by name.
-func (s *Server) list() []seatterm.SessionInfo {
+func (s *Server) list() []SessionView {
 	s.mu.Lock()
 	all := make([]*seatterm.TermSession, 0, len(s.named))
 	for _, t := range s.named {
 		all = append(all, t)
 	}
 	s.mu.Unlock()
-	out := make([]seatterm.SessionInfo, 0, len(all))
+	out := make([]SessionView, 0, len(all))
 	for _, t := range all {
-		out = append(out, t.Info())
+		out = append(out, s.view(t))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// view is a session as ls and show give it.
+func (s *Server) view(t *seatterm.TermSession) SessionView {
+	v := SessionView{SessionInfo: t.Info(), Host: s.hostname, UID: s.uid, User: s.user, Outcome: "running"}
+	if !v.Running {
+		v.Outcome = "exited"
+	}
+	s.mu.Lock()
+	v.Generation, v.StateChannel = s.gens[t.ID], s.adapters[t.ID] != nil
+	s.mu.Unlock()
+	return v
 }
 
 func (s *Server) lookup(w http.ResponseWriter, r *http.Request) *seatterm.TermSession {
@@ -376,8 +464,19 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	if req.Kind == "" {
 		req.Kind = "program"
 	}
+	env := append([]string{}, req.Env...)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, StateEnv+"=") {
+			refuse(w, http.StatusBadRequest, KindUsage, StateEnv+" is the service's to set: ask for a state channel instead")
+			return
+		}
+	}
+	statePath := statePath(s.root, p, req.Operation)
+	if req.StateChannel {
+		env = append(env, StateEnv+"="+statePath)
+	}
 	spec := seatterm.SessionSpec{Name: req.Name, Kind: req.Kind, Cols: req.Cols, Rows: req.Rows,
-		Command: seatterm.Command{Path: req.Path, Args: req.Args, Env: req.Env, Dir: req.Dir, UID: -1, GID: -1}}
+		Command: seatterm.Command{Path: req.Path, Args: req.Args, Env: env, Dir: req.Dir, UID: -1, GID: -1}}
 	key := p + "\x00" + req.Operation
 	s.mu.Lock()
 	name, retry := s.creates[key]
@@ -400,8 +499,24 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	s.mu.Unlock()
+	// A state channel listens before the program starts, so its adapter
+	// finds it at once; a retry finds the one the first request opened.
+	var a *adapter
+	if req.StateChannel && !retry {
+		var err error
+		if a, err = listenState(statePath, s.j); err != nil {
+			s.mu.Lock()
+			delete(s.creates, key)
+			s.mu.Unlock()
+			refuse(w, http.StatusInternalServerError, KindInternal, "the state channel couldn't be opened: "+err.Error())
+			return
+		}
+	}
 	t, created, err := s.host.Create(req.Operation, p, spec)
 	if err != nil {
+		if a != nil {
+			a.close()
+		}
 		if !retry {
 			s.mu.Lock()
 			delete(s.creates, key) // this request reserved the name, and nothing was made
@@ -437,16 +552,27 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		}
 		s.j.write(Record{AuditRecord: seatterm.AuditRecord{Operation: req.Operation, Action: "name", Phase: "outcome", Principal: p, Session: t.ID, Outcome: "ok"}, Name: req.Name})
 		s.mu.Lock()
+		if old := s.named[req.Name]; old != nil {
+			s.forgetLocked(old.ID) // the ended generation it replaces
+		}
 		s.named[req.Name] = t
 		s.creates[key] = req.Name // refreshed, so a later retry keeps trusting the current holder
+		s.gen[req.Name]++
+		s.gens[t.ID] = s.gen[req.Name]
+		if a != nil {
+			s.adapters[t.ID] = a
+		}
 		s.pruneExitedLocked()
 		s.mu.Unlock()
+		if a != nil {
+			a.start(t)
+		}
 	}
 	code := http.StatusOK
 	if created {
 		code = http.StatusCreated
 	}
-	reply(w, code, Created{SessionInfo: t.Info(), Created: created})
+	reply(w, code, Created{SessionView: s.view(t), Created: created})
 }
 
 // pruneExitedLocked bounds the ended sessions still listed.
@@ -459,7 +585,9 @@ func (s *Server) pruneExitedLocked() {
 	}
 	sort.Strings(ended)
 	for len(ended) > maxExited {
+		s.forgetLocked(s.named[ended[0]].ID)
 		delete(s.named, ended[0])
+		delete(s.gen, ended[0]) // bounded: a name pruned this long ago counts its generations afresh
 		ended = ended[1:]
 	}
 }
@@ -511,13 +639,6 @@ func (s *Server) drop(r *opResult) {
 	}
 }
 
-func (s *Server) finish(r *opResult, session, outcome, detail string) opResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r.Session, r.Outcome, r.Detail, r.done = session, outcome, detail, true
-	return *r
-}
-
 func (s *Server) recorded(w http.ResponseWriter, r *opResult) {
 	s.mu.Lock()
 	done, out := r.done, *r
@@ -529,17 +650,102 @@ func (s *Server) recorded(w http.ResponseWriter, r *opResult) {
 	reply(w, http.StatusOK, out)
 }
 
+// settle records what an operation did, for every retry of it.
+func (s *Server) settle(r *opResult, v opResult) opResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v.done, v.fp = true, r.fp // v is built fresh by the caller; its fingerprint
+	// is never part of that, so it's carried over from the reservation begin
+	// made, or every later retry would compare against an empty one and be
+	// refused as a conflict with its own first call.
+	*r = v
+	return v
+}
+
+// stale says how a session has changed since the generation or grant epoch
+// a request names, or nothing when it hasn't.
+func stale(t *seatterm.TermSession, req SendRequest) string {
+	if req.Session != "" && req.Session != t.ID {
+		return fmt.Sprintf("the session named %s is now %s, not %s: read it again", t.Name, t.ID, req.Session)
+	}
+	if req.Epoch != nil {
+		if e := t.Info().Epoch; e != *req.Epoch {
+			return fmt.Sprintf("the session's grant epoch is %d, not %d: control changed since you read it", e, *req.Epoch)
+		}
+	}
+	return ""
+}
+
+// waitMS is a send's wait, bounded, or def when it names none.
+func waitMS(ms int, def time.Duration) time.Duration {
+	if ms <= 0 {
+		return def
+	}
+	return min(time.Duration(ms)*time.Millisecond, maxWait)
+}
+
+// awaitReady waits for the session's adapter to report it waiting for
+// input in a report no send has used, and claims that report, so two sends
+// never take one readiness. It gives up at the wait's end, or when the
+// program exits.
+func (s *Server) awaitReady(t *seatterm.TermSession, wait time.Duration) bool {
+	timeout := time.After(wait)
+	for {
+		st, next := t.Agent()
+		if st.State == "waiting-input" {
+			s.mu.Lock()
+			if s.readyUsed[t.ID] < st.StateSeq {
+				s.readyUsed[t.ID] = st.StateSeq
+				s.mu.Unlock()
+				return true
+			}
+			s.mu.Unlock()
+		}
+		select {
+		case <-next:
+		case <-t.Done():
+			return false
+		case <-timeout:
+			return false
+		}
+	}
+}
+
+// awaitAccepted waits, up to wait, for the adapter to report input id
+// accepted.
+func awaitAccepted(t *seatterm.TermSession, id string, wait time.Duration) bool {
+	timeout := time.After(wait)
+	for {
+		st, next := t.Agent()
+		if st.Accepted == id {
+			return true
+		}
+		select {
+		case <-next:
+		case <-t.Done():
+			return false
+		case <-timeout:
+			return false
+		}
+	}
+}
+
 // send writes text to a session's program as its controller for the
 // moment: it takes control only when nobody holds it (or, with take, from
 // whoever does), waits for the write to reach the program, and gives
-// control back.
+// control back. A send naming a generation or grant epoch the session no
+// longer has is refused as stale. A when-ready send waits for the session's
+// adapter to report it waiting for input, and is refused, never written
+// raw, without a state channel. The reply tells apart the input queued,
+// written to the program's terminal, and accepted by the program, which
+// only its adapter can say.
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	var req SendRequest
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.Operation == "" || req.Text == "" {
-		refuse(w, http.StatusBadRequest, KindUsage, "a send needs an operation ID and its text")
+	if req.Operation == "" || req.Text == "" || req.ReadyWaitMS < 0 || req.AcceptWaitMS < 0 {
+		refuse(w, http.StatusBadRequest, KindUsage, "a send needs an operation ID and its text, and waits of 0 ms or more")
 		return
 	}
 	p := principalOf(r)
@@ -563,49 +769,99 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		hostError(w, seatterm.ErrSessionExited)
 		return
 	}
+	if why := stale(t, req); why != "" {
+		s.drop(res)
+		refuse(w, http.StatusConflict, KindStale, why)
+		return
+	}
+	s.mu.Lock()
+	a := s.adapters[t.ID]
+	s.mu.Unlock()
+	mode := "raw"
+	if req.WhenReady {
+		mode = "when-ready"
+		if a == nil {
+			s.drop(res)
+			refuse(w, http.StatusConflict, KindUnsupported, "this session has no state channel, so nothing can say when it is ready for input; make it with -state, or send without -when-ready to write the text raw")
+			return
+		}
+		if !s.awaitReady(t, waitMS(req.ReadyWaitMS, defaultReadyWait)) {
+			s.drop(res) // nothing was written: a retry decides afresh
+			refuse(w, http.StatusConflict, KindNotReady, "the session's adapter didn't report it waiting for input in time; nothing was written")
+			return
+		}
+		if why := stale(t, req); why != "" { // it may have changed while it waited
+			s.drop(res)
+			refuse(w, http.StatusConflict, KindStale, why)
+			return
+		}
+	}
 	c, _, err := t.Attach(p)
 	if err != nil {
 		s.drop(res)
 		hostError(w, err)
 		return
 	}
-	defer c.Detach()
+	detach := sync.OnceFunc(c.Detach)
+	defer detach()
 	if _, err := c.Control(req.Take, "send "+req.Operation); err != nil {
 		s.drop(res)
 		hostError(w, err)
 		return
 	}
+	out := opResult{Session: t.ID, Mode: mode, InputID: req.Operation, Accepted: "unsupported"}
+	if a != nil {
+		out.Accepted = "pending"
+	}
 	data, queued := []byte(req.Text), 0
 	for len(data) > 0 {
 		n := min(len(data), seatterm.MaxData)
 		if err := c.Input(data[:n]); err != nil {
-			out := s.finish(res, t.ID, "partial", fmt.Sprintf("%d of %d bytes queued: %v", len(req.Text)-len(data), len(req.Text), err))
-			reply(w, http.StatusConflict, out)
+			detach()
+			out.Outcome, out.Detail, out.Epoch = "partial", fmt.Sprintf("%d of %d bytes queued: %v", len(req.Text)-len(data), len(req.Text), err), t.Info().Epoch
+			reply(w, http.StatusConflict, s.settle(res, out))
 			return
 		}
 		data, queued = data[n:], queued+1
 	}
+	out.Queued = true
 	deadline := time.Now().Add(sendConfirm)
 	for {
 		o := c.Outcomes()
 		if o.Written+o.Partial+o.Failed+o.Refused >= queued {
-			if o.Written == queued {
-				reply(w, http.StatusOK, s.finish(res, t.ID, "written", ""))
-			} else {
-				reply(w, http.StatusConflict, s.finish(res, t.ID, "partial", fmt.Sprintf("%+v", o)))
+			out.Written = o.Written == queued
+			if !out.Written {
+				out.Outcome, out.Detail = "partial", fmt.Sprintf("%+v", o)
 			}
-			return
+			break
 		}
 		if time.Now().After(deadline) {
-			reply(w, http.StatusConflict, s.finish(res, t.ID, "uncertain", "the program didn't read the input in time; what it got is unknown, and nothing is resent"))
-			return
+			out.Outcome, out.Detail = "uncertain", "the program didn't read the input in time; what it got is unknown, and nothing is resent"
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	detach()
+	out.Epoch = t.Info().Epoch
+	if out.Outcome != "" {
+		reply(w, http.StatusConflict, s.settle(res, out))
+		return
+	}
+	out.Outcome = "written"
+	if a != nil {
+		a.tell(InputNotice{InputID: req.Operation, Bytes: len(req.Text), Mode: mode})
+		if st, _ := t.Agent(); st.Accepted == req.Operation || (req.AcceptWaitMS > 0 && awaitAccepted(t, req.Operation, waitMS(req.AcceptWaitMS, 0))) {
+			out.Accepted, out.Outcome = "yes", "accepted"
+		}
+	}
+	reply(w, http.StatusOK, s.settle(res, out))
 }
 
-// stop ends a session's program. It acts on the generation the name had
-// when the operation began, never on one that took the name since.
+// stop ends a session's program, with the authority of the service's own
+// user (the only one its socket admits), and reads back the leader's reap
+// and whether any process remains in its process group. It acts on the
+// generation the name had when the operation began, never on one that took
+// the name since.
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	var req StopRequest
 	if !decode(w, r, &req) {
@@ -631,18 +887,33 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		s.drop(res)
 		return
 	}
+	exited := func() {
+		out := opResult{Session: t.ID, Outcome: "already-exited", Leader: "reaped", Group: "gone"}
+		if t.GroupRemains() {
+			out.Group = "remaining"
+		}
+		reply(w, http.StatusOK, s.settle(res, out))
+	}
 	if !t.Info().Running {
-		reply(w, http.StatusOK, s.finish(res, t.ID, "already-exited", ""))
+		exited()
 		return
 	}
-	if err := s.host.Terminate(req.Operation, p, t.ID); err != nil {
+	rep, err := s.host.Stop(req.Operation, p, t.ID)
+	if err != nil {
 		if !t.Info().Running {
-			reply(w, http.StatusOK, s.finish(res, t.ID, "already-exited", ""))
+			exited()
 			return
 		}
-		s.finish(res, t.ID, "uncertain", err.Error())
+		s.settle(res, opResult{Session: t.ID, Outcome: "uncertain", Detail: err.Error(), Leader: rep.Leader, Group: rep.Group, GroupKilled: rep.GroupKilled})
 		hostError(w, err)
 		return
 	}
-	reply(w, http.StatusOK, s.finish(res, t.ID, "stopped", ""))
+	reply(w, http.StatusOK, s.settle(res, opResult{Session: t.ID, Outcome: "stopped", Leader: rep.Leader, Group: rep.Group, GroupKilled: rep.GroupKilled}))
+}
+
+// forgetLocked drops what the service keeps for a session no name lists.
+func (s *Server) forgetLocked(id string) {
+	delete(s.gens, id)
+	delete(s.adapters, id)
+	delete(s.readyUsed, id)
 }

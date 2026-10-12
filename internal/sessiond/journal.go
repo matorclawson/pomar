@@ -72,9 +72,10 @@ func (j *journal) write(r Record) error {
 // Unrecovered is a session a previous service held, which this one can't
 // reach. Whether its program still runs isn't known here.
 type Unrecovered struct {
-	ID    string `json:"id"`
-	Name  string `json:"name,omitempty"`
-	Serve string `json:"serve"`
+	ID      string `json:"id"`
+	Name    string `json:"name,omitempty"`
+	Serve   string `json:"serve"`
+	Outcome string `json:"outcome"` // always unrecovered: whether it runs is unknown here
 }
 
 // reconcile reads the journal back and returns the sessions an earlier
@@ -100,7 +101,7 @@ func (j *journal) reconcile(root string) ([]Unrecovered, error) {
 			if open[r.Session] == nil {
 				order = append(order, r.Session)
 			}
-			open[r.Session] = &Unrecovered{ID: r.Session, Serve: r.Serve}
+			open[r.Session] = &Unrecovered{ID: r.Session, Serve: r.Serve, Outcome: "unrecovered"}
 		case r.Action == "name" && open[r.Session] != nil:
 			open[r.Session].Name = r.Name
 		case r.Action == "exit", r.Action == "reconcile":
