@@ -57,19 +57,36 @@ func seatGet(root, path string, out any) error {
 	return json.Unmarshal(body, out)
 }
 
-func seatsCmd(args []string, stdin io.Reader, interactive bool, stdout, stderr io.Writer) int {
+// seatsCmd never prompts by itself: a program on a terminal, an agent's PTY
+// included, gets the listing and its exit code. The numbered menu is asked
+// for with -menu, and -json gives the listing as JSON.
+func seatsCmd(args []string, stdin io.Reader, terminal bool, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("seats", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	root := seatHostRoot(fs)
+	menu := fs.Bool("menu", false, "offer a numbered menu to pick a seat (needs a terminal)")
+	asJSON := fs.Bool("json", false, "print the seats as JSON")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return 2
 	}
 	var list struct {
 		Seats []seatapi.Seat `json:"seats"`
 	}
+	if *menu && !terminal {
+		fmt.Fprintln(stderr, "pomar seats: -menu needs a terminal on stdin and stdout; without it, the listing is printed")
+		return 2
+	}
 	if err := seatGet(*root, "/v1/seats", &list); err != nil {
 		fmt.Fprintln(stderr, "pomar seats:", err)
 		return 1
+	}
+	if *asJSON {
+		if list.Seats == nil {
+			list.Seats = []seatapi.Seat{}
+		}
+		b, _ := json.MarshalIndent(list, "", "  ")
+		fmt.Fprintln(stdout, string(b))
+		return 0
 	}
 	if len(list.Seats) == 0 {
 		fmt.Fprintln(stdout, "No seats are declared on this host.")
@@ -88,7 +105,7 @@ func seatsCmd(args []string, stdin io.Reader, interactive bool, stdout, stderr i
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\trev %d, %s\n", i+1, s.Seat, s.Role, s.ProviderAccount, where, s.DeclarationRevision, s.DeclarationSHA256[:12])
 	}
 	tw.Flush()
-	if !interactive {
+	if !*menu {
 		return 0
 	}
 	fmt.Fprint(stdout, "\nPick a seat by number (Enter to quit): ")
