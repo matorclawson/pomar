@@ -18,6 +18,7 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/localclient"
 	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/zeroemployeeorg/pomar/internal/termstate"
 )
 
 // ErrNoService is a root with no service answering on its socket.
@@ -155,6 +156,27 @@ func (s *stream) Read(p []byte) (int, error) { return s.r.Read(p) }
 // The detach key is never sent. Notices are handed to notice as they come.
 // It reports whether the client detached by its key.
 func Pump(st io.ReadWriteCloser, in io.Reader, out io.Writer, cols, rows uint16, resizes <-chan [2]uint16, notice func(string)) (bool, error) {
+	return PumpWith(st, in, out, cols, rows, resizes, Hooks{Notice: notice})
+}
+
+// Hooks are what a pump hands its caller beside the screen: notices, the
+// session's presence and agent state, and control answers and changes,
+// each as it comes. Requests carries the caller's control requests (op
+// request, take or release) to the session. Any of them may be nil.
+type Hooks struct {
+	Notice   func(string)
+	Presence func(seatterm.PresenceMsg)
+	State    func(seatterm.AgentState)
+	Control  func(seatterm.ControlMsg)
+	Requests <-chan seatterm.ControlMsg
+	// Safe, when set, is called after each write to out with whether out
+	// now stands between sequences and characters, where the caller may
+	// write its own (a window title) without splitting the program's.
+	Safe func(bool)
+}
+
+// PumpWith is Pump with every hook.
+func PumpWith(st io.ReadWriteCloser, in io.Reader, out io.Writer, cols, rows uint16, resizes <-chan [2]uint16, h Hooks) (bool, error) {
 	var wmu sync.Mutex
 	sendFrame := func(kind byte, b []byte) error {
 		wmu.Lock()
@@ -165,6 +187,8 @@ func Pump(st io.ReadWriteCloser, in io.Reader, out io.Writer, cols, rows uint16,
 		return false, err
 	}
 	detached := make(chan struct{})
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -198,6 +222,29 @@ func Pump(st io.ReadWriteCloser, in io.Reader, out io.Writer, cols, rows uint16,
 			}
 		}()
 	}
+	if h.Requests != nil {
+		go func() {
+			for {
+				select {
+				case m, ok := <-h.Requests:
+					if !ok {
+						return
+					}
+					b, _ := json.Marshal(seatterm.ControlMsg{Op: m.Op})
+					if sendFrame(seatterm.Control, b) != nil {
+						return
+					}
+				case <-stop:
+					return
+				}
+			}
+		}()
+	}
+	// model only follows the output's parser state, for Safe.
+	var model *termstate.Terminal
+	if h.Safe != nil {
+		model = termstate.New(int(cols), int(rows), 0)
+	}
 	for {
 		kind, payload, err := seatterm.ReadFrameV2(st)
 		select {
@@ -216,9 +263,30 @@ func Pump(st io.ReadWriteCloser, in io.Reader, out io.Writer, cols, rows uint16,
 			if _, err := out.Write(payload); err != nil {
 				return false, err
 			}
+			if model != nil {
+				model.Feed(payload)
+				model.Replies()
+				n, ok := model.Held()
+				h.Safe(ok && n == 0)
+			}
 		case seatterm.Notice:
-			if notice != nil {
-				notice(string(payload))
+			if h.Notice != nil {
+				h.Notice(string(payload))
+			}
+		case seatterm.Presence:
+			var m seatterm.PresenceMsg
+			if h.Presence != nil && json.Unmarshal(payload, &m) == nil {
+				h.Presence(m)
+			}
+		case seatterm.State:
+			var m seatterm.AgentState
+			if h.State != nil && json.Unmarshal(payload, &m) == nil {
+				h.State(m)
+			}
+		case seatterm.Control:
+			var m seatterm.ControlMsg
+			if h.Control != nil && json.Unmarshal(payload, &m) == nil {
+				h.Control(m)
 			}
 		}
 	}

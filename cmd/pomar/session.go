@@ -29,18 +29,24 @@ const (
 	exitNotFound  = 4 // no session has that name
 	exitConflict  = 5 // refused as it stands: the name runs, another client controls it, or the operation is still running
 	exitExited    = 6 // the session's program has exited
+	exitStale     = 7 // the send named a generation or grant epoch the session no longer has: read it again
+	exitUnsupp    = 8 // the session can't do it as asked: a when-ready send to a session without a state channel
+	exitNotReady  = 9 // a when-ready send's session didn't report itself waiting for input in time: nothing was written
 )
 
 const sessionUsage = `usage:
   pomar session serve [-root DIR]   run this user's session service (in the foreground)
-  pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] NAME -- /ABS/PROGRAM ARGS...
+  pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] NAME -- /ABS/PROGRAM ARGS...
+                                    -state: a state channel for an adapter ($POMAR_SESSION_STATE in its environment)
   pomar session ls [-json]
   pomar session show NAME           the session's state, as JSON
   pomar session screen [-json] NAME the current screen, as text
-  pomar session send -id OP [-enter] [-take] NAME TEXT
-  pomar session attach [-view] [-take] NAME
+  pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME [--] TEXT
+                                    -session/-epoch: refused as stale if the session changed since you read it
+                                    -when-ready: written once the session's adapter reports it waiting for input
+  pomar session attach [-view] [-take] [-title=false] NAME
                                     the session's terminal; Ctrl-] detaches, and the program keeps running
-  pomar session stop -id OP NAME
+  pomar session stop -id OP NAME    the program's leader and process group are read back
 Every command takes -root DIR; the root defaults to $POMAR_SESSION_ROOT, or ~/.local/state/pomar/sessions.
 `
 
@@ -54,13 +60,13 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	root := fs.String("root", "", "the session service's root (default $POMAR_SESSION_ROOT, or ~/.local/state/pomar/sessions)")
 	op := fs.String("id", "", "the operation's ID: a retry with the same ID returns what it did, and never acts twice")
+	// Everything after the first -- is never a flag: new's program, or
+	// send's text, which may begin with a dash.
 	var tail []string
-	if verb == "new" {
-		for i, a := range args {
-			if a == "--" {
-				args, tail = args[:i], args[i+1:]
-				break
-			}
+	for i, a := range args {
+		if a == "--" {
+			args, tail = args[:i], args[i+1:]
+			break
 		}
 	}
 	var (
@@ -72,12 +78,22 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		enter  = fs.Bool("enter", false, "end the text with Enter (a carriage return)")
 		take   = fs.Bool("take", false, "take control from whoever holds it")
 		view   = fs.Bool("view", false, "view only: nothing you type is sent")
+		state  = fs.Bool("state", false, "give the session a state channel, on which an adapter reports its agent state")
+		gen    = fs.String("session", "", "the session ID (generation) you last read: refused as stale if the name now has another")
+		epoch  = fs.Int64("epoch", -1, "the grant epoch you last read: refused as stale if control changed since")
+		ready  = fs.Bool("when-ready", false, "write the text only once the session's adapter reports it waiting for input")
+		rwait  = fs.Duration("ready-wait", 0, "how long -when-ready waits (default 30s, at most 10m)")
+		await  = fs.Duration("accept-wait", 0, "how long to wait, after the write, for the adapter to report the input accepted")
+		title  = fs.Bool("title", true, "show your role and the agent state in the terminal's title while attached")
 		envs   multiFlag
 	)
 	fs.Var(&envs, "env", "K=V for the program's environment (repeatable); TERM, HOME, PATH and LANG come from yours unless set")
 	pos, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
+	}
+	if verb != "new" {
+		pos, tail = append(pos, tail...), nil
 	}
 	if *root == "" {
 		if *root, err = sessiond.DefaultRoot(); err != nil {
@@ -133,7 +149,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		if *rows > 0 {
 			h = uint16(min(*rows, seatterm.MaxRows))
 		}
-		req := sessiond.CreateRequest{Operation: *op, Name: pos[0], Kind: *kind, Path: tail[0], Args: tail[1:], Env: sessionEnv(envs), Dir: *dir, Cols: w, Rows: h}
+		req := sessiond.CreateRequest{Operation: *op, Name: pos[0], Kind: *kind, Path: tail[0], Args: tail[1:], Env: sessionEnv(envs), Dir: *dir, Cols: w, Rows: h, StateChannel: *state}
 		var out sessiond.Created
 		if rc := call("POST", "/v1/sessions", req, &out); rc != 0 {
 			return rc
@@ -152,17 +168,17 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			return 0
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tKIND\tSTATE\tSIZE\tCONTROLLER\tVIEWERS\tLAST OUTPUT")
+		fmt.Fprintln(tw, "NAME\tGEN\tKIND\tSTATE\tAGENT\tSIZE\tCONTROLLER\tEPOCH\tVIEWERS\tLAST OUTPUT")
 		for _, s := range l.Sessions {
 			state := "running"
 			if !s.Running && s.ExitCode != nil {
 				state = fmt.Sprintf("exited %d", *s.ExitCode)
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%dx%d\t%s\t%d\t%s\n", s.Name, s.Kind, state, s.Cols, s.Rows, dash(s.Controller), len(s.Viewers), dash(s.LastOutput))
+			fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%dx%d\t%s\t%d\t%d\t%s\n", s.Name, s.Generation, s.Kind, state, s.Agent.State, s.Cols, s.Rows, dash(s.Controller), s.Epoch, len(s.Viewers), dash(s.LastOutput))
 		}
 		tw.Flush()
 		for _, u := range l.Unrecovered {
-			fmt.Fprintf(stdout, "%s (%s): held by an earlier service, out of this one's reach\n", dash(u.Name), u.ID)
+			fmt.Fprintf(stdout, "%s (%s): unrecovered, held by an earlier service and out of this one's reach\n", dash(u.Name), u.ID)
 		}
 	case "show":
 		if !need(1, "show names its session") {
@@ -198,8 +214,14 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		if *enter {
 			text += "\r"
 		}
+		req := sessiond.SendRequest{Operation: *op, Text: text, Take: *take, Session: *gen, WhenReady: *ready,
+			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds())}
+		if *epoch >= 0 {
+			e := uint64(*epoch)
+			req.Epoch = &e
+		}
 		var out sessiond.OpResult
-		if rc := call("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/send", sessiond.SendRequest{Operation: *op, Text: text, Take: *take}, &out); rc != 0 {
+		if rc := call("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/send", req, &out); rc != 0 {
 			return rc
 		}
 		printJSON(out)
@@ -216,7 +238,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		if !need(1, "attach names its session") {
 			return 2
 		}
-		return sessionAttach(c, pos[0], *view, *take, stdin, stdout, stderr)
+		return sessionAttach(c, pos[0], *view, *take, *title, stdin, stdout, stderr)
 	default:
 		fmt.Fprint(stderr, sessionUsage)
 		return 2
@@ -251,6 +273,13 @@ func sessionExit(verb, op string, err error, stderr io.Writer) int {
 			return exitConflict
 		case sessiond.KindExited:
 			return exitExited
+		case sessiond.KindStale:
+			fmt.Fprintln(stderr, "Read the session again (`pomar session show`), then decide; nothing was written.")
+			return exitStale
+		case sessiond.KindUnsupported:
+			return exitUnsupp
+		case sessiond.KindNotReady:
+			return exitNotReady
 		}
 	}
 	return 1
@@ -278,7 +307,7 @@ func sessionServe(root string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func sessionAttach(c *sessiond.Client, name string, view, take bool, stdin *os.File, stdout, stderr io.Writer) int {
+func sessionAttach(c *sessiond.Client, name string, view, take, title bool, stdin *os.File, stdout, stderr io.Writer) int {
 	st, err := c.Attach(name, view, take)
 	if err != nil {
 		return sessionExit("attach", "", err, stderr)
@@ -286,7 +315,8 @@ func sessionAttach(c *sessiond.Client, name string, view, take bool, stdin *os.F
 	defer st.Close()
 	cols, rows := uint16(80), uint16(24)
 	var resizes chan [2]uint16
-	if onTerminal(stdin) {
+	tty := onTerminal(stdin)
+	if tty {
 		if tc, tr, err := ttySize(stdin); err == nil {
 			cols, rows = tc, tr
 		}
@@ -308,11 +338,43 @@ func sessionAttach(c *sessiond.Client, name string, view, take bool, stdin *os.F
 			}
 		}()
 	}
-	// Notices wait until the terminal is back: printed into a program's
-	// screen, they would corrupt it.
+	// The status, your role and the agent state, is shown live without
+	// touching the program's screen: on stderr when it isn't this terminal,
+	// else in the terminal's title, written only between the program's
+	// sequences and characters and restored on detach. Notices go to stderr
+	// live in the first case, and after detach otherwise.
+	errFile, _ := stderr.(*os.File)
+	shared := errFile != nil && onTerminal(errFile)
+	st2 := &attachStatus{name: name, agent: "unknown"}
 	var notices []string
-	detached, err := sessiond.Pump(st, stdin, stdout, cols, rows, resizes, func(n string) { notices = append(notices, n) })
-	if onTerminal(stdin) {
+	h := sessiond.Hooks{}
+	switch {
+	case !shared:
+		h.Notice = func(n string) { fmt.Fprintf(stderr, "pomar session: %s\n", n) }
+		st2.show = func(s string) { fmt.Fprintf(stderr, "pomar session: %s\n", s) }
+	case tty && title:
+		h.Notice = func(n string) { notices = append(notices, n) }
+		fmt.Fprint(stdout, "\x1b[22;0t") // keep the terminal's own title, to restore
+		defer fmt.Fprint(stdout, "\x1b[23;0t")
+		safe := true
+		h.Safe = func(ok bool) {
+			if safe = ok; ok {
+				st2.flush(stdout)
+			}
+		}
+		st2.show = func(string) {
+			if safe {
+				st2.flush(stdout)
+			}
+		}
+	default:
+		h.Notice = func(n string) { notices = append(notices, n) }
+	}
+	h.Presence = st2.presence
+	h.State = st2.state
+	h.Control = st2.control
+	detached, err := sessiond.PumpWith(st, stdin, stdout, cols, rows, resizes, h)
+	if tty {
 		fmt.Fprint(stdout, "\x1b[0m\x1b[?25h\r\n")
 	}
 	for _, n := range notices {
@@ -326,6 +388,63 @@ func sessionAttach(c *sessiond.Client, name string, view, take bool, stdin *os.F
 		fmt.Fprintf(stderr, "Detached from %s; it keeps running.\r\n", name)
 	}
 	return 0
+}
+
+// attachStatus is an attached client's live status line. Its hooks run on
+// the pump's one goroutine, so it needs no lock.
+type attachStatus struct {
+	name, role, agent string
+	clients           int
+	epoch             uint64
+	pending           string // a title not yet written
+	show              func(string)
+}
+
+func (a *attachStatus) presence(p seatterm.PresenceMsg) {
+	a.role, a.clients, a.epoch = p.You, len(p.Viewers), p.Epoch
+	a.changed()
+}
+
+func (a *attachStatus) state(s seatterm.AgentState) {
+	a.agent = s.State
+	a.changed()
+}
+
+func (a *attachStatus) control(m seatterm.ControlMsg) {
+	if m.Event == "taken" || m.Event == "refused" {
+		a.role = "viewer"
+	}
+	a.changed()
+}
+
+func (a *attachStatus) line() string {
+	return fmt.Sprintf("%s: %s (epoch %d), %d attached, agent %s", a.name, a.role, a.epoch, a.clients, a.agent)
+}
+
+func (a *attachStatus) changed() {
+	if a.role == "" {
+		return // presence comes first: nothing to say before it
+	}
+	a.pending = a.line()
+	if a.show != nil {
+		a.show(a.pending)
+	}
+}
+
+// flush writes a pending title. A title is printable text only, so nothing
+// of it can end its own sequence early.
+func (a *attachStatus) flush(out io.Writer) {
+	if a.pending == "" {
+		return
+	}
+	t := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, "pomar "+a.pending)
+	fmt.Fprintf(out, "\x1b]2;%s\x07", t)
+	a.pending = ""
 }
 
 // sessionEnv is a new session's whole environment: TERM, HOME, PATH and
