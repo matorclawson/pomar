@@ -97,3 +97,10 @@ has exited; inspect retained attempts and VM-orphan reports.
 Managed jobs use aggregate resource admission, not an exclusive host lock.
 See [capacity admission](capacity-admission.md) for current reserved/free
 vectors, class-specific `fits_current` and quantified refusal reasons.
+
+## Build progress
+
+`pomar attempt progress -id JOB` reports current phase, elapsed time, bounded
+live output and registry activity as JSON. The existing authorized `get` response
+includes the same observation. See [build progress](attempt-progress.md) for
+phase markers, unknowns and the distinction from a final signed log.
