@@ -39,6 +39,7 @@ No socket or data root is guessed. Options go before positional arguments.
 Job admission is not completion: retrieve the result and verify its signature.
 
 More: pomar help all | pomar help server | pomar help install | pomar help upgrade
+Agents and scripts: pomar help -json (commands, exit codes, the loop); see AGENTS.md
 Docs: https://github.com/zeroemployeeorg/pomar/tree/main/docs
 `
 
@@ -48,12 +49,14 @@ func helpCmd(args []string, stdout, stderr io.Writer) int {
 		topic = args[1]
 	}
 	if len(args) > 2 {
-		fmt.Fprintln(stderr, "help: use pomar help [all|server|install|upgrade]")
+		fmt.Fprintln(stderr, "help: use pomar help [all|server|install|upgrade|-json]")
 		return 2
 	}
 	switch topic {
 	case "":
 		fmt.Fprint(stdout, quickHelp)
+	case "-json", "--json", "json":
+		return helpJSON(stdout)
 	case "all":
 		fmt.Fprint(stdout, quickHelp, "\n", usage)
 	case "server":
@@ -218,6 +221,11 @@ type diagnostic struct {
 	Name   string `json:"name"`
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail"`
+	// Skipped marks a check that doesn't apply here, such as bundled tools
+	// beside a source build: it is not a failure.
+	Skipped bool `json:"skipped,omitempty"`
+	// Next says what to do about a check that isn't OK.
+	Next string `json:"next,omitempty"`
 }
 
 func doctorCmd(args []string, stdout, stderr io.Writer) int {
@@ -234,22 +242,31 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() != 0 {
 		return 2
 	}
-	checks := []diagnostic{{"client", true, fmt.Sprintf("%s source %s; %s/%s", version, sourceCommit, runtime.GOOS, runtime.GOARCH)}}
+	checks := []diagnostic{{Name: "client", OK: true, Detail: fmt.Sprintf("%s source %s; %s/%s", version, sourceCommit, runtime.GOOS, runtime.GOARCH)}}
 	for _, tool := range []string{"pomar-host", "pomar-shim-linux-arm64"} {
 		p, err := siblingTool(tool)
-		d := diagnostic{tool, err == nil, p}
-		if err != nil {
+		d := diagnostic{Name: tool, OK: err == nil, Detail: p}
+		switch {
+		case err == nil:
+		case version == "0.0.0-dev":
+			// A source build has no bundle beside it. Using a manager doesn't
+			// need these tools, so their absence is not a failure here.
+			d.Skipped, d.Detail = true, "source build: no bundled "+tool+" beside this client"
+			d.Next = "only needed to run a manager yourself: install a release (pomar help install)"
+		default:
 			d.Detail = err.Error()
+			d.Next = "install a complete Pomar release (pomar help install)"
 		}
 		checks = append(checks, d)
 	}
 	// Connection only: no mutation, admission, provider inspection or guessed root.
-	d := diagnostic{"manager", false, "not selected: set POMAR_SOCKET or pass -socket"}
+	d := diagnostic{Name: "manager", Detail: "not selected", Next: noManager}
 	if *socket != "" {
 		c, err := net.DialTimeout("unix", *socket, 2*time.Second)
-		d.Detail = *socket
+		d.Detail, d.Next = *socket, ""
 		if err != nil {
 			d.Detail = err.Error()
+			d.Next = "check the path your host owner gave you, and that its manager is running; a permission refusal is theirs to resolve, never a reason for sudo"
 		} else {
 			c.Close()
 			d.OK = true
@@ -262,14 +279,20 @@ func doctorCmd(args []string, stdout, stderr io.Writer) int {
 	} else {
 		for _, d := range checks {
 			s := "OK"
-			if !d.OK {
+			switch {
+			case d.Skipped:
+				s = "SKIP"
+			case !d.OK:
 				s = "FAIL"
 			}
 			fmt.Fprintf(stdout, "%-4s %-24s %s\n", s, d.Name, d.Detail)
+			if d.Next != "" && !d.OK {
+				fmt.Fprintf(stdout, "     %-24s next: %s\n", "", d.Next)
+			}
 		}
 	}
 	for _, d := range checks {
-		if !d.OK {
+		if !d.OK && !d.Skipped {
 			rc = 1
 		}
 	}

@@ -140,6 +140,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return attemptCmd("capacity", args[1:], stdout, stderr)
 	case args[0] == "jobs":
 		return attemptCmd("list", args[1:], stdout, stderr)
+	case args[0] == "wait":
+		return attemptCmd("wait", args[1:], stdout, stderr)
 	case args[0] == "logs":
 		return attemptCmd("log", args[1:], stdout, stderr)
 	case len(args) == 1 && (args[0] == "version" || args[0] == "--version"):
@@ -598,6 +600,8 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	className := fs.String("class", "", "the job class to run in (start); empty is the manager's default")
 	logKey := fs.String("public-key", "", "the pinned public key, base64 (log): the result's signature is verified, and the log checked against the output_log it signed")
 	drainOff := fs.Bool("off", false, "lift the drain instead of setting it (drain)")
+	wait := fs.Bool("wait", false, "wait until the job ends, then print its final record; the exit code is then the job's own, or one of Pomar's fixed codes (start)")
+	waitLimit := fs.Duration("timeout", 0, "with -wait: stop waiting after this long (exit 75); the job keeps running (start)")
 	var outputs []string
 	fs.Func("output", "NAME: a file the command leaves at /pomar/outputs/NAME, copied out when it exits (start; repeatable)", func(v string) error {
 		outputs = append(outputs, v)
@@ -643,7 +647,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case *root != "":
 		c = manager.NewClient(*root)
 	default:
-		fmt.Fprintln(stderr, "attempt: data root not set (or give -socket)")
+		fmt.Fprintln(stderr, noManager)
 		return 2
 	}
 	var out any
@@ -669,6 +673,36 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		}
 		err = c.Do("POST", "/v1/attempts", req, &e)
 		out = e
+		if err == nil && *wait {
+			// Admission is not the end: wait for it, then report the job's own
+			// outcome as the exit code.
+			final, ended, werr := waitFor(c, e.Attempt, *waitLimit)
+			if werr != nil {
+				fmt.Fprintln(stderr, "pomar run -wait:", werr)
+				return 1
+			}
+			b, _ := json.MarshalIndent(final, "", "  ")
+			fmt.Fprintln(stdout, string(b))
+			if !ended {
+				fmt.Fprintf(stderr, "pomar run -wait: %s is still %s after %s; it keeps running. Wait again with `pomar wait -id %s`, or stop it with `pomar attempt stop -id %s`.\n", e.Attempt, final.State, *waitLimit, e.Attempt, e.Attempt)
+				return exitWaitGaveUp
+			}
+			return jobExitCode(final)
+		}
+	case "wait":
+		// The same wait as run -wait, for a job already admitted.
+		final, ended, werr := waitFor(c, *id, *waitLimit)
+		if werr != nil {
+			fmt.Fprintln(stderr, "pomar wait:", werr)
+			return 1
+		}
+		b, _ := json.MarshalIndent(final, "", "  ")
+		fmt.Fprintln(stdout, string(b))
+		if !ended {
+			fmt.Fprintf(stderr, "pomar wait: %s is still %s after %s; it keeps running.\n", *id, final.State, *waitLimit)
+			return exitWaitGaveUp
+		}
+		return jobExitCode(final)
 	case "get":
 		var e manager.Entry
 		err = c.Do("GET", "/v1/attempts/"+*id, nil, &e)
@@ -708,6 +742,9 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		}
 		b, sum, truncated, lerr := c.Log(*id, pub)
 		if lerr != nil {
+			if notEnded(c, *id, stderr) {
+				return 1
+			}
 			fmt.Fprintln(stderr, lerr)
 			return 1
 		}
@@ -756,6 +793,9 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		// inside it as signed, so `pomar result verify` can check it as is.
 		b, rerr := c.Result(*id)
 		if rerr != nil {
+			if notEnded(c, *id, stderr) {
+				return 1
+			}
 			fmt.Fprintln(stderr, rerr)
 			return 1
 		}

@@ -20,6 +20,8 @@ Contributions are licensed under the Apache License 2.0 (see `LICENSE`). The Pom
 
 ## Before you open a pull request
 
-Run `make verify`. It checks formatting, `go vet` and the tests. It also runs a hygiene check that rejects IP address literals and home-directory paths in tracked files. Use the documentation ranges (`192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24`) or `127.0.0.1` in examples, and `$HOME` in paths.
+Run `make verify`. It checks formatting, `go vet` and the tests (under the race detector). It also runs a hygiene check that rejects IP address literals and home-directory paths in tracked files. Use the documentation ranges (`192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24`) or `127.0.0.1` in examples, and `$HOME` in paths.
+
+Run `make hooks` once in your clone: it turns on the committed pre-push hook, which runs `make verify` before every push, so a failing gate can't be pushed by mistake.
 
 Keep each pull request to one concern.

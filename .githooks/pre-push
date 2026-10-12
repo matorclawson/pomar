@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Pomar's pre-push gate: make verify, the merge gate, before anything leaves this
+# clone. pipefail, so no pipe can hide a failing step. Turn it on once per
+# clone with `make hooks`.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+make verify

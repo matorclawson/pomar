@@ -13,7 +13,7 @@ HYGIENE_DENYLIST ?=
 HYGIENE_REQUIRE ?= 0
 HYGIENE_COPY := .hygiene/denylist.txt
 
-.PHONY: verify versions no-docker hygiene gofmt vet test shim swift-build swift-test swift-sign
+.PHONY: verify versions no-docker hygiene gofmt vet test shim swift-build swift-test swift-sign hooks
 
 verify: versions no-docker hygiene gofmt vet test shim swift-build swift-test swift-sign
 	@echo "=== make verify GREEN ==="
@@ -47,7 +47,7 @@ vet:
 
 test:
 	@echo "=== go test"
-	@go test -count=1 ./...
+	@go test -race -count=1 ./...
 
 # The in-guest module-proxy shim: static, linux/arm64, copied into guests.
 SHIM_BIN := .build-shim/pomar-shim-linux-arm64
@@ -89,3 +89,8 @@ swift-sign:
 swift-test:
 	@echo "=== swift test"
 	@swift test $(SWIFT_FLAGS) --skip-build
+
+# Turn on the committed pre-push hook (make verify before every push).
+hooks:
+	@git config core.hooksPath .githooks
+	@echo "pre-push hook on: make verify runs before every push"
