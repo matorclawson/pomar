@@ -7,6 +7,7 @@ Use the exact approved control socket given by your host owner:
 ```sh
 export POMAR_SOCKET=/path/to/approved/control.sock
 pomar doctor -json
+pomar health
 pomar status
 pomar jobs
 ```
@@ -16,6 +17,11 @@ connection. It does not authenticate a manager, verify its signature or
 Virtualization entitlement, inspect provider state or submit a job. An OK
 connection is reachability, not admission. A missing manager is an error; there
 is no hidden fallback to a development or production instance.
+
+`health` adds bounded API observations, current-fit explanations, optional
+result-key binding and explicit unknowns in human or JSON form. See
+[health and diagnostics](health-and-diagnostics.md) for the operator views,
+coverage, exit meanings and remaining fleet/pressure diagnostics.
 
 Every attempt command accepts `-socket`. `POMAR_SOCKET` is its default. Explicit
 `-root` without an explicit socket selects that root's owner socket even when

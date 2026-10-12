@@ -27,6 +27,7 @@ Everyday commands:
   seats     List declared development seats
   seat      Inspect, start, stop or attach to a declared seat
   doctor    Check this client, bundled tools and an explicit manager socket
+  health    Explain manager response, current room and unknowns (add -json)
   version   Print client version and source commit
 
 Installation and development owners:

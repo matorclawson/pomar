@@ -43,6 +43,7 @@ client does not grant access to a manager or a development seat.
 ```sh
 export POMAR_SOCKET=/path/to/approved/control.sock
 pomar doctor
+pomar health
 pomar status
 pomar run -id hello-1 -class YOUR_CLASS -- /bin/echo hello
 pomar jobs
@@ -58,7 +59,9 @@ Pomar never guesses a production data root or socket.
 
 For a repository job, name the owner's configured mirror and an exact source
 commit with `-mirror`, `-ref` and `-sha`; you do not need a local clone.
-See [operations, seats and result verification](docs/operations.md).
+See [operations, seats and result verification](docs/operations.md), and
+[health and diagnostics](docs/health-and-diagnostics.md) for current room,
+progress, explicit unknowns and the operator roadmap.
 
 ## Start a development manager
 
