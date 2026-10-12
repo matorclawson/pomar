@@ -115,7 +115,7 @@ func TestCreateIsOncePerOperation(t *testing.T) {
 // snapshot ends, with no byte missing or repeated.
 func TestSnapshotAndOutputAreOneOrderedStream(t *testing.T) {
 	h, _ := newHost(t)
-	s, _, err := h.Create("op-2", "operator", sh("i=0; while [ $i -lt 200 ]; do printf 'line-%d\\n' $i; i=$((i+1)); done; sleep 30"))
+	s, _, err := h.Create("op-2", "operator", sh("i=0; while [ $i -lt 200 ]; do printf 'line-%d\\n' $i; i=$((i+1)); done; while :; do echo tick; sleep 0.1; done"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestNoGrantWithoutItsJournalButRevocationAlways(t *testing.T) {
 // keeps draining meanwhile.
 func TestAClientThatFallsBehindIsResnapshotted(t *testing.T) {
 	h, _ := newHost(t)
-	s, _, err := h.Create("op-6", "operator", sh("i=0; while [ $i -lt 4000 ]; do printf '%0200d\\n' $i; i=$((i+1)); done; sleep 30"))
+	s, _, err := h.Create("op-6", "operator", sh("i=0; while [ $i -lt 4000 ]; do printf '%0200d\\n' $i; i=$((i+1)); done; while :; do echo tick; sleep 0.1; done"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestAClientThatFallsBehindIsResnapshotted(t *testing.T) {
 			t.Fatalf("output after the cut starts at %d, not exactly at %d", e.Offset, snap.To)
 		}
 	case <-time.After(5 * time.Second):
-		// the program may have finished printing at the cut: that's fine
+		t.Fatal("no output after the cut: the program keeps printing, so the client was never resumed")
 	}
 }
 
@@ -635,4 +635,52 @@ func TestASlowJournalHoldsNothingUp(t *testing.T) {
 		}
 	}
 	t.Fatal("the slow create never finished")
+}
+
+// Terminate waits on the program's reap, never on its exit's journal: a slow
+// journal makes it neither slow nor uncertain. A program that ignores the
+// hangup is killed after the grace.
+func TestTerminateWaitsOnTheReapNotTheJournal(t *testing.T) {
+	j := &journal{}
+	var delay atomic.Bool
+	h := NewSessionHost(func(r AuditRecord) error {
+		if delay.Load() && r.Action == "exit" {
+			time.Sleep(2 * time.Second)
+		}
+		return j.add(r)
+	})
+	h.fenceBound, h.hangupGrace = 300*time.Millisecond, 200*time.Millisecond
+	s, _, err := h.Create("op-17", "operator", sh("trap '' HUP; while :; do sleep 1; done"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // the trap is set
+	delay.Store(true)
+	start := time.Now()
+	if err := h.Terminate("op-17-stop", "operator", s.ID); err != nil {
+		t.Fatalf("terminate behind a slow journal: %v", err)
+	}
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Fatalf("terminate waited %v, on the journal", d)
+	}
+	select {
+	case <-s.reaped:
+	default:
+		t.Fatal("terminate returned before the reap")
+	}
+	if !j.has("terminate", "outcome", "ok") {
+		t.Fatal("the terminate's outcome wasn't ok")
+	}
+	<-s.Done()
+}
+
+// A command is named by its absolute path, never looked up on the host's
+// PATH.
+func TestARelativeCommandIsRefused(t *testing.T) {
+	h, _ := newHost(t)
+	spec := sh("true")
+	spec.Command.Path = "sh"
+	if _, _, err := h.Create("op-18", "operator", spec); err == nil {
+		t.Fatal("a bare command name was looked up")
+	}
 }
