@@ -81,6 +81,8 @@ type Entry struct {
 	Log *LogRecord `json:"output_log,omitempty"`
 	// Peaks is what the attempt was measured to use.
 	Peaks Peaks `json:"peaks,omitzero"`
+	// Progress is a GET observation, never a persisted/admission/result authority.
+	Progress *AttemptProgress `json:"progress,omitempty"`
 
 	freeAtStart int64     // the data root's free space when first sampled
 	lastSample  time.Time // the last footprint reading

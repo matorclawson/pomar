@@ -86,6 +86,8 @@ const usage = `usage:
   pomar attempt list|reconcile|vm-orphans [-root DIR]
                                     vm-orphans: VM services no live attempt accounts for (reported, never signalled)
   pomar attempt get|stop|rm|result [-root DIR | -socket PATH] -id ID
+  pomar attempt progress [-root DIR | -socket PATH] -id ID
+                                    read current phase, bounded provisional output and registry activity
                                     result: the attempt's result document and signature
   pomar attempt log [-root DIR | -socket PATH] -id ID [-o PATH]
                                     an ended attempt's output log, checked against its recorded sha256
@@ -671,6 +673,13 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		var e manager.Entry
 		err = c.Do("GET", "/v1/attempts/"+*id, nil, &e)
 		out = e
+	case "progress":
+		var e manager.Entry
+		err = c.Do("GET", "/v1/attempts/"+*id, nil, &e)
+		if err == nil && e.Progress == nil {
+			err = fmt.Errorf("manager does not expose structured progress; its final log is available only after the attempt ends")
+		}
+		out = e.Progress
 	case "list":
 		var l []manager.Entry
 		err = c.Do("GET", "/v1/attempts", nil, &l)
