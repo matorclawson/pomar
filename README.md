@@ -6,6 +6,8 @@ on Apple's [Containerization](https://github.com/apple/containerization).
 Guests run pinned inputs without host credentials; the host controls egress,
 capacity and retained results.
 
+**Agents and scripts:** start with [AGENTS.md](AGENTS.md), or `pomar help -json`.
+
 **Status:** early prototype, macOS 26 or later, Apple silicon. The release
 pipeline is prepared here; the first binary release has not yet been published.
 Until a release is published, the download commands below cannot succeed.
