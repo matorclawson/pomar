@@ -42,6 +42,8 @@ pomar attempt result -id build-1                # the signed result document
 
 - **IDs are yours to choose, and unique.** Reusing one is refused (HTTP 409); pick a new one.
 - **Without `-wait`, `run` returns at admission.** Admission is not success.
+- **If `run` says the manager didn't reply,** the job may have been admitted: look it up with `pomar attempt get -id ID`. Never start it again under a new ID.
+- **Every manager call is bounded** (60 s), and `-timeout` bounds a whole wait, calls included.
 - **To wait for a job you started without `-wait`:** `pomar wait -id build-1 [-timeout 10m]`.
 - **For a repository job,** name the owner's mirror and a commit: `-mirror NAME -ref main [-sha SHA]`.
 - **Files in:** `-input NAME=PATH` arrives at `/pomar/inputs/NAME`.
