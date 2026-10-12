@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"sync"
@@ -34,8 +35,9 @@ type SessionHost struct {
 	now      func() time.Time
 	// fenceBound and writeHook are fixed when the host is made; the tests
 	// shorten the one and set the other, before any session starts.
-	fenceBound time.Duration
-	writeHook  func()
+	fenceBound  time.Duration
+	hangupGrace time.Duration // how long Terminate waits after the hangup before it kills
+	writeHook   func()
 }
 
 // Bounds on a host, its sessions and their clients.
@@ -81,7 +83,10 @@ type AuditRecord struct {
 }
 
 // SessionSpec is what a new session runs. Name is a display label, never
-// authority; the session's ID is its identity.
+// authority; the session's ID is its identity. The command's Path is
+// absolute, never looked up on the host's PATH, and its environment is
+// exactly Command.Env: the host adds nothing, not even PATH, TERM or HOME,
+// so whoever makes the spec names each one.
 type SessionSpec struct {
 	Name       string
 	Kind       string // agent, shell, or another lower-case word
@@ -97,7 +102,7 @@ var sessionWord = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // up whatever is journaling: a create, an attach, a grant, and a session's
 // exit, whose Done closes only once its exit is journaled.
 func NewSessionHost(audit func(AuditRecord) error) *SessionHost {
-	return &SessionHost{sessions: map[string]*TermSession{}, byOp: map[opKey]created{}, audit: audit, now: time.Now, fenceBound: defaultFenceBound}
+	return &SessionHost{sessions: map[string]*TermSession{}, byOp: map[opKey]created{}, audit: audit, now: time.Now, fenceBound: defaultFenceBound, hangupGrace: 3 * time.Second}
 }
 
 func newID() string {
@@ -120,9 +125,9 @@ func (h *SessionHost) record(r AuditRecord) error {
 // with the same pair returns the session it made, and never starts a
 // second program; a retry asking for a different spec is refused.
 func (h *SessionHost) Create(operation, principal string, spec SessionSpec) (*TermSession, bool, error) {
-	if operation == "" || principal == "" || !sessionWord.MatchString(spec.Name) || !sessionWord.MatchString(spec.Kind) || spec.Command.Path == "" ||
+	if operation == "" || principal == "" || !sessionWord.MatchString(spec.Name) || !sessionWord.MatchString(spec.Kind) || !filepath.IsAbs(spec.Command.Path) ||
 		spec.Cols < 1 || spec.Cols > MaxCols || spec.Rows < 1 || spec.Rows > MaxRows {
-		return nil, false, errors.New("a session needs an operation ID, a principal, a name, a kind, its command and a bounded window size")
+		return nil, false, errors.New("a session needs an operation ID, a principal, a name, a kind, its command's absolute path and a bounded window size")
 	}
 	key, fp := opKey{principal, operation}, fingerprint(spec)
 	// The operation is reserved under the lock, and journaled and started
@@ -228,7 +233,9 @@ func (h *SessionHost) forget(id string) {
 // Terminate stops a session's program: a hangup to its process group, then
 // a kill if it is still running after the grace period. Viewing or
 // controlling a session grants no terminate: the caller authorises it. It
-// returns once the program has exited, or ErrTerminateUncertain.
+// returns once the program's leader is reaped, or ErrTerminateUncertain. It
+// waits on the reap itself, so a slow journal never makes it uncertain, and
+// it never signals a group whose leader is reaped, as that pid may be reused.
 func (h *SessionHost) Terminate(operation, principal, id string) error {
 	s, ok := h.Session(id)
 	if !ok {
@@ -238,13 +245,21 @@ func (h *SessionHost) Terminate(operation, principal, id string) error {
 		return ErrAudit
 	}
 	outcome, err := "ok", error(nil)
-	syscall.Kill(-s.cmd.Process.Pid, syscall.SIGHUP)
-	select {
-	case <-s.done:
-	case <-time.After(3 * time.Second):
-		syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
+	pgid := s.cmd.Process.Pid
+	signal := func(sig syscall.Signal) {
 		select {
-		case <-s.done:
+		case <-s.reaped: // the leader's pid is free: never signal it
+		default:
+			syscall.Kill(-pgid, sig)
+		}
+	}
+	signal(syscall.SIGHUP)
+	select {
+	case <-s.reaped:
+	case <-time.After(h.hangupGrace):
+		signal(syscall.SIGKILL)
+		select {
+		case <-s.reaped:
 		case <-time.After(h.fenceBound):
 			outcome, err = "uncertain", ErrTerminateUncertain
 		}
@@ -306,6 +321,8 @@ type TermSession struct {
 	cmd            *exec.Cmd
 	writes         chan pendingWrite
 	done           chan struct{} // closed once the program has exited and its output is drained
+	reaped         chan struct{} // closed once the program's leader is reaped: its pid is free from then on
+	waitErr        error         // the leader's wait, set before reaped closes
 
 	mu         sync.Mutex
 	fence      *sync.Cond // signalled when an in-flight write ends
@@ -360,9 +377,15 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 		return nil, err
 	}
 	s := &TermSession{ID: id, Name: spec.Name, Kind: spec.Kind, host: h, master: master, tty: tty, cmd: cmd,
-		writes: make(chan pendingWrite, inputQueue), done: make(chan struct{}), cols: spec.Cols, rows: spec.Rows,
-		viewers: map[*Client]struct{}{}}
+		writes: make(chan pendingWrite, inputQueue), done: make(chan struct{}), reaped: make(chan struct{}),
+		cols: spec.Cols, rows: spec.Rows, viewers: map[*Client]struct{}{}}
 	s.fence = sync.NewCond(&s.mu)
+	// The leader is reaped as soon as it exits, not once its output is
+	// drained: a background child holding the terminal open never delays it.
+	go func() {
+		s.waitErr = cmd.Wait()
+		close(s.reaped)
+	}()
 	go s.pump()
 	go s.writer()
 	return s, nil
@@ -381,7 +404,8 @@ func (s *TermSession) pump() {
 			break // EIO once the terminal side has no process left
 		}
 	}
-	waitErr := s.cmd.Wait()
+	<-s.reaped
+	waitErr := s.waitErr
 	code := 0
 	var exit *exec.ExitError
 	if errors.As(waitErr, &exit) {
