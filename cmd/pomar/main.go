@@ -42,7 +42,7 @@ var sourceCommit = "unknown"
 
 const usage = `usage:
   pomar version
-  pomar seats [-root DIR]           list the declared seats; on a terminal, a numbered menu
+  pomar seats [-root DIR] [-json] [-menu]  list the declared seats; -menu offers a numbered pick
   pomar seat status [-root DIR] SEAT
                                     one seat's declaration and location, as JSON
   pomar seat attach [-root DIR] -environment ENV
@@ -675,6 +675,9 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		}
 		err = c.Do("POST", "/v1/attempts", req, &e)
 		out = e
+		if unknownAdmission(err, *id, stderr) {
+			return 1
+		}
 		if err == nil && *wait {
 			// Admission is not the end: wait for it, then report the job's own
 			// outcome as the exit code.
@@ -686,7 +689,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			b, _ := json.MarshalIndent(final, "", "  ")
 			fmt.Fprintln(stdout, string(b))
 			if !ended {
-				fmt.Fprintf(stderr, "pomar run -wait: %s is still %s after %s; it keeps running. Wait again with `pomar wait -id %s`, or stop it with `pomar attempt stop -id %s`.\n", e.Attempt, final.State, *waitLimit, e.Attempt, e.Attempt)
+				fmt.Fprintf(stderr, "pomar run -wait: %s is still %s after %s; it keeps running. Wait again with `pomar wait -id %s`, or stop it with `pomar attempt stop -id %s`.\n", e.Attempt, lastSeen(final), *waitLimit, e.Attempt, e.Attempt)
 				return exitWaitGaveUp
 			}
 			return jobExitCode(final)
@@ -701,7 +704,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		b, _ := json.MarshalIndent(final, "", "  ")
 		fmt.Fprintln(stdout, string(b))
 		if !ended {
-			fmt.Fprintf(stderr, "pomar wait: %s is still %s after %s; it keeps running.\n", *id, final.State, *waitLimit)
+			fmt.Fprintf(stderr, "pomar wait: %s is still %s after %s; it keeps running.\n", *id, lastSeen(final), *waitLimit)
 			return exitWaitGaveUp
 		}
 		return jobExitCode(final)

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 )
@@ -154,5 +155,61 @@ func TestNoManagerSaysHowToSelectOne(t *testing.T) {
 		if d.Name == "pomar-host" && version == "0.0.0-dev" && !d.Skipped {
 			t.Fatalf("a source build's missing bundle was a failure: %+v", d)
 		}
+	}
+}
+
+// serveHung answers like a manager that accepts a request and then never
+// replies (hang), or drops the connection without a reply.
+func serveHung(t *testing.T, drop bool) string {
+	t.Helper()
+	dir, _ := os.MkdirTemp("/tmp", "pomarax")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "m.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if drop {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close()
+			return
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { close(release); srv.Close() })
+	return sock
+}
+
+// -timeout bounds the wait's own calls: a manager that never answers can't
+// hold it past the limit.
+func TestAWaitIsBoundedWhenTheManagerHangs(t *testing.T) {
+	sock := serveHung(t, false)
+	var out, errb bytes.Buffer
+	start := time.Now()
+	rc := run([]string{"wait", "-socket", sock, "-id", "j3", "-timeout", "300ms"}, &out, &errb)
+	if rc != exitWaitGaveUp || time.Since(start) > 5*time.Second {
+		t.Fatalf("exit %d after %v: %s", rc, time.Since(start), errb.String())
+	}
+	if !strings.Contains(errb.String(), "unanswered") {
+		t.Fatalf("the give-up doesn't say no state was seen: %s", errb.String())
+	}
+}
+
+// A start whose reply never came may have been admitted: it is looked up by
+// its own ID, never started again under a new one.
+func TestAnUnansweredStartPointsAtItsOwnID(t *testing.T) {
+	sock := serveHung(t, true)
+	var out, errb bytes.Buffer
+	rc := run([]string{"run", "-socket", sock, "-wait", "-id", "j4", "--", "/bin/true"}, &out, &errb)
+	if rc != 1 || !strings.Contains(errb.String(), "pomar attempt get -id j4") || !strings.Contains(errb.String(), "don't start it again") {
+		t.Fatalf("exit %d: %s", rc, errb.String())
 	}
 }

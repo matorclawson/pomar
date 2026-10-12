@@ -71,13 +71,13 @@ func TestSeatsListsTheDeclaredSeats(t *testing.T) {
 func TestTheMenuSaysWhatIsntAvailableYet(t *testing.T) {
 	root := seatHost(t, true)
 	var out, errb bytes.Buffer
-	if code := seatsCmd([]string{"-root", root}, strings.NewReader("1\n"), true, &out, &errb); code != 0 {
+	if code := seatsCmd([]string{"-root", root, "-menu"}, strings.NewReader("1\n"), true, &out, &errb); code != 0 {
 		t.Fatalf("%d %s", code, errb.String())
 	}
 	if !strings.Contains(out.String(), "aren't available on this host yet") || !strings.Contains(out.String(), "pomar seat status zeocreator") {
 		t.Fatalf("menu:\n%s", out.String())
 	}
-	if code := seatsCmd([]string{"-root", root}, strings.NewReader("7\n"), true, &out, &errb); code != 2 {
+	if code := seatsCmd([]string{"-root", root, "-menu"}, strings.NewReader("7\n"), true, &out, &errb); code != 2 {
 		t.Fatal("a bad number was accepted")
 	}
 }
@@ -105,5 +105,28 @@ func TestAHostWithoutSeatRoutesSaysSo(t *testing.T) {
 	}
 	if code := seatsCmd(nil, nil, false, &out, &errb); code != 1 {
 		t.Fatal("no root was accepted")
+	}
+}
+
+// On a terminal, seats never prompts unless asked: an agent on a PTY gets
+// the listing and its exit code. -json is the listing as JSON.
+func TestSeatsNeverPromptsUnasked(t *testing.T) {
+	root := seatHost(t, true)
+	var out, errb bytes.Buffer
+	if code := seatsCmd([]string{"-root", root}, strings.NewReader("1\n"), true, &out, &errb); code != 0 || strings.Contains(out.String(), "Pick a seat") {
+		t.Fatalf("a terminal was prompted unasked: %d\n%s", code, out.String())
+	}
+	if code := seatsCmd([]string{"-root", root, "-menu"}, nil, false, &out, &errb); code != 2 {
+		t.Fatal("-menu off a terminal was accepted")
+	}
+	out.Reset()
+	if code := seatsCmd([]string{"-root", root, "-json"}, nil, true, &out, &errb); code != 0 {
+		t.Fatalf("%d %s", code, errb.String())
+	}
+	var got struct {
+		Seats []map[string]any `json:"seats"`
+	}
+	if json.Unmarshal(out.Bytes(), &got) != nil || len(got.Seats) != 1 || got.Seats[0]["seat"] != "zeocreator" {
+		t.Fatalf("json %s", out.String())
 	}
 }
