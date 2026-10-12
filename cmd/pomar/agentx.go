@@ -143,6 +143,13 @@ func helpCatalogue() map[string]any {
 			{"attempt result", "The signed result document", "pomar attempt result -id ID", "JSON, exactly as signed", []string{"verify it with the owner's independently retained public key"}},
 			{"attempt stop", "Stop a running job", "pomar attempt stop -id ID", "JSON", nil},
 			{"seats", "List declared development seats", "pomar seats [-root DIR] [-json] [-menu]", "a table, or JSON with -json", []string{"never prompts unless -menu is given, which needs a terminal"}},
+			// session: POMAR-CC's entry, for Pomar to fold into the catalogue's release form.
+			{"session", "Named programs on terminals that outlive every client, from this user's session service",
+				"pomar session serve|new -id OP NAME -- /ABS/PROGRAM...|ls [-json]|show NAME|screen [-json] NAME|send -id OP [-enter] NAME TEXT|attach [-view] [-take] NAME|stop -id OP NAME",
+				"JSON (attach is the terminal; screen prints text, or JSON with -json)",
+				[]string{"exit 3: no session service for the root; 4: no such name; 5: refused as it stands (a running name, another controller, an operation still running); 6: the program exited",
+					"-id makes new, send and stop once-only: a retry with the same ID returns what it did, and never acts twice",
+					"native execution under your OS user, not a guest; it doesn't survive a restart of the service or a reboot", "docs/sessions.md"}},
 			{"version", "Client version and source commit", "pomar version", "text", nil},
 		},
 		"exit_codes": map[string]string{

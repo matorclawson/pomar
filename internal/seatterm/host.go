@@ -977,3 +977,15 @@ func (c *Client) closeEventsLocked() {
 		close(c.events)
 	}
 }
+
+// Controls reports whether this client holds the session's control now.
+// Every client of one principal shares its name, so only this says which
+// of them it is.
+func (c *Client) Controls() bool {
+	c.s.mu.Lock()
+	defer c.s.mu.Unlock()
+	return c.s.controller == c && c.epoch == c.s.epoch
+}
+
+// Session returns the session the client views.
+func (c *Client) Session() *TermSession { return c.s }

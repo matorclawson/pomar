@@ -82,6 +82,31 @@ an operator can enter.
 
 Starting a seat and entering it are the host owner's acts (`pomar help all`).
 
+## 6. Sessions: programs that outlive their terminal
+
+`pomar session` runs a program on a terminal that this user's session service
+owns, so it keeps running when every client leaves. It works the same for
+any program: an agent, a shell, a build. The service must already be running
+(`pomar session serve`, which the host's owner starts); without one, every
+command exits 3.
+
+```sh
+pomar session new -id new-1 build -- /bin/sh -c 'make test; exec /bin/sh'
+pomar session screen build                      # the screen as text, now
+pomar session send -id send-1 -enter build 'echo done'
+pomar session ls -json
+pomar session stop -id stop-1 build
+```
+
+- **`-id` makes `new`, `send` and `stop` once-only.** If a reply is lost, ask again with the same ID: you get what it did, and nothing happens twice. Never retry under a new ID.
+- **A send takes control only if nobody holds it.** If someone does, it exits 5; `-take` takes control, and a person who is attached then becomes a viewer.
+- **The program's environment is exactly** TERM, HOME, PATH and LANG from yours, plus each `-env K=V`. The program is named by its absolute path.
+- **Exit codes:** 3, no service; 4, no such name; 5, refused as it stands; 6, the program exited.
+- **Sessions don't survive** a restart of the service, or a reboot.
+- **A screen can show a secret.** Read it as you would read the terminal.
+
+See [docs/sessions.md](docs/sessions.md).
+
 ## Never
 
 - **Guess a socket or a data root.**
