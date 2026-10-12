@@ -3,21 +3,25 @@ package sessiond
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/seatterm"
 )
 
 // attach upgrades to seatterm.ProtocolV2 and carries one client of a
-// session: the client's window size first; then the session's exact screen,
-// and its live output, with notices beside it. A controlling client's input
-// and size changes reach the program; a viewer's never do. A dropped
-// connection is a detach, and never stops the program.
+// session: the client's window size first; then the session's presence and
+// agent state, its exact screen, and its live output, with notices and meta
+// frames beside it. A controlling client's input and size changes reach the
+// program; a viewer's never do. A client asks for control, takes it or
+// releases it with Control frames, and is told each change to its role.
+// A dropped connection is a detach, and never stops the program.
 func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	if !strings.EqualFold(r.Header.Get("Upgrade"), seatterm.ProtocolV2) || !strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
 		refuse(w, http.StatusBadRequest, KindUsage, "attach is an upgrade to "+seatterm.ProtocolV2)
@@ -73,6 +77,11 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	meta := func(kind byte, v any) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return seatterm.WriteMeta(conn, kind, v)
+	}
 	notice := func(format string, a ...any) {
 		m := fmt.Sprintf(format, a...)
 		if len(m) > seatterm.MaxNotice {
@@ -80,11 +89,33 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 		}
 		send(seatterm.Notice, []byte(m))
 	}
+	// Presence and agent state are sent on attach and when they change.
+	var lastPresence string
+	var lastSeq uint64
+	presence := func() error {
+		b, _ := json.Marshal(c.Presence())
+		if string(b) == lastPresence {
+			return nil
+		}
+		lastPresence = string(b)
+		wmu.Lock()
+		defer wmu.Unlock()
+		return seatterm.WriteFrame(conn, seatterm.Presence, b)
+	}
+	agent := func(force bool) error {
+		st, _ := t.Agent()
+		if !force && st.Seq == lastSeq {
+			return nil
+		}
+		lastSeq = st.Seq
+		return meta(seatterm.State, st)
+	}
 
 	controls := false
 	if !view {
-		if _, err := c.Control(take, "attach"); err == nil {
+		if epoch, err := c.Control(take, "attach"); err == nil {
 			controls = true
+			meta(seatterm.Control, seatterm.ControlMsg{Event: "granted", Epoch: epoch})
 			// The session takes the controller's size; the screen is cut
 			// once that is applied, so it is drawn at the size the client has.
 			if in := t.Info(); in.Cols != cols || in.Rows != rows {
@@ -97,6 +128,7 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
+			meta(seatterm.Control, seatterm.ControlMsg{Event: "refused", Epoch: t.Info().Epoch, Reason: err.Error()})
 			notice("viewing: another client controls %s; attach with -take to take control", t.Name)
 		}
 	}
@@ -109,34 +141,63 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 		}
 		return send(seatterm.Data, snap.Screen)
 	}
-	if err := screen(c.Resnapshot()); err != nil {
+	if presence() != nil || agent(true) != nil || screen(c.Resnapshot()) != nil {
 		return
 	}
 	if !controls {
 		notice("viewing %s: your input isn't sent", t.Name)
 	}
 
+	// released is set while this client gives control up itself, so the
+	// change isn't reported as taken.
+	var released atomic.Bool
 	gone := make(chan struct{})
 	go func() {
 		defer close(gone)
 		warned := false
 		for {
-			kind, payload, err := seatterm.ReadFrame(in)
+			kind, payload, err := seatterm.ReadFrameV2(in)
 			if err != nil || kind == seatterm.Close {
 				return
 			}
-			switch {
-			case !c.Controls():
-				if !warned {
-					notice("viewing: your input isn't sent")
-					warned = true
+			switch kind {
+			case seatterm.Control:
+				var m seatterm.ControlMsg
+				json.Unmarshal(payload, &m)
+				switch m.Op {
+				case "request", "take":
+					if epoch, err := c.Control(m.Op == "take", "attach "+m.Op); err != nil {
+						meta(seatterm.Control, seatterm.ControlMsg{Event: "refused", Epoch: t.Info().Epoch, Reason: err.Error()})
+					} else {
+						meta(seatterm.Control, seatterm.ControlMsg{Event: "granted", Epoch: epoch})
+					}
+				case "release":
+					if c.Controls() {
+						released.Store(true)
+						c.Release()
+					}
+					meta(seatterm.Control, seatterm.ControlMsg{Event: "released", Epoch: t.Info().Epoch})
+				default:
+					meta(seatterm.Control, seatterm.ControlMsg{Event: "refused", Reason: "unknown control op"})
 				}
-			case kind == seatterm.Data:
-				if err := c.Input(payload); err != nil {
-					notice("input refused: %v", err)
+				warned = false
+			case seatterm.Data, seatterm.Resize:
+				if !c.Controls() {
+					if !warned {
+						notice("viewing: your input isn't sent")
+						warned = true
+					}
+					continue
 				}
-			case kind == seatterm.Resize:
-				c.Resize(binary.BigEndian.Uint16(payload), binary.BigEndian.Uint16(payload[2:]))
+				if kind == seatterm.Data {
+					if err := c.Input(payload); err != nil {
+						notice("input refused: %v", err)
+					}
+				} else {
+					c.Resize(binary.BigEndian.Uint16(payload), binary.BigEndian.Uint16(payload[2:]))
+				}
+			default:
+				// the host's own frames: a client never sends them, and they act on nothing
 			}
 		}
 	}()
@@ -150,6 +211,8 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 				if in := t.Info(); !in.Running && in.ExitCode != nil {
 					notice("%s exited with code %d", t.Name, *in.ExitCode)
 				}
+				presence()
+				agent(false)
 				send(seatterm.Close, nil)
 				return
 			}
@@ -167,9 +230,13 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 				held = now
 				if now {
 					notice("you control %s", t.Name)
-				} else {
+				} else if !released.Swap(false) && t.Info().Running { // an exit ends control too, and is said by its own notice
+					meta(seatterm.Control, seatterm.ControlMsg{Event: "taken", Epoch: t.Info().Epoch})
 					notice("control of %s was taken; you're viewing", t.Name)
 				}
+			}
+			if presence() != nil || agent(false) != nil {
+				return
 			}
 		}
 	}

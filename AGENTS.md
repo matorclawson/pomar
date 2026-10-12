@@ -101,11 +101,15 @@ pomar session stop -id stop-1 build
 - **`-id` makes `new`, `send` and `stop` once-only.** If a reply is lost, ask again with the same ID: you get what it did, and nothing happens twice. Never retry under a new ID.
 - **A send takes control only if nobody holds it.** If someone does, it exits 5; `-take` takes control, and a person who is attached then becomes a viewer.
 - **The program's environment is exactly** TERM, HOME, PATH and LANG from yours, plus each `-env K=V`. The program is named by its absolute path.
-- **Exit codes:** 3, no service; 4, no such name; 5, refused as it stands; 6, the program exited.
+- **Fence a send on what you read.** `show` gives the session's `id` and `epoch`: `send -session ID -epoch N` is refused as stale (exit 7), and writes nothing, if the name has a new generation or control changed since.
+- **A send is raw unless you say `-when-ready`,** and its reply says `"mode": "raw"`. A session made with `-state` gives its adapter a state channel. `-when-ready` then waits for the adapter to report the program waiting for input. Without one, `-when-ready` exits 8 and writes nothing. Its reply tells `queued`, `written` and `accepted` apart: only the adapter can say `accepted`.
+- **`stop` reads back** the leader's reap and whether anything remains in its process group.
+- **Exit codes:** 3, no service; 4, no such name; 5, refused as it stands; 6, the program exited; 7, stale; 8, unsupported; 9, not ready in time.
+- **Agent state is only what an adapter reports,** never the screen, and is `unknown` without one. The adapter contract is in docs/sessions.md.
 - **Sessions don't survive** a restart of the service, or a reboot.
 - **A screen can show a secret.** Read it as you would read the terminal.
 
-See [docs/sessions.md](docs/sessions.md).
+See [docs/sessions.md](docs/sessions.md), and [docs/sessions-protocol.md](docs/sessions-protocol.md) for the wire protocol.
 
 ## Never
 

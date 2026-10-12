@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zeroemployeeorg/pomar/internal/seatterm"
 	"github.com/zeroemployeeorg/pomar/internal/sessiond"
 )
 
@@ -77,5 +78,78 @@ func TestASessionsEnvironmentIsExplicit(t *testing.T) {
 	env := strings.Join(sessionEnv([]string{"A=1", "TERM=vt100"}), " ")
 	if strings.Contains(env, "SECRET_LOOKING") || !strings.Contains(env, "TERM=vt100") || !strings.Contains(env, "A=1") {
 		t.Fatalf("env %s", env)
+	}
+}
+
+// Text after -- is sent as it is, even beginning with a dash; a stale epoch
+// and a when-ready send to a session without a state channel have their
+// own exit codes, and write nothing.
+func TestSessionSendsDashTextAndFencedRefusals(t *testing.T) {
+	dir, _ := os.MkdirTemp("/tmp", "psc")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	root := filepath.Join(dir, "r")
+	s, err := sessiond.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); s.Serve(ctx, func() { close(ready) }) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+	var out, errb bytes.Buffer
+	if rc := run([]string{"session", "new", "-root", root, "-id", "op-1", "-cols", "40", "-rows", "6", "work", "--", "/bin/sh", "-c", `while read l; do printf 'got:%s\n' "$l"; done`}, &out, &errb); rc != 0 {
+		t.Fatalf("new: %d %s", rc, errb.String())
+	}
+	out.Reset()
+	if rc := run([]string{"session", "send", "-root", root, "-id", "s-1", "-enter", "work", "--", "-dashed"}, &out, &errb); rc != 0 {
+		t.Fatalf("send -- -dashed: %d %s", rc, errb.String())
+	}
+	var res sessiond.OpResult
+	if json.Unmarshal(out.Bytes(), &res) != nil || res.Mode != "raw" || !res.Written || res.Accepted != "unsupported" {
+		t.Fatalf("send printed %s", out.String())
+	}
+	var screen string
+	for i := 0; i < 200 && !strings.Contains(screen, "got:-dashed"); i++ {
+		out.Reset()
+		run([]string{"session", "screen", "-root", root, "work"}, &out, &errb)
+		screen = out.String()
+	}
+	if !strings.Contains(screen, "got:-dashed") {
+		t.Fatalf("screen %q", screen)
+	}
+	if rc := run([]string{"session", "send", "-root", root, "-id", "s-2", "-epoch", "999", "work", "late"}, &out, &errb); rc != exitStale {
+		t.Fatalf("a stale epoch: %d %s", rc, errb.String())
+	}
+	if rc := run([]string{"session", "send", "-root", root, "-id", "s-3", "-when-ready", "work", "late"}, &out, &errb); rc != exitUnsupp {
+		t.Fatalf("when-ready without a state channel: %d %s", rc, errb.String())
+	}
+	out.Reset()
+	if rc := run([]string{"session", "stop", "-root", root, "-id", "k-1", "work"}, &out, &errb); rc != 0 || !strings.Contains(out.String(), `"group": "gone"`) {
+		t.Fatalf("stop: %d %s", rc, out.String())
+	}
+}
+
+// The attach status is written as a title of printable text only, and only
+// once there is a role to say.
+func TestTheAttachStatusTitleIsPrintableOnly(t *testing.T) {
+	var shown []string
+	a := &attachStatus{name: "work\x07\x1b]0;evil", agent: "unknown", show: func(s string) { shown = append(shown, s) }}
+	a.state(seatterm.AgentState{State: "waiting-input"})
+	if len(shown) != 0 {
+		t.Fatal("a status was shown before presence")
+	}
+	a.presence(seatterm.PresenceMsg{You: "controller", Viewers: []string{"uid:1", "uid:1"}, Epoch: 3})
+	var b bytes.Buffer
+	a.flush(&b)
+	got := b.String()
+	if !strings.HasPrefix(got, "\x1b]2;pomar work]0;evil: controller (epoch 3), 2 attached, agent waiting-input") || strings.Count(got, "\x07") != 1 || strings.Count(got, "\x1b") != 1 {
+		t.Fatalf("title %q", got)
+	}
+	b.Reset()
+	a.flush(&b)
+	if b.Len() != 0 {
+		t.Fatal("a title was written twice")
 	}
 }
