@@ -7,6 +7,7 @@
 package seatterm
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -100,4 +101,38 @@ func ResizePayload(cols, rows uint16) []byte {
 	binary.BigEndian.PutUint16(b, cols)
 	binary.BigEndian.PutUint16(b[2:], rows)
 	return b
+}
+
+// ProtocolV2 is the session host's stream (POMAR-CC SOW 27 §3.2): the same
+// frames as v1, plus Notice, carrying the exact screen on attach and then
+// the session's live output. v1 streams never carry a Notice, and ReadFrame
+// keeps refusing one.
+const ProtocolV2 = "pomar-terminal/v2"
+
+// Notice is a v2 frame from the session host to a client: a short line of
+// text about the session (control taken, output resumed after a gap, the
+// program exited), never terminal bytes.
+const Notice byte = 'n'
+
+// MaxNotice bounds a notice's text.
+const MaxNotice = 512
+
+// ReadFrameV2 reads one v2 frame: a v1 frame, or a bounded notice.
+func ReadFrameV2(r io.Reader) (byte, []byte, error) {
+	var head [3]byte
+	if _, err := io.ReadFull(r, head[:]); err != nil {
+		return 0, nil, err
+	}
+	if head[0] != Notice {
+		return ReadFrame(io.MultiReader(bytes.NewReader(head[:]), r))
+	}
+	n := int(binary.BigEndian.Uint16(head[1:]))
+	if n > MaxNotice {
+		return 0, nil, errors.New("notice too long")
+	}
+	payload := make([]byte, n)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return 0, nil, err
+	}
+	return Notice, payload, nil
 }

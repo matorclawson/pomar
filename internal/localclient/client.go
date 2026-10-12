@@ -97,3 +97,7 @@ func New(socket string, uid int) *http.Client {
 	}}
 	return &http.Client{Transport: transport, Timeout: 150 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
+
+// PeerUID is the uid the kernel recorded for the process at the other end
+// of a Unix socket connection: a server uses it to admit only its owner.
+func PeerUID(c net.Conn) (uint32, error) { return peerUID(c) }
