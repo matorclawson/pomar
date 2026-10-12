@@ -234,25 +234,46 @@ func (h *SessionHost) forget(id string) {
 	h.mu.Unlock()
 }
 
-// Terminate stops a session's program: a hangup to its process group, then
-// a kill if it is still running after the grace period. Viewing or
-// controlling a session grants no terminate: the caller authorises it. It
-// returns once the program's leader is reaped, or ErrTerminateUncertain. It
-// waits on the reap itself, so a slow journal never makes it uncertain, and
-// it never signals a group whose leader is reaped, as that pid may be reused.
+// Terminate stops a session's program, as Stop does, and reports only
+// whether its leader was confirmed reaped.
 func (h *SessionHost) Terminate(operation, principal, id string) error {
+	_, err := h.Stop(operation, principal, id)
+	return err
+}
+
+// StopReport is what a stop read back: the program's leader, and the rest
+// of its process group.
+type StopReport struct {
+	Leader      string `json:"leader"`       // reaped, or running (the stop is uncertain)
+	Group       string `json:"group"`        // gone, or remaining: a process in the leader's group outlived the stop
+	GroupKilled bool   `json:"group_killed"` // a group member outlived the hangup and was killed
+}
+
+// Stop stops a session's program: a hangup to its process group, then a
+// kill if the leader still runs after the grace period. Viewing or
+// controlling a session grants no stop: the caller authorises it. It waits
+// on the leader's reap itself, so a slow journal never makes it uncertain,
+// and it signals the group only while the group is known to exist: a leader
+// reaped with its group empty leaves a pid that may be reused. Once the
+// leader is reaped, a member that ignored the hangup is given the grace
+// period, then killed, and the group is read back. A process that left the
+// group (its own setsid or setpgid) is outside what this reads.
+func (h *SessionHost) Stop(operation, principal, id string) (StopReport, error) {
 	s, ok := h.Session(id)
 	if !ok {
-		return errors.New("no live session with that ID")
+		return StopReport{}, errors.New("no live session with that ID")
 	}
 	if err := h.record(AuditRecord{Operation: operation, Action: "terminate", Phase: "intent", Principal: principal, Session: id}); err != nil {
-		return ErrAudit
+		return StopReport{}, ErrAudit
 	}
-	outcome, err := "ok", error(nil)
+	rep, err := StopReport{Leader: "reaped", Group: "gone"}, error(nil)
 	pgid := s.cmd.Process.Pid
 	signal := func(sig syscall.Signal) {
 		select {
-		case <-s.reaped: // the leader's pid is free: never signal it
+		case <-s.reaped: // the leader's pid may be free: signal the group only if it is still there
+			if groupExists(pgid) {
+				syscall.Kill(-pgid, sig)
+			}
 		default:
 			syscall.Kill(-pgid, sig)
 		}
@@ -265,12 +286,47 @@ func (h *SessionHost) Terminate(operation, principal, id string) error {
 		select {
 		case <-s.reaped:
 		case <-time.After(h.fenceBound):
-			outcome, err = "uncertain", ErrTerminateUncertain
+			rep.Leader, err = "running", ErrTerminateUncertain
 		}
 	}
-	h.record(AuditRecord{Operation: operation, Action: "terminate", Phase: "outcome", Principal: principal, Session: id, Outcome: outcome})
-	return err
+	if err == nil && !s.groupGone(h.hangupGrace) {
+		rep.GroupKilled = true
+		signal(syscall.SIGKILL)
+		if !s.groupGone(h.fenceBound) {
+			rep.Group = "remaining"
+		}
+	}
+	outcome := "ok"
+	if err != nil || rep.Group != "gone" {
+		outcome = "uncertain"
+	}
+	h.record(AuditRecord{Operation: operation, Action: "terminate", Phase: "outcome", Principal: principal, Session: id, Outcome: outcome,
+		Reason: fmt.Sprintf("leader %s, group %s", rep.Leader, rep.Group)})
+	return rep, err
 }
+
+// groupExists reports whether any process is in the process group pgid. A
+// member this user can't signal still counts.
+func groupExists(pgid int) bool {
+	err := syscall.Kill(-pgid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// groupGone waits, up to bound, for the session's process group to empty.
+func (s *TermSession) groupGone(bound time.Duration) bool {
+	for end := time.Now().Add(bound); ; time.Sleep(20 * time.Millisecond) {
+		if !groupExists(s.cmd.Process.Pid) {
+			return true
+		}
+		if !time.Now().Before(end) {
+			return false
+		}
+	}
+}
+
+// GroupRemains reports whether a process in the session's process group is
+// still there: after the leader exits, a member that ignored the hangup.
+func (s *TermSession) GroupRemains() bool { return groupExists(s.cmd.Process.Pid) }
 
 // Session returns a session by its ID.
 func (h *SessionHost) Session(id string) (*TermSession, bool) {
@@ -282,17 +338,20 @@ func (h *SessionHost) Session(id string) (*TermSession, bool) {
 
 // SessionInfo is a session as listed.
 type SessionInfo struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Kind       string   `json:"kind"`
-	Running    bool     `json:"running"`
-	ExitCode   *int     `json:"exit_code,omitempty"`
-	LastOutput string   `json:"last_output,omitempty"`
-	Cols       uint16   `json:"cols"`
-	Rows       uint16   `json:"rows"`
-	Controller string   `json:"controller,omitempty"`
-	Epoch      uint64   `json:"epoch"`
-	Viewers    []string `json:"viewers"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Kind       string     `json:"kind"`
+	Running    bool       `json:"running"`
+	ExitCode   *int       `json:"exit_code,omitempty"`
+	LastOutput string     `json:"last_output,omitempty"`
+	Cols       uint16     `json:"cols"`
+	Rows       uint16     `json:"rows"`
+	Controller string     `json:"controller,omitempty"`
+	Epoch      uint64     `json:"epoch"`
+	Viewers    []string   `json:"viewers"`
+	Program    string     `json:"program"`       // the program's path
+	Dir        string     `json:"dir,omitempty"` // its working directory
+	Agent      AgentState `json:"agent"`         // adapter-reported; unknown without one
 }
 
 // List returns every session, ordered by name then ID.
@@ -319,6 +378,7 @@ func (h *SessionHost) List() []SessionInfo {
 // TermSession is one program on a PTY the host owns.
 type TermSession struct {
 	ID, Name, Kind string
+	Program, Dir   string // the program's path and working directory: metadata, never its arguments or environment
 	host           *SessionHost
 	master         *os.File
 	tty            string
@@ -340,7 +400,9 @@ type TermSession struct {
 	viewers    map[*Client]struct{}
 	controller *Client
 	epoch      uint64
-	inflight   uint64 // the epoch of the write now at the PTY, or 0
+	inflight   uint64        // the epoch of the write now at the PTY, or 0
+	agent      AgentState    // what the session's adapter last reported
+	agentCh    chan struct{} // closed at the next report
 }
 
 type pendingWrite struct {
@@ -384,7 +446,8 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	s := &TermSession{ID: id, Name: spec.Name, Kind: spec.Kind, host: h, master: master, tty: tty, cmd: cmd,
 		writes: make(chan pendingWrite, inputQueue), done: make(chan struct{}), reaped: make(chan struct{}),
 		cols: spec.Cols, rows: spec.Rows, viewers: map[*Client]struct{}{},
-		term: termstate.New(int(spec.Cols), int(spec.Rows), HistoryLines)}
+		term:    termstate.New(int(spec.Cols), int(spec.Rows), HistoryLines),
+		Program: c.Path, Dir: c.Dir, agent: AgentState{State: "unknown"}, agentCh: make(chan struct{})}
 	s.fence = sync.NewCond(&s.mu)
 	// The leader is reaped as soon as it exits, not once its output is
 	// drained: a background child holding the terminal open never delays it.
@@ -539,7 +602,8 @@ func (c *Client) Outcomes() Outcomes {
 func (s *TermSession) Info() SessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	in := SessionInfo{ID: s.ID, Name: s.Name, Kind: s.Kind, Running: !s.exited, Cols: s.cols, Rows: s.rows, Epoch: s.epoch, Viewers: []string{}}
+	in := SessionInfo{ID: s.ID, Name: s.Name, Kind: s.Kind, Running: !s.exited, Cols: s.cols, Rows: s.rows, Epoch: s.epoch, Viewers: []string{},
+		Program: s.Program, Dir: s.Dir, Agent: s.agent}
 	if s.exited {
 		code := s.exitCode
 		in.ExitCode = &code
@@ -641,6 +705,9 @@ func (s *TermSession) Attach(principal string) (*Client, Snapshot, error) {
 		return nil, Snapshot{}, ErrTooMany
 	}
 	c := &Client{Principal: principal, s: s, events: make(chan Event, viewerQueue), signal: make(chan struct{}, 1)}
+	for v := range s.viewers {
+		v.notify(Event{Kind: EventState}) // presence: one more client
+	}
 	s.viewers[c] = struct{}{}
 	if s.exited {
 		c.closeEventsLocked() // nothing will come from a program that has exited
@@ -895,6 +962,9 @@ func (c *Client) Detach() {
 		c.gone = true
 		delete(s.viewers, c)
 		c.closeEventsLocked()
+		for v := range s.viewers {
+			v.notify(Event{Kind: EventState}) // presence: one client fewer
+		}
 	}
 	s.mu.Unlock()
 	if held {
@@ -975,3 +1045,73 @@ func (c *Client) Controls() bool {
 
 // Session returns the session the client views.
 func (c *Client) Session() *TermSession { return c.s }
+
+// AgentState is what a session's adapter last reported about the program
+// the session runs: whether it is working, waiting for input, or waiting on
+// a permission prompt, and the last input it confirmed it accepted. It is
+// only ever reported by an adapter, never read off the screen, and is
+// unknown until one reports.
+type AgentState struct {
+	State    string `json:"state"` // unknown, running, waiting-input, permission or idle
+	Detail   string `json:"detail,omitempty"`
+	Seen     string `json:"seen,omitempty"` // when the adapter reported it
+	Seq      uint64 `json:"seq"`            // counts reports: 0 until the first
+	StateSeq uint64 `json:"state_seq"`      // the report that set State: a report of only an acceptance leaves it
+	Accepted string `json:"accepted_input,omitempty"`
+}
+
+// AgentStates are the states an adapter may report.
+var AgentStates = map[string]bool{"running": true, "waiting-input": true, "permission": true, "idle": true}
+
+// ReportAgent records an adapter's report and tells every client. An empty
+// state keeps the last one, so an adapter may report only an acceptance.
+func (s *TermSession) ReportAgent(state, detail, accepted string) error {
+	if state != "" && !AgentStates[state] {
+		return fmt.Errorf("unknown agent state %q", state)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state != "" {
+		s.agent.State, s.agent.StateSeq = state, s.agent.Seq+1
+	}
+	if accepted != "" {
+		s.agent.Accepted = boundReason(accepted)
+	}
+	s.agent.Detail = boundReason(detail)
+	s.agent.Seq++
+	s.agent.Seen = s.host.now().UTC().Format(time.RFC3339Nano)
+	close(s.agentCh)
+	s.agentCh = make(chan struct{})
+	for c := range s.viewers {
+		c.notify(Event{Kind: EventState})
+	}
+	return nil
+}
+
+// Agent returns the agent state last reported, and a channel closed at the
+// next report.
+func (s *TermSession) Agent() (AgentState, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agent, s.agentCh
+}
+
+// Presence is the session's clients and controller as this client sees
+// them, for its Presence frame.
+func (c *Client) Presence() PresenceMsg {
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := PresenceMsg{Session: s.ID, Viewers: []string{}, Epoch: s.epoch, You: "viewer"}
+	for v := range s.viewers {
+		p.Viewers = append(p.Viewers, v.Principal)
+	}
+	sort.Strings(p.Viewers)
+	if s.controller != nil {
+		p.Controller = s.controller.Principal
+	}
+	if s.controller == c && c.epoch == s.epoch {
+		p.You = "controller"
+	}
+	return p
+}

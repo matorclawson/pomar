@@ -317,3 +317,27 @@ func (noDeadlines) Read([]byte) (int, error)         { select {} }
 func (noDeadlines) Write(p []byte) (int, error)      { return len(p), nil }
 func (noDeadlines) SetReadDeadline(time.Time) error  { return errors.New("no deadlines") }
 func (noDeadlines) SetWriteDeadline(time.Time) error { return errors.New("no deadlines") }
+
+// v2's meta frames are bounded JSON objects, and v1 never reads one.
+func TestMetaFramesAreBoundedJSON(t *testing.T) {
+	var b bytes.Buffer
+	if err := WriteMeta(&b, Presence, PresenceMsg{Session: "s", Viewers: []string{"uid:1"}, You: "viewer"}); err != nil {
+		t.Fatal(err)
+	}
+	raw := append([]byte(nil), b.Bytes()...)
+	kind, payload, err := ReadFrameV2(&b)
+	if err != nil || kind != Presence || !bytes.Contains(payload, []byte(`"you":"viewer"`)) {
+		t.Fatalf("%q %s %v", kind, payload, err)
+	}
+	if _, _, err := ReadFrame(bytes.NewReader(raw)); err == nil {
+		t.Fatal("v1 read a meta frame")
+	}
+	b.Reset()
+	WriteFrame(&b, Control, []byte("not json"))
+	if _, _, err := ReadFrameV2(&b); err == nil {
+		t.Fatal("a control frame that isn't JSON was read")
+	}
+	if err := WriteMeta(&b, State, map[string]string{"detail": strings.Repeat("x", MaxMeta)}); err == nil {
+		t.Fatal("an over-long meta frame was written")
+	}
+}

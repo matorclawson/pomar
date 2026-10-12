@@ -72,30 +72,87 @@ Every command takes `-root`. Everything but `attach` prints JSON (`screen` and
 
 | Command | What it does |
 |---|---|
-| `pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] NAME -- /ABS/PROGRAM ARGS...` | Starts PROGRAM on a terminal named NAME. A name that is running is refused; a name whose program ended is taken by a new generation. |
-| `pomar session ls [-json]` | Lists every session: state, size, controller and viewers. It also lists those an earlier service held. |
-| `pomar session show NAME` | One session's state. |
+| `pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] NAME -- /ABS/PROGRAM ARGS...` | Starts PROGRAM on a terminal named NAME. A name that is running is refused; a name whose program ended is taken by a new generation. `-state` gives it a state channel (see [Agent state](#agent-state)). |
+| `pomar session ls [-json]` | Lists every session, and those an earlier service held (`unrecovered`). |
+| `pomar session show NAME` | One session's state (below). |
 | `pomar session screen [-json] NAME` | The current screen as text rows. With `-json`, also the cursor, the title and the output offset. |
-| `pomar session send -id OP [-enter] [-take] NAME TEXT` | Writes TEXT as the program's input. `-enter` adds a carriage return. |
-| `pomar session attach [-view] [-take] NAME` | Enters the session's terminal (see below). |
-| `pomar session stop -id OP NAME` | Hangs up the program's process group, and kills it if it is still running after 3 s. |
+| `pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME [--] TEXT` | Writes TEXT as the program's input (below). `-enter` adds a carriage return. After `--`, TEXT may begin with a dash. |
+| `pomar session attach [-view] [-take] [-title=false] NAME` | Enters the session's terminal (see below). |
+| `pomar session stop -id OP NAME` | Stops the program, and reads back its process group (below). |
+
+**What `ls -json` and `show` give, for each session:**
+
+| Field | Meaning |
+|---|---|
+| `host`, `uid`, `user` | where the session runs, and as whom |
+| `id` | the session's ID: its generation's identity |
+| `name`, `kind` | its label, never authority |
+| `generation` | 1 for a name's first session, then one more for each that took the name |
+| `outcome` | `running` or `exited` (with `exit_code`); `ls` lists an earlier service's as `unrecovered` |
+| `program`, `dir` | the program's path and working directory: never its arguments or environment |
+| `epoch` | the grant epoch: it changes at every grant, take and release |
+| `controller`, `viewers` | the principals controlling and attached |
+| `agent` | the state its adapter last reported, or `unknown` |
+| `state_channel` | whether it has one |
+| `cols`, `rows`, `last_output` | its window size, and when it last printed |
 
 **A new program's environment is exactly:**
 - TERM (`xterm-256color` if yours is unset), HOME, PATH and LANG from yours;
-- then each `-env`, which wins.
+- then each `-env`, which wins;
+- with `-state`, `POMAR_SESSION_STATE`, which only the service sets.
 
 Nothing else of the caller's environment reaches it. Its window is your
 terminal's size, or 80x24.
 
-**A send:**
-- takes control only when nobody holds it, or, with `-take`, from whoever does;
-- waits up to 10 s for the program to read the input;
-- gives control back.
+### Sending
 
-Its `outcome` is one of:
-- `written`;
-- `partial`: some bytes reached the program, and nothing is resent;
-- `uncertain`: the program didn't read in time.
+A send:
+- takes control only when nobody holds it, or, with `-take`, from whoever does;
+- writes, waits up to 10 s for the program to read the input, and gives
+  control back.
+
+**It is fenced.** With `-session ID` or `-epoch N`, the values you last read
+from `show`, a session that has changed since is refused as stale (exit 7),
+and nothing is written. The name may have a new generation, or control may
+have changed hands. Read it again, then decide.
+
+**It is raw by default,** and says so: `"mode": "raw"`. A raw send can land
+while a person is typing at a prompt; that is what tmux's send-keys does too.
+**`-when-ready` waits instead:**
+- the text is held until the session's adapter reports the program
+  `waiting-input`, in a report no send has used yet, for up to `-ready-wait`
+  (30 s by default, at most 10 min);
+- a send whose session doesn't report it in time is refused (exit 9), and
+  nothing is written;
+- a session without a state channel can't say when it is ready, so a
+  `-when-ready` send to it is refused (exit 8), never written raw.
+
+**Its reply tells each stage apart:**
+
+| Field | Meaning |
+|---|---|
+| `queued` | the whole text is in Pomar's input queue |
+| `written` | it reached the program's terminal |
+| `accepted` | `yes` once the adapter reports the program accepted it (by `input_id`); `pending` until then; `unsupported` without a state channel |
+| `input_id` | the send's operation ID, which the adapter is told |
+| `epoch` | the grant epoch after the send |
+| `outcome` | `written`, `accepted` (with `-accept-wait`, once confirmed), `partial` (some bytes reached the program, and nothing is resent) or `uncertain` (the program didn't read in time) |
+
+### Stopping
+
+A stop:
+- runs with the authority of the service's own user, the only one its socket
+  admits;
+- hangs up the program's process group, and kills the group if its leader is still
+  running after 3 s;
+- once the leader is reaped, gives any process left in its process group
+  (one that ignored the hangup) 3 s more, then kills the group.
+
+**It reads back** `leader` (`reaped`) and `group` (`gone`, or `remaining` if a
+process outlived even the kill), and `group_killed` when a member had to be
+killed. A process that left the group with its own `setsid` or `setpgid` is
+outside what it reads. The group is signalled only while it is known to
+exist: once the leader is reaped and the group is empty, its id may be reused.
 
 ### Exit codes
 
@@ -108,6 +165,48 @@ Its `outcome` is one of:
 | 4 | no session has that name |
 | 5 | refused as it stands: the name is running, another client controls it, or the operation is still running (ask again with the same ID) |
 | 6 | the session's program has exited |
+| 7 | stale: the send named a generation or epoch the session no longer has; nothing was written |
+| 8 | unsupported: a `-when-ready` send to a session without a state channel; nothing was written |
+| 9 | not ready: the adapter didn't report the program waiting for input in time; nothing was written |
+
+## Agent state
+
+A session's agent state says whether its program is working, waiting for
+input, or waiting on a permission prompt. **It is only ever reported by an
+adapter, never read off the screen,** and is `unknown` until one reports.
+Pomar has no adapter of its own and knows nothing of which agent a session
+runs: an adapter is whatever program speaks for it (a Claude Code or Codex
+adapter is its owner's work).
+
+**The contract, for an adapter:**
+1. A session made with `-state` has `POMAR_SESSION_STATE` in its
+   environment: the path of a Unix socket in the service's private root, mode
+   0600, which admits only the service's user.
+2. The adapter connects to it, from the session's program or anything it
+   starts. The latest connection is the adapter's.
+3. It writes one JSON object per line, at most 4096 bytes:
+   - `{"state": "running" | "waiting-input" | "permission" | "idle", "detail": "..."}`, `detail` being an optional short label;
+   - `{"accepted": "INPUT_ID"}`, once the program has taken an input as a
+     submission;
+   - or both in one line.
+4. Once a send's text has reached the program, the service writes it a line:
+   `{"input_id": "...", "bytes": N, "mode": "raw" | "when-ready"}`.
+5. A malformed line (unknown fields, an unknown state, neither field) is
+   answered with `{"error": "..."}`, and the connection ends. The adapter
+   reconnects.
+
+**What the service does with a report:**
+- `waiting-input` is what `-when-ready` waits for. Each such report admits
+  one send: a report carrying only an acceptance doesn't renew it.
+- `show` and `ls` carry the last report as `agent`: `state`, `detail`,
+  `seen`, `seq` (counting reports), `state_seq` and `accepted_input`.
+- Every attached client gets it as a `State` frame, on attach and on every
+  report.
+
+**What it doesn't claim:** a state is what the adapter said, when it said
+it. The program may have moved on since; `-when-ready` narrows the window
+in which a raw send would land mid-edit, and the adapter's acceptance is
+the only confirmation that it was taken.
 
 ## Entering a session
 
@@ -124,34 +223,18 @@ pomar session attach -take NAME    # take control from whoever has it
 - **As controller,** your window size becomes the session's, and each resize
   follows.
 - **As viewer,** nothing you type is sent.
-- **The service's notices** (viewing, control taken, the program exited, the
-  screen redrawn after you fell behind) are printed when you leave, not over
-  the program's screen.
+- **Your status is live, and never drawn over the program's screen:** your
+  role, the grant epoch, how many are attached, and the agent state.
+  - When stderr isn't the terminal you attach from, each change is a line on
+    stderr, and so are the service's notices.
+  - Otherwise it is the terminal's title, written only between the program's
+    sequences and characters, and the terminal's own title is restored when
+    you leave (`-title=false` turns it off). The notices (viewing, control
+    taken, the program exited, the screen redrawn after you fell behind) are
+    printed when you leave.
 
 ## The protocol
 
-`pomar-terminal/v2` is an HTTP upgrade on the service's socket:
-`POST /v1/sessions/NAME/attach?view=1&take=1`. It uses `pomar-terminal/v1`'s
-frames (`d` data, `r` resize, `x` close), plus `n`, a notice from the service
-of at most 512 bytes of text.
-
-The stream runs in this order:
-1. The client's first frame is its window size.
-2. The service sends the screen: an ANSI reconstruction (`pomar-termstate-ansi/1`) of
-   the cut, then the session's live output from exactly that cut.
-3. A client that falls behind gets a fresh screen, never a silent gap.
-4. v1 streams never carry a notice.
-
-The control API is JSON on the same socket:
-
-| Route | Does |
-|---|---|
-| `GET /v1/sessions` | The listing, with `unrecovered` |
-| `POST /v1/sessions` | `new` |
-| `GET /v1/sessions/NAME` | `show` |
-| `GET /v1/sessions/NAME/screen` | `screen` |
-| `POST /v1/sessions/NAME/send` | `send` |
-| `POST /v1/sessions/NAME/stop` | `stop` |
-
-A refusal's body is `{error, kind}`, and `kind` is one of `usage`,
-`not_found`, `conflict`, `in_progress`, `exited`, `uncertain` or `internal`.
+The attach stream and the JSON API are specified in
+[sessions-protocol.md](sessions-protocol.md), for any client, such as
+ZEOAPP's console.
