@@ -43,6 +43,8 @@ var sourceCommit = "unknown"
 const usage = `usage:
   pomar version
   pomar seats [-root DIR]           list the declared seats; on a terminal, a numbered menu
+  pomar session serve|new|ls|show|screen|send|attach|stop ...
+                                    named programs on terminals that outlive every client; "pomar session" for its usage
   pomar seat status [-root DIR] SEAT
                                     one seat's declaration and location, as JSON
   pomar seat attach [-root DIR] -environment ENV
@@ -171,6 +173,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return volumeCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 1 && args[0] == "seats":
 		return seatsCmd(args[1:], os.Stdin, onTerminal(os.Stdin) && onTerminal(os.Stdout), stdout, stderr)
+	case len(args) >= 1 && args[0] == "session":
+		return sessionCmd(args[1:], os.Stdin, stdout, stderr)
 	case len(args) >= 1 && args[0] == "seat":
 		return seatCmd(args[1:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "result" && args[1] == "verify":
