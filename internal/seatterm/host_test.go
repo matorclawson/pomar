@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/zeroemployeeorg/pomar/internal/termstate"
 )
 
 // journal is an in-memory audit that can be made to fail.
@@ -710,5 +712,43 @@ func TestAStragglerThatIgnoresHUPDoesntKeepTheSessionAlive(t *testing.T) {
 	}
 	if !j.has("exit", "outcome", "ok") {
 		t.Fatal("the exit wasn't journaled")
+	}
+}
+
+// An attach's screen cut, fed to a terminal and followed by the output from
+// its offset, renders the session's own screen, without its history.
+func TestTheScreenCutRendersTheLiveScreen(t *testing.T) {
+	h, _ := newHost(t)
+	s, _, err := h.Create("op-20", "operator", sh(`i=0; while [ $i -lt 60 ]; do printf 'line %d\n' $i; i=$((i+1)); done; printf '\033[2;5H\033[1mbold\033[0m'; read l; printf 'after:%s' "$l"; sleep 30`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	c, _, _ := s.Attach("operator")
+	collect(t, c, nil, "bold")
+	c.Detach()
+	v, snap, _ := s.Attach("viewer")
+	defer v.Detach()
+	if !snap.ScreenExact || snap.ScreenFormat != termstate.SnapshotVersion {
+		t.Fatalf("cut %+v", snap)
+	}
+	op, _, _ := s.Attach("operator")
+	defer op.Detach()
+	if _, err := op.Control(false, "test"); err != nil {
+		t.Fatal(err)
+	}
+	op.Input([]byte("go\n"))
+	live := collect(t, v, nil, "after:go")
+	model := termstate.New(int(snap.Cols), int(snap.Rows), 0)
+	model.Feed(snap.Screen)
+	model.Feed(live)
+	want := s.Screen()
+	for y, line := range want.Lines {
+		if model.Row(y) != line {
+			t.Fatalf("row %d: %q, want %q", y, model.Row(y), line)
+		}
+	}
+	if !strings.Contains(strings.Join(want.Lines, "\n"), "after:go") || strings.Contains(strings.Join(want.Lines, "\n"), "line 0\n") {
+		t.Fatalf("screen %q", want.Lines)
 	}
 }

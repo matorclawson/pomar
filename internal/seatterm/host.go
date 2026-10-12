@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/zeroemployeeorg/pomar/internal/termstate"
 )
 
 // SessionHost holds a seat's terminal sessions in its guest, in place of a
@@ -47,7 +49,9 @@ const (
 	RetainBytes = 1 << 20 // a session's retained output
 	viewerQueue = 256     // output chunks queued for one client
 	inputQueue  = 64      // input and resize writes queued for the PTY
-
+	// HistoryLines bounds the lines a session's screen model keeps above
+	// its screen.
+	HistoryLines = 2000
 )
 
 // defaultFenceBound bounds how long a take waits for the old controller's
@@ -329,8 +333,9 @@ type TermSession struct {
 	waitErr        error         // the leader's wait, set before reaped closes
 
 	mu         sync.Mutex
-	fence      *sync.Cond // signalled when an in-flight write ends
-	log        ring       // retained output, the bytes [base, end)
+	fence      *sync.Cond          // signalled when an in-flight write ends
+	log        ring                // retained output, the bytes [base, end)
+	term       *termstate.Terminal // the screen the output so far renders
 	base, end  uint64
 	exited     bool
 	exitCode   int
@@ -382,7 +387,8 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	}
 	s := &TermSession{ID: id, Name: spec.Name, Kind: spec.Kind, host: h, master: master, tty: tty, cmd: cmd,
 		writes: make(chan pendingWrite, inputQueue), done: make(chan struct{}), reaped: make(chan struct{}),
-		cols: spec.Cols, rows: spec.Rows, viewers: map[*Client]struct{}{}}
+		cols: spec.Cols, rows: spec.Rows, viewers: map[*Client]struct{}{},
+		term: termstate.New(int(spec.Cols), int(spec.Rows), HistoryLines)}
 	s.fence = sync.NewCond(&s.mu)
 	// The leader is reaped as soon as it exits, not once its output is
 	// drained: a background child holding the terminal open never delays it.
@@ -452,6 +458,12 @@ func (s *TermSession) output(b []byte) {
 	s.base += uint64(s.log.write(b))
 	s.end += uint64(len(b))
 	s.lastOutput = s.host.now()
+	// The model only watches: what it forwards and the answers it would give
+	// are dropped, so the PTY and every client get exactly the program's
+	// bytes, as before. A controller's own terminal answers the program's
+	// queries, as it does without a session host.
+	s.term.Feed(b)
+	s.term.Replies()
 	for c := range s.viewers {
 		if c.behind {
 			continue
@@ -498,6 +510,7 @@ func (s *TermSession) writer() {
 			s.mu.Lock()
 			if err == nil { // only an applied size changes the recorded one, and is announced
 				s.cols, s.rows = w.cols, w.rows
+				s.term.Resize(int(w.cols), int(w.rows))
 				for c := range s.viewers {
 					c.notify(Event{Kind: EventState})
 				}
@@ -575,11 +588,55 @@ type Snapshot struct {
 	Rows       uint16 `json:"rows"`
 	Data       []byte `json:"-"`
 	Generation string `json:"session"`
+	// Screen is the same cut as the screen model renders it (termstate's
+	// ANSI snapshot, then any bytes it holds incomplete): fed to a terminal
+	// of Cols by Rows, then followed by the output from To, it shows the
+	// program's screen, without replaying its history. ScreenExact is false
+	// when the model can't say the cut is clean; a client says so.
+	Screen        []byte `json:"-"`
+	ScreenFormat  string `json:"screen_format"`
+	ScreenExact   bool   `json:"screen_exact"`
+	ScreenLimited bool   `json:"screen_limited"` // something on the screen is outside what the model reconstructs: see termstate.Limits
 }
 
 func (s *TermSession) snapshotLocked() Snapshot {
+	retained := s.log.bytes()
+	screen := s.term.Snapshot()
+	held, ok := s.term.Held()
+	if held > len(retained) {
+		held, ok = 0, false
+	}
+	screen = append(screen, retained[len(retained)-held:]...)
 	return Snapshot{Kind: "replay", From: s.base, To: s.end, Complete: s.base == 0, Cols: s.cols, Rows: s.rows,
-		Data: s.log.bytes(), Generation: s.ID}
+		Data: retained, Generation: s.ID,
+		Screen: screen, ScreenFormat: termstate.SnapshotVersion, ScreenExact: ok, ScreenLimited: !s.term.Exact()}
+}
+
+// ScreenText is a session's current screen as text, for programs that read
+// it rather than render it.
+type ScreenText struct {
+	Cols    int      `json:"cols"`
+	Rows    int      `json:"rows"`
+	Cursor  [2]int   `json:"cursor"` // column and row, from 0
+	Title   string   `json:"title,omitempty"`
+	Alt     bool     `json:"alternate_screen"`
+	Lines   []string `json:"lines"`  // each row, trailing blanks trimmed
+	Offset  uint64   `json:"offset"` // the output offset the screen reflects
+	Running bool     `json:"running"`
+}
+
+// Screen returns the session's current screen as text.
+func (s *TermSession) Screen() ScreenText {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cols, rows := s.term.Size()
+	x, y := s.term.Cursor()
+	out := ScreenText{Cols: cols, Rows: rows, Cursor: [2]int{x, y}, Title: s.term.Title(), Alt: s.term.AltScreen(),
+		Lines: make([]string, rows), Offset: s.end, Running: !s.exited}
+	for i := range out.Lines {
+		out.Lines[i] = s.term.Row(i)
+	}
+	return out
 }
 
 // Attach adds a viewing client and returns it with its snapshot. Viewing
