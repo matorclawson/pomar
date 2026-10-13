@@ -105,3 +105,16 @@ func TestAnUnreadableSessionIsNeverReplaced(t *testing.T) {
 		t.Fatal("the session record was replaced, or an actor started")
 	}
 }
+
+// The actor's path is absolute, never looked up on a PATH (zeocouncil's
+// review of #126, INFO on supervisor.go:126).
+func TestStartRefusesARelativeAgentPath(t *testing.T) {
+	s, calls, _ := supervisor(t, "", "")
+	s.Agent = "claude"
+	if err := s.Start(); err == nil {
+		t.Fatal("a bare agent name was looked up")
+	}
+	if len(starts(t, calls)) != 0 {
+		t.Fatal("the actor started despite a relative path")
+	}
+}

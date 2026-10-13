@@ -317,3 +317,36 @@ func (noDeadlines) Read([]byte) (int, error)         { select {} }
 func (noDeadlines) Write(p []byte) (int, error)      { return len(p), nil }
 func (noDeadlines) SetReadDeadline(time.Time) error  { return errors.New("no deadlines") }
 func (noDeadlines) SetWriteDeadline(time.Time) error { return errors.New("no deadlines") }
+
+// Attach's command is named by an absolute path, never looked up on the
+// host's PATH (zeocouncil's review of #126, INFO on session.go:33).
+func TestAttachRefusesARelativePath(t *testing.T) {
+	_, done := dial(t, Command{Path: "sh", Args: []string{"-c", "true"}, UID: -1, GID: -1}, 80, 24)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a bare command name was looked up")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("attach never refused a relative path")
+	}
+}
+
+// A nil Env is empty, never the host's own (zeocouncil's review of #126,
+// INFO on session.go:59).
+func TestAttachNeverInheritsTheHostsEnvironment(t *testing.T) {
+	t.Setenv("SEATTERM_MARKER_FOR_LEAK_TEST", "leaked")
+	cl, done := dial(t, Command{Path: "/usr/bin/env", UID: -1, GID: -1}, 80, 24)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("attach: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("attach didn't end")
+	}
+	<-cl.closed
+	if strings.Contains(cl.screen.String(), "SEATTERM_MARKER_FOR_LEAK_TEST") {
+		t.Fatal("the host's environment leaked into the attached command")
+	}
+}

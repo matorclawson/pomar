@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fixtures are byte streams any program could write: no agent's habits.
@@ -146,6 +147,79 @@ func TestQueriesAreAnsweredAndNotForwarded(t *testing.T) {
 	}
 }
 
+// A string past maxString (64 KiB) is forwarded raw, unbuffered; but once a
+// bare ESC aborts it (never a backslash), the model must stop believing it's
+// still inside that string, or every later query for the rest of the
+// session goes unintercepted and the client's screen drifts from the
+// model's (zeocouncil's review of #127, LOW 1).
+func TestAQueryAfterAnOverlongAbortedStringIsStillIntercepted(t *testing.T) {
+	term := New(80, 24, 0)
+	long := strings.Repeat("Q", maxString+1000)
+	out := term.Feed([]byte("\x1b]52;c;" + long + "\x1b[6n"))
+	if bytes.Contains(out, []byte("[6n")) {
+		t.Fatalf("the query rode through on the overlong string: %q", lastBytes(out, 20))
+	}
+	if len(term.Replies()) == 0 {
+		t.Fatal("the query behind the aborted overlong string was never answered")
+	}
+	// And the model recovered for good: a second, ordinary query afterwards
+	// is intercepted too, not silently stuck in the old trap.
+	term.Replies()
+	out = term.Feed([]byte("ok\x1b[5n"))
+	if bytes.Contains(out, []byte("[5n")) || !bytes.Contains(out, []byte("ok")) {
+		t.Fatalf("a later query wasn't intercepted, or output was lost: %q", out)
+	}
+	if len(term.Replies()) == 0 {
+		t.Fatal("the model stayed stuck past the overlong string")
+	}
+}
+
+// zeocouncil's delta review of #127 (ans_2f39c5837fd5ccb8, a MEDIUM on the
+// first fix): the aborted ESC must never reach the client on its own,
+// neither forwarded immediately by passString nor left dangling for a real
+// terminal to pair with whatever comes next. The exact attack: an overlong
+// OSC, then a query the host answers in the model's place (so nothing of it
+// is forwarded), then plaintext that happens to start like an OSC 52
+// clipboard write. A client that only has the forwarded bytes, with no
+// model of its own, must never see that as a real OSC.
+func TestAnInterceptedQueryNeverLeavesADanglingEscape(t *testing.T) {
+	term := New(80, 24, 0)
+	long := strings.Repeat("Q", maxString+1000)
+	out := term.Feed([]byte("\x1b]52;c;" + long + "\x1b[6n]52;c;QUJD\a"))
+	// "QUJD" names only the smuggled payload: the overlong filler is all
+	// "Q", so this is the one place it can match.
+	i := bytes.Index(out, []byte("QUJD"))
+	if i < 0 {
+		t.Fatalf("the plaintext after the query was lost: %q", lastBytes(out, 40))
+	}
+	if i > 0 && out[i-1] == 0x1b {
+		t.Fatalf("a dangling ESC sits right before the plaintext, which a real client pairs into a live OSC 52: %q", out[max(0, i-10):i+4])
+	}
+	if bytes.HasPrefix(out[max(0, i-7):], []byte("\x1b]52;c;QUJD")) {
+		t.Fatalf("the smuggled OSC 52 rode through whole: %q", out[max(0, i-10):i+10])
+	}
+	// zeocouncil's residual LOW on #127: an intercepted query forwards
+	// nothing of its own, so the client needs its own signal that the
+	// string ended there, or it keeps swallowing everything after as
+	// string data until some later BEL or ST. A synthesized ST must sit
+	// right before the plaintext, so a client replaying these bytes
+	// reaches ground (the string closed) before it sees "]52;c;QUJD" as
+	// what it actually is: inert text, not string content.
+	if !bytes.Contains(out, []byte("\x1b\\]52;c;QUJD")) {
+		t.Fatalf("no synthesized ST closes the client's string before the plaintext: %q", lastBytes(out, 40))
+	}
+	if len(term.Replies()) == 0 {
+		t.Fatal("the query wasn't answered")
+	}
+}
+
+func lastBytes(b []byte, n int) []byte {
+	if len(b) > n {
+		return b[len(b)-n:]
+	}
+	return b
+}
+
 // Lines scrolled off the main screen keep stable identities, and the
 // history is bounded.
 func TestHistoryLinesHaveStableIdentities(t *testing.T) {
@@ -168,6 +242,47 @@ func TestHistoryLinesHaveStableIdentities(t *testing.T) {
 	}
 }
 
+// pushHistory is a ring once full (LOW 4): wrapping around it several
+// times, then clearing the scrollback and refilling it, still gives the
+// right lines in the right order.
+func TestHistoryRingWrapsCleanly(t *testing.T) {
+	term := New(20, 5, 4)
+	for i := 0; i < 50; i++ { // many times around a small ring
+		term.Feed([]byte(fmt.Sprintf("line %d\r\n", i)))
+	}
+	h := term.History()
+	if len(h) != 4 {
+		t.Fatalf("%d history lines", len(h))
+	}
+	for i, l := range h {
+		if want := fmt.Sprintf("line %d", l.ID); rowText(l.Cells) != want {
+			t.Fatalf("line %d: id %d holds %q, want %q", i, l.ID, rowText(l.Cells), want)
+		}
+		if i > 0 && h[i-1].ID >= l.ID {
+			t.Fatalf("ids out of order: %d then %d", h[i-1].ID, l.ID)
+		}
+	}
+	term.Feed([]byte("\x1b[3J")) // clear scrollback
+	if len(term.History()) != 0 {
+		t.Fatal("scrollback survived its clear")
+	}
+	for i := 0; i < 30; i++ { // enough to fill and wrap the ring from scratch
+		term.Feed([]byte(fmt.Sprintf("fresh %d\r\n", i)))
+	}
+	h = term.History()
+	if len(h) != 4 {
+		t.Fatalf("%d history lines after a clear and refill", len(h))
+	}
+	for i, l := range h {
+		if i > 0 && h[i-1].ID >= l.ID {
+			t.Fatalf("ids out of order after a clear and refill: %d then %d", h[i-1].ID, l.ID)
+		}
+	}
+	if !strings.HasPrefix(rowText(h[3].Cells), "fresh ") {
+		t.Fatalf("newest line after wrapping is %q, want a fresh one", rowText(h[3].Cells))
+	}
+}
+
 // A snapshot asks the terminal nothing, so replaying it can't make a
 // client's terminal answer.
 func TestASnapshotHoldsNoQuery(t *testing.T) {
@@ -180,6 +295,76 @@ func TestASnapshotHoldsNoQuery(t *testing.T) {
 				t.Fatalf("%s: the snapshot holds a query %q", name, q)
 			}
 		}
+	}
+}
+
+// A bare ESC inside an OSC or DCS string ends it there, unterminated: its
+// content is never applied, and the ESC (with what follows) is reprocessed
+// as a fresh sequence, so a smuggled OSC hiding inside what looked like a
+// title is parsed for real, not swallowed as inert text and replayed on
+// every snapshot (zeocouncil's review of #126, LOW 2).
+func TestABareESCEndsAnOSCOrDCSString(t *testing.T) {
+	term := New(80, 24, 0)
+	// The outer OSC 2 (set title) never completes: a nested OSC 52 (set the
+	// clipboard) arrives, with its own BEL, before the outer string's own
+	// terminator would.
+	term.Feed([]byte("\x1b]2;smuggled\x1b]52;c;QkFE\x07innocent\x07"))
+	if strings.Contains(term.title, "smuggled") || strings.Contains(term.title, "52") {
+		t.Fatalf("the unterminated prefix leaked into the title: %q", term.title)
+	}
+	// What matters here is only that the title holds nothing from the
+	// smuggled prefix: the nested OSC 52 was reprocessed as its own
+	// sequence, not swallowed as the outer string's text.
+	term.Feed([]byte("\x1b]2;clean\x07"))
+	if term.title != "clean" {
+		t.Fatalf("title %q, want %q", term.title, "clean")
+	}
+	// A query smuggled the same way is answered, not swallowed: its
+	// recognised reply comes back, which only happens if it was reprocessed
+	// as a real sequence rather than held as string content.
+	term2 := New(80, 24, 0)
+	term2.Feed([]byte("\x1b]2;x\x1b[6nBEL_never_arrives"))
+	if len(term2.Replies()) == 0 {
+		t.Fatal("a query smuggled inside an unterminated OSC string was never answered")
+	}
+}
+
+// A control byte never reaches the title, however it got there.
+func TestTheTitleNeverHoldsAControlByte(t *testing.T) {
+	term := New(80, 24, 0)
+	term.Feed([]byte("\x1b]2;a\x01b\x7fc\xc2\x80d\x07"))
+	for _, r := range term.title {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			t.Fatalf("title %q holds control rune %U", term.title, r)
+		}
+	}
+	if term.title != "abcd" {
+		t.Fatalf("title %q, want %q", term.title, "abcd")
+	}
+}
+
+// A flood of combining marks on one cell is bounded, not stored whole: the
+// cell, and so every Snapshot that reconstructs it, stays small however
+// many marks a program (hostile or not) sends (zeocouncil's review of
+// #126, MEDIUM: unbounded growth under the session lock).
+func TestCombiningMarksAreBoundedPerCell(t *testing.T) {
+	term := New(80, 24, 0)
+	term.Feed([]byte("e" + strings.Repeat("́", 10000))) // 'e' plus 10000 acute accents
+	cell := term.main[0][0]
+	if n := utf8.RuneCountInString(cell.S); n > 1+maxCombiningMarks {
+		t.Fatalf("cell holds %d runes, want at most %d", n, 1+maxCombiningMarks)
+	}
+	if len(cell.S) > utf8.UTFMax+maxCombiningMarkBytes {
+		t.Fatalf("cell holds %d bytes, want at most %d", len(cell.S), utf8.UTFMax+maxCombiningMarkBytes)
+	}
+	// REP then can't amplify a flooded cell into an unbounded snapshot: it
+	// replays the same bounded text into up to 65536 cells.
+	term2 := New(1000, 500, 0)
+	term2.Feed([]byte("e" + strings.Repeat("́", 10000) + "\x1b[65535b"))
+	snap := term2.Snapshot()
+	const generous = 50 << 20 // 50 MiB: far more than a bounded 1000x500 screen needs, far less than the 32 GB the review measured
+	if len(snap) > generous {
+		t.Fatalf("a flooded cell plus REP produced a %d-byte snapshot, want well under %d", len(snap), generous)
 	}
 }
 
@@ -242,3 +427,56 @@ func TestRandomStreamsContinueExactlyFromAnyCut(t *testing.T) {
 
 // repeats finds a REP (repeat the last character) in a stream.
 var repeats = regexp.MustCompile("\x1b\\[[0-9]*b")
+
+// FuzzFeedNeverPanics feeds raw, often malformed bytes to a fresh
+// terminal: truncated escapes, a huge CSI parameter, a flood of
+// combining marks, a nested OSC inside an unterminated one, and invalid
+// UTF-8 among them. Nothing here is well-formed by construction, unlike
+// tokens above, which TestRandomStreamsContinueExactlyFromAnyCut draws
+// from (zeocouncil's review of #126, LOW 5: "fuzzed" there is a seeded
+// search over well-formed tokens only, never hostile input).
+func FuzzFeedNeverPanics(f *testing.F) {
+	for _, s := range []string{
+		"", "\x1b", "\x1b[", "\x1b]", "\x1bP", "\x1b]2;x\x1b]52;c;QkFE\x07y\x07",
+		"\x1b[" + strings.Repeat("9", 100) + "b", "\x1b[999999999b",
+		"a" + strings.Repeat("́", 5000), "\x1bP$q",
+		strings.Repeat("\xff", 200), "\xc0\x80", "\xed\xa0\x80", "\xe2\x28\xa1",
+		fixtures["queries"], fixtures["rep and erase"],
+		// An OSC past maxString (64 KiB), aborted by a bare ESC (never a
+		// backslash), then a real query: zeocouncil's #127 LOW 1, reached
+		// only once an input can exceed maxString, past the old truncation.
+		"\x1b]52;c;" + strings.Repeat("Q", 70000) + "\x1b[6n",
+	} {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, b []byte) {
+		// Past maxString (64 KiB), so passString is reachable: the model's
+		// own bounds are what's under test, not an unbounded corpus.
+		const cap = 1 << 17
+		if len(b) > cap {
+			b = b[:cap]
+		}
+		term := New(80, 24, 100)
+		var fwd []byte
+		if len(b) >= 2 {
+			// A resize mid-stream, derived from the input itself: the
+			// combining-mark cap, the ring buffer and the scroll region
+			// all have resize-dependent paths.
+			cols, rows := 1+int(b[0])%200, 1+int(b[1])%200
+			half := len(b) / 2
+			fwd = term.Feed(b[:half])
+			term.Resize(cols, rows)
+			fwd = append(fwd, term.Feed(b[half:])...)
+		} else {
+			fwd = term.Feed(b)
+		}
+		if len(fwd) > len(b) {
+			t.Fatalf("forwarded %d bytes from %d: queries are removed, never added", len(fwd), len(b))
+		}
+		snap := term.Snapshot()
+		const bound = 4 << 20 // generous for an 80x24 screen with full history; unbounded is exactly the MEDIUM this review found
+		if len(snap) > bound {
+			t.Fatalf("a %d-byte snapshot from a %d-byte input, want under %d", len(snap), len(b), bound)
+		}
+	})
+}

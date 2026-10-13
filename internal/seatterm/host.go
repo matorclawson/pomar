@@ -236,6 +236,10 @@ func (h *SessionHost) forget(id string) {
 // returns once the program's leader is reaped, or ErrTerminateUncertain. It
 // waits on the reap itself, so a slow journal never makes it uncertain, and
 // it never signals a group whose leader is reaped, as that pid may be reused.
+// Since LOW 3, startSession's own reaper also kills the group immediately
+// behind every reap, whatever the cause: Terminate's own grace-then-kill is
+// mostly redundant with that now, but its HUP still asks first, before
+// either side reaches for SIGKILL.
 func (h *SessionHost) Terminate(operation, principal, id string) error {
 	s, ok := h.Session(id)
 	if !ok {
@@ -382,8 +386,18 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	s.fence = sync.NewCond(&s.mu)
 	// The leader is reaped as soon as it exits, not once its output is
 	// drained: a background child holding the terminal open never delays it.
+	// Reaping frees the leader's pid for reuse, so the group is killed
+	// immediately after, in the same goroutine, before anything else runs:
+	// a short, accepted hazard (the same the Architect noted on Terminate's
+	// own kill), traded for a real one it closes. Without it, a straggler
+	// the leader's own exit didn't take with it — a background child that
+	// ignores the kernel's automatic SIGHUP to the terminal's foreground
+	// group — keeps the PTY's slave side open, so pump's Read never sees
+	// EIO and the session is never noticed to have ended (zeocouncil's
+	// review of #126, LOW 3).
 	go func() {
 		s.waitErr = cmd.Wait()
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		close(s.reaped)
 	}()
 	go s.pump()

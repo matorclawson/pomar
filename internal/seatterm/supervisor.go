@@ -102,6 +102,9 @@ func (s Supervisor) record(event string) {
 // through the actor's own descriptor. It refuses while another actor holds
 // the lock.
 func (s Supervisor) Start() error {
+	if !filepath.IsAbs(s.Agent) {
+		return fmt.Errorf("the actor's path must be absolute, not looked up on a PATH: %q", s.Agent)
+	}
 	if err := os.MkdirAll(s.StateDir, 0o700); err != nil {
 		return err
 	}
@@ -123,7 +126,9 @@ func (s Supervisor) Start() error {
 	}
 	args := append(append([]string{}, s.Args...), flag, id)
 	cmd := exec.Command(s.Agent, args...)
-	cmd.Env, cmd.Dir = s.Env, s.Dir
+	// A nil environment is empty, never the host's own: nothing of the
+	// host reaches the actor that this Supervisor's Env doesn't name.
+	cmd.Env, cmd.Dir = append([]string{}, s.Env...), s.Dir
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.ExtraFiles = []*os.File{lock} // the actor holds the lock while it lives
 	s.record(flag + " " + id)

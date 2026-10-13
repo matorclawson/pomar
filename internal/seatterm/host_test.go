@@ -684,3 +684,31 @@ func TestARelativeCommandIsRefused(t *testing.T) {
 		t.Fatal("a bare command name was looked up")
 	}
 }
+
+// When the leader exits on its own, a straggler it leaves behind — a
+// background child that ignores the kernel's automatic SIGHUP to the
+// terminal's group — doesn't keep the session from being noticed to have
+// ended: the group is killed right behind the leader's own reap, so
+// pump's Read sees EIO and the session's Done closes within a bound, not
+// only once the straggler happens to exit on its own (zeocouncil's review
+// of #126, LOW 3).
+func TestAStragglerThatIgnoresHUPDoesntKeepTheSessionAlive(t *testing.T) {
+	h, j := newHost(t)
+	s, _, err := h.Create("op-19", "operator",
+		sh("(trap '' HUP; while :; do sleep 1; done) & disown; exit 7"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session never ended: a straggler kept the PTY open")
+	}
+	in := s.Info()
+	if in.Running || in.ExitCode == nil || *in.ExitCode != 7 {
+		t.Fatalf("state %+v", in)
+	}
+	if !j.has("exit", "outcome", "ok") {
+		t.Fatal("the exit wasn't journaled")
+	}
+}

@@ -47,6 +47,29 @@ type Cell struct {
 	A Attr
 }
 
+// maxCombiningMarks and maxCellBytes bound how many combining marks a
+// single cell accumulates, and the bytes they add. Without a bound, a
+// program (or a hostile one) repeating a combining mark floods one cell's S
+// with unbounded bytes under the session lock, and Snapshot would then
+// reconstruct all of it on every reattach: megabytes of marks in one cell
+// become gigabytes copied and rendered. Past either bound, a mark is
+// dropped silently, as a real terminal's own finite cell storage would
+// drop it; the character it joins is unaffected. The bound is a function
+// of S alone, never a hidden counter, so two cells holding the same text
+// always decide the same way, whichever path built them.
+const (
+	maxCombiningMarks     = 16
+	maxCombiningMarkBytes = 64
+)
+
+// combiningRoom reports how many more marks, and bytes of them, s may
+// still gain: a function of s alone, so any two cells holding the same
+// text agree, however each was built.
+func combiningRoom(s string) (marks, bytes int) {
+	_, baseLen := utf8.DecodeRuneInString(s)
+	return maxCombiningMarks - (utf8.RuneCountInString(s) - 1), maxCombiningMarkBytes - (len(s) - baseLen)
+}
+
 func blank(a Attr) Cell { return Cell{W: 1, A: Attr{Bg: a.Bg}} }
 
 // Line is one row of history, with a stable identity: IDs only grow, and a
@@ -90,7 +113,8 @@ type Terminal struct {
 	top, bot    int // the scroll region, inclusive
 	modes       Modes
 	tabs        []bool
-	history     []Line
+	history     []Line // a ring once full: histStart is the oldest line's index
+	histStart   int
 	nextLine    uint64
 	maxHistory  int
 	title       string
@@ -175,7 +199,15 @@ func (t *Terminal) Cursor() (int, int) { return t.cur.x, t.cur.y }
 func (t *Terminal) Title() string { return t.title }
 
 // History returns the lines scrolled off the main screen, oldest first.
-func (t *Terminal) History() []Line { return append([]Line(nil), t.history...) }
+func (t *Terminal) History() []Line {
+	if len(t.history) < t.maxHistory {
+		return append([]Line(nil), t.history...)
+	}
+	out := make([]Line, len(t.history))
+	n := copy(out, t.history[t.histStart:])
+	copy(out[n:], t.history[:t.histStart])
+	return out
+}
 
 // Row returns row y of the active screen as text, trailing blanks trimmed.
 func (t *Terminal) Row(y int) string {
@@ -263,15 +295,22 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
+// pushHistory adds one line, oldest evicted first, in O(1): once history
+// is full it's a ring, overwriting the oldest slot in place rather than
+// copying the rest of it on every single scrolled line (zeocouncil's
+// review of #126, LOW 4).
 func (t *Terminal) pushHistory(r []Cell) {
 	if t.maxHistory <= 0 {
 		return
 	}
-	t.history = append(t.history, Line{ID: t.nextLine, Cells: r})
+	line := Line{ID: t.nextLine, Cells: r}
 	t.nextLine++
-	if over := len(t.history) - t.maxHistory; over > 0 {
-		t.history = append([]Line(nil), t.history[over:]...)
+	if len(t.history) < t.maxHistory {
+		t.history = append(t.history, line)
+		return
 	}
+	t.history[t.histStart] = line
+	t.histStart = (t.histStart + 1) % t.maxHistory
 }
 
 // print puts one character, a base with any combining marks, at the
@@ -290,9 +329,14 @@ func (t *Terminal) print(s string, w int) {
 			if g[y][x].S == "" {
 				g[y][x].S = " "
 			}
-			g[y][x].S += s
+			if marks, bytes := combiningRoom(g[y][x].S); marks > 0 && bytes >= len(s) {
+				g[y][x].S += s
+			}
 			t.last = g[y][x].S
 		}
+		return
+	}
+	if w == 2 && t.cols < 2 { // no column holds a wide character at all, wrapped or not
 		return
 	}
 	if t.cur.wrapPending && t.modes.AutoWrap {

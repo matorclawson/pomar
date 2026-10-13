@@ -132,27 +132,64 @@ func (p *parser) step(t *Terminal, c byte, fwd []byte) []byte {
 			p.state = passString
 		}
 	case oscEsc, ctlStringEsc:
-		p.seq = append(p.seq, c)
-		if c == '\\' {
+		if c == '\\' { // ST: the string ends properly
+			p.seq = append(p.seq, c)
 			p.state--
 			fwd = p.endString(t, fwd)
-		} else {
-			p.state-- // an ESC inside the string that isn't its end
+			break
 		}
+		// No backslash: the ESC held since the last byte didn't start an ST,
+		// so it isn't part of this string at all (a bare ESC is never valid
+		// inside one). The string ends there, unterminated: its content is
+		// dropped, never applied and never forwarded as modelled text, so a
+		// sequence smuggled inside what looked like an OSC/DCS payload (an
+		// embedded "ESC]52;...BEL" inside a title, say) can't ride through
+		// as inert bytes. The held ESC, and this byte, are reprocessed from
+		// a fresh escape state instead, so a real sequence hiding there (or
+		// a query the host must answer itself) is parsed for real.
+		p.seq, p.state = []byte{0x1b}, escape
+		fwd = p.step(t, c, fwd)
 	case passString:
-		fwd = append(fwd, c)
 		switch c {
 		case 0x07, 0x18, 0x1a:
+			fwd = append(fwd, c)
 			p.state = ground
 		case 0x1b:
+			// Withheld, not forwarded yet: whether it was a real ST or a
+			// bare abort isn't known until the next byte, and forwarding it
+			// now would double-account for it once that's decided below.
 			p.state = passStringEsc
+		default:
+			fwd = append(fwd, c)
 		}
 	case passStringEsc:
-		fwd = append(fwd, c)
-		p.state = ground
-		if c != '\\' {
-			p.state = passString
+		if c == '\\' { // ST: the withheld ESC and this backslash end the
+			// raw-forwarded string properly, forwarded together as the pair
+			// the client needs to see the same ST.
+			fwd = append(fwd, 0x1b, c)
+			p.state = ground
+			break
 		}
+		// No backslash: the withheld ESC was never put on the wire, and the
+		// client has no model of its own, so it must be told the string
+		// ends here exactly where the model's does, or it keeps swallowing
+		// whatever comes next as string data (zeocouncil's residual LOW on
+		// #127: an intercepted query here forwards nothing, so without this
+		// the client stays inside the old string until some later BEL or ST,
+		// and applies all of it at once, say as a title). A synthesized ST
+		// closes it; the held ESC itself is never the one forwarded, so this
+		// can't double it onto the wire either. Same as the buffered case
+		// above, this byte is then reprocessed from a fresh escape state
+		// rather than resuming the string forever (without that, one
+		// aborted overlong string left the model believing every later byte
+		// was still inside it, so no further query was ever intercepted
+		// again for the rest of the session). That reprocessed sequence
+		// reaches the client only as part of whatever its own dispatch forwards,
+		// exactly once, exactly when the reprocessed sequence itself isn't
+		// one the host answers in the model's place.
+		fwd = append(fwd, 0x1b, '\\')
+		p.seq, p.state = []byte{0x1b}, escape
+		fwd = p.step(t, c, fwd)
 	}
 	return fwd
 }
@@ -541,7 +578,7 @@ func (t *Terminal) eraseDisplay(mode int) {
 		}
 	case 3:
 		if !t.altActive {
-			t.history = nil
+			t.history, t.histStart = nil, 0
 		}
 	}
 }
@@ -677,7 +714,7 @@ func (p *parser) endString(t *Terminal, fwd []byte) []byte {
 		num, rest, _ := strings.Cut(string(body), ";")
 		switch num {
 		case "0", "2":
-			t.title = rest
+			t.title = stripControls(rest) // never a control byte, however it reached here
 		case "10", "11", "12": // a colour query: answered with the host's defaults, never forwarded
 			if rest == "?" {
 				col := map[string]string{"10": "ffff/ffff/ffff", "11": "0000/0000/0000", "12": "ffff/ffff/ffff"}[num]
@@ -692,6 +729,24 @@ func (p *parser) endString(t *Terminal, fwd []byte) []byte {
 		}
 	}
 	return append(fwd, p.seq...)
+}
+
+// stripControls drops every C0 and C1 control character from s, decoded as
+// runes (never raw bytes: a UTF-8 continuation byte can equal a C1 byte
+// value without being one). A defence in depth for the window title, which
+// a client may render verbatim, however a control character reached it
+// (zeocouncil's review of #126, LOW 2). An invalid byte is dropped too,
+// never guessed at.
+func stripControls(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == utf8.RuneError || r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // params parses a parameter list; sub-parameters after ':' are dropped
