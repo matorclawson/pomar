@@ -47,6 +47,29 @@ type Cell struct {
 	A Attr
 }
 
+// maxCombiningMarks and maxCellBytes bound how many combining marks a
+// single cell accumulates, and the bytes they add. Without a bound, a
+// program (or a hostile one) repeating a combining mark floods one cell's S
+// with unbounded bytes under the session lock, and Snapshot would then
+// reconstruct all of it on every reattach: megabytes of marks in one cell
+// become gigabytes copied and rendered. Past either bound, a mark is
+// dropped silently, as a real terminal's own finite cell storage would
+// drop it; the character it joins is unaffected. The bound is a function
+// of S alone, never a hidden counter, so two cells holding the same text
+// always decide the same way, whichever path built them.
+const (
+	maxCombiningMarks     = 16
+	maxCombiningMarkBytes = 64
+)
+
+// combiningRoom reports how many more marks, and bytes of them, s may
+// still gain: a function of s alone, so any two cells holding the same
+// text agree, however each was built.
+func combiningRoom(s string) (marks, bytes int) {
+	_, baseLen := utf8.DecodeRuneInString(s)
+	return maxCombiningMarks - (utf8.RuneCountInString(s) - 1), maxCombiningMarkBytes - (len(s) - baseLen)
+}
+
 func blank(a Attr) Cell { return Cell{W: 1, A: Attr{Bg: a.Bg}} }
 
 // Line is one row of history, with a stable identity: IDs only grow, and a
@@ -290,7 +313,9 @@ func (t *Terminal) print(s string, w int) {
 			if g[y][x].S == "" {
 				g[y][x].S = " "
 			}
-			g[y][x].S += s
+			if marks, bytes := combiningRoom(g[y][x].S); marks > 0 && bytes >= len(s) {
+				g[y][x].S += s
+			}
 			t.last = g[y][x].S
 		}
 		return

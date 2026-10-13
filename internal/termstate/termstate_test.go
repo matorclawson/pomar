@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fixtures are byte streams any program could write: no agent's habits.
@@ -180,6 +181,31 @@ func TestASnapshotHoldsNoQuery(t *testing.T) {
 				t.Fatalf("%s: the snapshot holds a query %q", name, q)
 			}
 		}
+	}
+}
+
+// A flood of combining marks on one cell is bounded, not stored whole: the
+// cell, and so every Snapshot that reconstructs it, stays small however
+// many marks a program (hostile or not) sends (zeocouncil's review of
+// #126, MEDIUM: unbounded growth under the session lock).
+func TestCombiningMarksAreBoundedPerCell(t *testing.T) {
+	term := New(80, 24, 0)
+	term.Feed([]byte("e" + strings.Repeat("́", 10000))) // 'e' plus 10000 acute accents
+	cell := term.main[0][0]
+	if n := utf8.RuneCountInString(cell.S); n > 1+maxCombiningMarks {
+		t.Fatalf("cell holds %d runes, want at most %d", n, 1+maxCombiningMarks)
+	}
+	if len(cell.S) > utf8.UTFMax+maxCombiningMarkBytes {
+		t.Fatalf("cell holds %d bytes, want at most %d", len(cell.S), utf8.UTFMax+maxCombiningMarkBytes)
+	}
+	// REP then can't amplify a flooded cell into an unbounded snapshot: it
+	// replays the same bounded text into up to 65536 cells.
+	term2 := New(1000, 500, 0)
+	term2.Feed([]byte("e" + strings.Repeat("́", 10000) + "\x1b[65535b"))
+	snap := term2.Snapshot()
+	const generous = 50 << 20 // 50 MiB: far more than a bounded 1000x500 screen needs, far less than the 32 GB the review measured
+	if len(snap) > generous {
+		t.Fatalf("a flooded cell plus REP produced a %d-byte snapshot, want well under %d", len(snap), generous)
 	}
 }
 
