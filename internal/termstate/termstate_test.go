@@ -174,6 +174,35 @@ func TestAQueryAfterAnOverlongAbortedStringIsStillIntercepted(t *testing.T) {
 	}
 }
 
+// zeocouncil's delta review of #127 (ans_2f39c5837fd5ccb8, a MEDIUM on the
+// first fix): the aborted ESC must never reach the client on its own,
+// neither forwarded immediately by passString nor left dangling for a real
+// terminal to pair with whatever comes next. The exact attack: an overlong
+// OSC, then a query the host answers in the model's place (so nothing of it
+// is forwarded), then plaintext that happens to start like an OSC 52
+// clipboard write. A client that only has the forwarded bytes, with no
+// model of its own, must never see that as a real OSC.
+func TestAnInterceptedQueryNeverLeavesADanglingEscape(t *testing.T) {
+	term := New(80, 24, 0)
+	long := strings.Repeat("Q", maxString+1000)
+	out := term.Feed([]byte("\x1b]52;c;" + long + "\x1b[6n]52;c;QUJD\a"))
+	// "QUJD" names only the smuggled payload: the overlong filler is all
+	// "Q", so this is the one place it can match.
+	i := bytes.Index(out, []byte("QUJD"))
+	if i < 0 {
+		t.Fatalf("the plaintext after the query was lost: %q", lastBytes(out, 40))
+	}
+	if i > 0 && out[i-1] == 0x1b {
+		t.Fatalf("a dangling ESC sits right before the plaintext, which a real client pairs into a live OSC 52: %q", out[max(0, i-10):i+4])
+	}
+	if bytes.HasPrefix(out[max(0, i-7):], []byte("\x1b]52;c;QUJD")) {
+		t.Fatalf("the smuggled OSC 52 rode through whole: %q", out[max(0, i-10):i+10])
+	}
+	if len(term.Replies()) == 0 {
+		t.Fatal("the query wasn't answered")
+	}
+}
+
 func lastBytes(b []byte, n int) []byte {
 	if len(b) > n {
 		return b[len(b)-n:]

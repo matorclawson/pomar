@@ -150,28 +150,37 @@ func (p *parser) step(t *Terminal, c byte, fwd []byte) []byte {
 		p.seq, p.state = []byte{0x1b}, escape
 		fwd = p.step(t, c, fwd)
 	case passString:
-		fwd = append(fwd, c)
 		switch c {
 		case 0x07, 0x18, 0x1a:
+			fwd = append(fwd, c)
 			p.state = ground
 		case 0x1b:
+			// Withheld, not forwarded yet: whether it was a real ST or a
+			// bare abort isn't known until the next byte, and forwarding it
+			// now would double-account for it once that's decided below.
 			p.state = passStringEsc
+		default:
+			fwd = append(fwd, c)
 		}
 	case passStringEsc:
-		if c == '\\' { // ST: the raw-forwarded string ends properly
-			fwd = append(fwd, c)
+		if c == '\\' { // ST: the withheld ESC and this backslash end the
+			// raw-forwarded string properly, forwarded together as the pair
+			// the client needs to see the same ST.
+			fwd = append(fwd, 0x1b, c)
 			p.state = ground
 			break
 		}
-		// No backslash: same as the buffered case above, the held ESC never
-		// started an ST, so the string (already forwarded raw, past
-		// maxString) ends there instead of resuming forever. Without this,
-		// one aborted overlong string left the model believing every
-		// following byte was still inside it, so no later query was ever
-		// intercepted again for the rest of the session. The held ESC and
-		// this byte are reprocessed from a fresh escape state, exactly as
-		// the buffered case does, so a query hiding here is answered for
-		// real rather than drifting the client's screen from the model's.
+		// No backslash: the withheld ESC was never put on the wire, so,
+		// same as the buffered case above, it and this byte are reprocessed
+		// from a fresh escape state rather than resuming the string forever
+		// (without this, one aborted overlong string left the model
+		// believing every later byte was still inside it, so no further
+		// query was ever intercepted again for the rest of the session).
+		// Because the ESC was never forwarded on its own, this can't double
+		// it onto the wire or leave it dangling for the client: it reaches
+		// the client only as part of whatever p.seq's own dispatch forwards,
+		// exactly once, exactly when the reprocessed sequence itself isn't
+		// one the host answers in the model's place.
 		p.seq, p.state = []byte{0x1b}, escape
 		fwd = p.step(t, c, fwd)
 	}
