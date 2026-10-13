@@ -1,8 +1,9 @@
 # Pomar for agents
 
 This is for any program that drives Pomar: a coding agent, a script, a CI
-caller. Every command below prints JSON (except `logs`, which prints the
-job's own output) and has fixed exit codes. `pomar help -json` lists them all.
+caller. `pomar help -json` lists commands, actual output formats, job exit
+codes and structured flags for the main loop. JSON is explicit for `doctor`
+and `health`; `logs` emits job bytes and `result verify` emits text.
 
 ## What Pomar does
 
@@ -40,7 +41,10 @@ pomar logs -id build-1                          # its output, checked against it
 pomar attempt result -id build-1                # the signed result document
 ```
 
-- **IDs are yours to choose, and unique.** Reusing one is refused (HTTP 409); pick a new one.
+- **IDs are yours to choose, and unique.** Reusing one is refused (HTTP 409).
+  After an uncertain start, inspect the **original ID** with `attempt get`.
+  A lost response or missing record cannot prove execution never began;
+  do not resubmit under a new ID. Ask the runner owner to reconcile it.
 - **Without `-wait`, `run` returns at admission.** Admission is not success.
 - **To wait for a job you started without `-wait`:** `pomar wait -id build-1 [-timeout 10m]`.
 - **For a repository job,** name the owner's mirror and a commit: `-mirror NAME -ref main [-sha SHA]`.
@@ -75,7 +79,8 @@ pomar logs -id build-1 -public-key "$OWNER_KEY"   # the log, checked against the
 
 A development seat is a long-lived environment for an agent, whose terminal
 an operator can enter.
-- `pomar seats` lists them.
+- `pomar seats` lists them; its current owner interface is a table and may
+  prompt on a terminal. Consult the installed catalogue for JSON/menu support.
 - `pomar seat status SEAT` shows one, as JSON.
 
 Starting a seat and entering it are the host owner's acts (`pomar help all`).
@@ -91,6 +96,8 @@ Starting a seat and entering it are the host owner's acts (`pomar help all`).
 
 - `pomar help -json`: commands, exit codes, the loop.
 - `pomar help all`: every command, for the host owner too.
+- `pomar health -json`: bounded read-only reachability, known fit and unknowns;
+  a responsive report never proves a job can run or has succeeded.
 - [docs/operations.md](docs/operations.md): operations, seats and result verification.
 - [docs/attempt-progress.md](docs/attempt-progress.md): progress while a job runs.
 

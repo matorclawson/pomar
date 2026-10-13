@@ -34,6 +34,16 @@ executables. The manifest binds the archive's source commit and files. It is not
 an independently signed CI result. The CLI prints the release version and source
 commit; the Swift host's legacy version string is not a release identity.
 
+The fixed bundle includes root `AGENTS.md` and the health, attempt-progress,
+job-failure and controlled-service-upgrade guides. Their hashes and modes are
+bound in the same release manifest as the executables. A modified or missing
+declared guide refuses user installation before activation. Agents can discover
+the main job loop, result verifier, artifact retrieval and owner operations
+through `pomar help -json`; owner entries are discovery, not authorization.
+Some commands still have unversioned JSON or human output: use each entry's
+reported format and explicit JSON flag, rather than assuming every command is
+machine-readable. Structured flag coverage is stated in the catalogue.
+
 A candidate must also pass an installation smoke in a fresh user-owned prefix,
 `version`, `help`, `doctor` against an approved test socket, repeated same-version
 install, changed-byte refusal, upgrade and rollback. Retain archive hash,

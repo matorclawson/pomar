@@ -54,6 +54,32 @@ func TestInstallVersionsAndRollback(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentGuidesAreVerifiedBeforeActivation(t *testing.T) {
+	for _, name := range []string{"AGENTS.md", "docs/health-and-diagnostics.md", "docs/attempt-progress.md", "docs/job-failure-diagnostics.md", "docs/service-upgrade.md"} {
+		t.Run(name, func(t *testing.T) {
+			bundle := fixture(t, "v0.1.0")
+			prefix := filepath.Join(t.TempDir(), "install")
+			if _, err := Install(bundle, prefix); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(filepath.Join(prefix, "current", filepath.FromSlash(name)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(bundle, filepath.FromSlash(name)), []byte("changed agent instructions"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Install(bundle, prefix); err == nil {
+				t.Fatal("changed guide was accepted")
+			}
+			after, err := os.ReadFile(filepath.Join(prefix, "current", filepath.FromSlash(name)))
+			if err != nil || string(before) != string(after) {
+				t.Fatal("refused install changed activated instructions")
+			}
+		})
+	}
+}
 func TestInstallFailsBeforeActivation(t *testing.T) {
 	for _, kind := range []string{"tamper", "unexpected", "symlink", "missing", "mode", "manifest-path", "existing-version", "prefix-link", "existing-current", "locked"} {
 		t.Run(kind, func(t *testing.T) {

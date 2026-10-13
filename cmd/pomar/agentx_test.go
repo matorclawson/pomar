@@ -132,6 +132,44 @@ func TestHelpJSONIsACatalogue(t *testing.T) {
 	}
 }
 
+func TestCatalogueDiscoversTrustAndOwnerOperationsWithoutActing(t *testing.T) {
+	t.Setenv("POMAR_SOCKET", "/not/a/socket")
+	var out, errs bytes.Buffer
+	if rc := run([]string{"help", "--json"}, &out, &errs); rc != 0 || errs.Len() != 0 {
+		t.Fatalf("rc%d %s", rc, errs.String())
+	}
+	var c struct {
+		Commands []command                  `json:"commands"`
+		Owners   []command                  `json:"owner_commands"`
+		Flags    map[string][]catalogueFlag `json:"command_flags"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &c); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]command{}
+	for _, entry := range append(c.Commands, c.Owners...) {
+		if _, exists := names[entry.Name]; exists {
+			t.Fatalf("duplicate command %s", entry.Name)
+		}
+		names[entry.Name] = entry
+	}
+	for _, name := range []string{"health", "result verify", "attempt output", "attempt signing-key", "install", "server start", "upgrade stage", "upgrade check", "upgrade apply", "upgrade rollback"} {
+		if names[name].Usage == "" || names[name].Output == "" {
+			t.Fatalf("missing operation %s", name)
+		}
+	}
+	for _, name := range []string{"upgrade stage", "upgrade check", "upgrade apply", "upgrade rollback"} {
+		if !strings.Contains(upgradeHelp, names[name].Usage) {
+			t.Fatalf("upgrade usage diverged: %s", names[name].Usage)
+		}
+	}
+	for _, name := range []string{"health", "run", "wait", "result verify", "attempt output"} {
+		if len(c.Flags[name]) == 0 {
+			t.Fatalf("missing main-loop flags for %s", name)
+		}
+	}
+}
+
 // A command that needs a manager, with none selected, says how to select
 // one, and doctor gives that as its next step.
 func TestNoManagerSaysHowToSelectOne(t *testing.T) {
