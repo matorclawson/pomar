@@ -184,6 +184,51 @@ func TestASnapshotHoldsNoQuery(t *testing.T) {
 	}
 }
 
+// A bare ESC inside an OSC or DCS string ends it there, unterminated: its
+// content is never applied, and the ESC (with what follows) is reprocessed
+// as a fresh sequence, so a smuggled OSC hiding inside what looked like a
+// title is parsed for real, not swallowed as inert text and replayed on
+// every snapshot (zeocouncil's review of #126, LOW 2).
+func TestABareESCEndsAnOSCOrDCSString(t *testing.T) {
+	term := New(80, 24, 0)
+	// The outer OSC 2 (set title) never completes: a nested OSC 52 (set the
+	// clipboard) arrives, with its own BEL, before the outer string's own
+	// terminator would.
+	term.Feed([]byte("\x1b]2;smuggled\x1b]52;c;QkFE\x07innocent\x07"))
+	if strings.Contains(term.title, "smuggled") || strings.Contains(term.title, "52") {
+		t.Fatalf("the unterminated prefix leaked into the title: %q", term.title)
+	}
+	// What matters here is only that the title holds nothing from the
+	// smuggled prefix: the nested OSC 52 was reprocessed as its own
+	// sequence, not swallowed as the outer string's text.
+	term.Feed([]byte("\x1b]2;clean\x07"))
+	if term.title != "clean" {
+		t.Fatalf("title %q, want %q", term.title, "clean")
+	}
+	// A query smuggled the same way is answered, not swallowed: its
+	// recognised reply comes back, which only happens if it was reprocessed
+	// as a real sequence rather than held as string content.
+	term2 := New(80, 24, 0)
+	term2.Feed([]byte("\x1b]2;x\x1b[6nBEL_never_arrives"))
+	if len(term2.Replies()) == 0 {
+		t.Fatal("a query smuggled inside an unterminated OSC string was never answered")
+	}
+}
+
+// A control byte never reaches the title, however it got there.
+func TestTheTitleNeverHoldsAControlByte(t *testing.T) {
+	term := New(80, 24, 0)
+	term.Feed([]byte("\x1b]2;a\x01b\x7fc\xc2\x80d\x07"))
+	for _, r := range term.title {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			t.Fatalf("title %q holds control rune %U", term.title, r)
+		}
+	}
+	if term.title != "abcd" {
+		t.Fatalf("title %q, want %q", term.title, "abcd")
+	}
+}
+
 // A flood of combining marks on one cell is bounded, not stored whole: the
 // cell, and so every Snapshot that reconstructs it, stays small however
 // many marks a program (hostile or not) sends (zeocouncil's review of
