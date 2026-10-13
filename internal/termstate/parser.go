@@ -551,7 +551,7 @@ func (t *Terminal) eraseDisplay(mode int) {
 		}
 	case 3:
 		if !t.altActive {
-			t.history = nil
+			t.history, t.histStart = nil, 0
 		}
 	}
 }

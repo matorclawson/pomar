@@ -113,7 +113,8 @@ type Terminal struct {
 	top, bot    int // the scroll region, inclusive
 	modes       Modes
 	tabs        []bool
-	history     []Line
+	history     []Line // a ring once full: histStart is the oldest line's index
+	histStart   int
 	nextLine    uint64
 	maxHistory  int
 	title       string
@@ -198,7 +199,15 @@ func (t *Terminal) Cursor() (int, int) { return t.cur.x, t.cur.y }
 func (t *Terminal) Title() string { return t.title }
 
 // History returns the lines scrolled off the main screen, oldest first.
-func (t *Terminal) History() []Line { return append([]Line(nil), t.history...) }
+func (t *Terminal) History() []Line {
+	if len(t.history) < t.maxHistory {
+		return append([]Line(nil), t.history...)
+	}
+	out := make([]Line, len(t.history))
+	n := copy(out, t.history[t.histStart:])
+	copy(out[n:], t.history[:t.histStart])
+	return out
+}
 
 // Row returns row y of the active screen as text, trailing blanks trimmed.
 func (t *Terminal) Row(y int) string {
@@ -286,15 +295,22 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
+// pushHistory adds one line, oldest evicted first, in O(1): once history
+// is full it's a ring, overwriting the oldest slot in place rather than
+// copying the rest of it on every single scrolled line (zeocouncil's
+// review of #126, LOW 4).
 func (t *Terminal) pushHistory(r []Cell) {
 	if t.maxHistory <= 0 {
 		return
 	}
-	t.history = append(t.history, Line{ID: t.nextLine, Cells: r})
+	line := Line{ID: t.nextLine, Cells: r}
 	t.nextLine++
-	if over := len(t.history) - t.maxHistory; over > 0 {
-		t.history = append([]Line(nil), t.history[over:]...)
+	if len(t.history) < t.maxHistory {
+		t.history = append(t.history, line)
+		return
 	}
+	t.history[t.histStart] = line
+	t.histStart = (t.histStart + 1) % t.maxHistory
 }
 
 // print puts one character, a base with any combining marks, at the

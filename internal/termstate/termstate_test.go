@@ -169,6 +169,47 @@ func TestHistoryLinesHaveStableIdentities(t *testing.T) {
 	}
 }
 
+// pushHistory is a ring once full (LOW 4): wrapping around it several
+// times, then clearing the scrollback and refilling it, still gives the
+// right lines in the right order.
+func TestHistoryRingWrapsCleanly(t *testing.T) {
+	term := New(20, 5, 4)
+	for i := 0; i < 50; i++ { // many times around a small ring
+		term.Feed([]byte(fmt.Sprintf("line %d\r\n", i)))
+	}
+	h := term.History()
+	if len(h) != 4 {
+		t.Fatalf("%d history lines", len(h))
+	}
+	for i, l := range h {
+		if want := fmt.Sprintf("line %d", l.ID); rowText(l.Cells) != want {
+			t.Fatalf("line %d: id %d holds %q, want %q", i, l.ID, rowText(l.Cells), want)
+		}
+		if i > 0 && h[i-1].ID >= l.ID {
+			t.Fatalf("ids out of order: %d then %d", h[i-1].ID, l.ID)
+		}
+	}
+	term.Feed([]byte("\x1b[3J")) // clear scrollback
+	if len(term.History()) != 0 {
+		t.Fatal("scrollback survived its clear")
+	}
+	for i := 0; i < 30; i++ { // enough to fill and wrap the ring from scratch
+		term.Feed([]byte(fmt.Sprintf("fresh %d\r\n", i)))
+	}
+	h = term.History()
+	if len(h) != 4 {
+		t.Fatalf("%d history lines after a clear and refill", len(h))
+	}
+	for i, l := range h {
+		if i > 0 && h[i-1].ID >= l.ID {
+			t.Fatalf("ids out of order after a clear and refill: %d then %d", h[i-1].ID, l.ID)
+		}
+	}
+	if !strings.HasPrefix(rowText(h[3].Cells), "fresh ") {
+		t.Fatalf("newest line after wrapping is %q, want a fresh one", rowText(h[3].Cells))
+	}
+}
+
 // A snapshot asks the terminal nothing, so replaying it can't make a
 // client's terminal answer.
 func TestASnapshotHoldsNoQuery(t *testing.T) {
