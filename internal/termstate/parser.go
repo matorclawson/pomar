@@ -170,17 +170,24 @@ func (p *parser) step(t *Terminal, c byte, fwd []byte) []byte {
 			p.state = ground
 			break
 		}
-		// No backslash: the withheld ESC was never put on the wire, so,
-		// same as the buffered case above, it and this byte are reprocessed
-		// from a fresh escape state rather than resuming the string forever
-		// (without this, one aborted overlong string left the model
-		// believing every later byte was still inside it, so no further
-		// query was ever intercepted again for the rest of the session).
-		// Because the ESC was never forwarded on its own, this can't double
-		// it onto the wire or leave it dangling for the client: it reaches
-		// the client only as part of whatever p.seq's own dispatch forwards,
+		// No backslash: the withheld ESC was never put on the wire, and the
+		// client has no model of its own, so it must be told the string
+		// ends here exactly where the model's does, or it keeps swallowing
+		// whatever comes next as string data (zeocouncil's residual LOW on
+		// #127: an intercepted query here forwards nothing, so without this
+		// the client stays inside the old string until some later BEL or ST,
+		// and applies all of it at once, say as a title). A synthesized ST
+		// closes it; the held ESC itself is never the one forwarded, so this
+		// can't double it onto the wire either. Same as the buffered case
+		// above, this byte is then reprocessed from a fresh escape state
+		// rather than resuming the string forever (without that, one
+		// aborted overlong string left the model believing every later byte
+		// was still inside it, so no further query was ever intercepted
+		// again for the rest of the session). That reprocessed sequence
+		// reaches the client only as part of whatever its own dispatch forwards,
 		// exactly once, exactly when the reprocessed sequence itself isn't
 		// one the host answers in the model's place.
+		fwd = append(fwd, 0x1b, '\\')
 		p.seq, p.state = []byte{0x1b}, escape
 		fwd = p.step(t, c, fwd)
 	}

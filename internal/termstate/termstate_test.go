@@ -198,6 +198,16 @@ func TestAnInterceptedQueryNeverLeavesADanglingEscape(t *testing.T) {
 	if bytes.HasPrefix(out[max(0, i-7):], []byte("\x1b]52;c;QUJD")) {
 		t.Fatalf("the smuggled OSC 52 rode through whole: %q", out[max(0, i-10):i+10])
 	}
+	// zeocouncil's residual LOW on #127: an intercepted query forwards
+	// nothing of its own, so the client needs its own signal that the
+	// string ended there, or it keeps swallowing everything after as
+	// string data until some later BEL or ST. A synthesized ST must sit
+	// right before the plaintext, so a client replaying these bytes
+	// reaches ground (the string closed) before it sees "]52;c;QUJD" as
+	// what it actually is: inert text, not string content.
+	if !bytes.Contains(out, []byte("\x1b\\]52;c;QUJD")) {
+		t.Fatalf("no synthesized ST closes the client's string before the plaintext: %q", lastBytes(out, 40))
+	}
 	if len(term.Replies()) == 0 {
 		t.Fatal("the query wasn't answered")
 	}
