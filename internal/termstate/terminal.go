@@ -336,6 +336,9 @@ func (t *Terminal) print(s string, w int) {
 		}
 		return
 	}
+	if w == 2 && t.cols < 2 { // no column holds a wide character at all, wrapped or not
+		return
+	}
 	if t.cur.wrapPending && t.modes.AutoWrap {
 		t.cur.x = 0
 		t.lineFeed()

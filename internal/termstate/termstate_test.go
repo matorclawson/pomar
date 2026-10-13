@@ -147,6 +147,40 @@ func TestQueriesAreAnsweredAndNotForwarded(t *testing.T) {
 	}
 }
 
+// A string past maxString (64 KiB) is forwarded raw, unbuffered; but once a
+// bare ESC aborts it (never a backslash), the model must stop believing it's
+// still inside that string, or every later query for the rest of the
+// session goes unintercepted and the client's screen drifts from the
+// model's (zeocouncil's review of #127, LOW 1).
+func TestAQueryAfterAnOverlongAbortedStringIsStillIntercepted(t *testing.T) {
+	term := New(80, 24, 0)
+	long := strings.Repeat("Q", maxString+1000)
+	out := term.Feed([]byte("\x1b]52;c;" + long + "\x1b[6n"))
+	if bytes.Contains(out, []byte("[6n")) {
+		t.Fatalf("the query rode through on the overlong string: %q", lastBytes(out, 20))
+	}
+	if len(term.Replies()) == 0 {
+		t.Fatal("the query behind the aborted overlong string was never answered")
+	}
+	// And the model recovered for good: a second, ordinary query afterwards
+	// is intercepted too, not silently stuck in the old trap.
+	term.Replies()
+	out = term.Feed([]byte("ok\x1b[5n"))
+	if bytes.Contains(out, []byte("[5n")) || !bytes.Contains(out, []byte("ok")) {
+		t.Fatalf("a later query wasn't intercepted, or output was lost: %q", out)
+	}
+	if len(term.Replies()) == 0 {
+		t.Fatal("the model stayed stuck past the overlong string")
+	}
+}
+
+func lastBytes(b []byte, n int) []byte {
+	if len(b) > n {
+		return b[len(b)-n:]
+	}
+	return b
+}
+
 // Lines scrolled off the main screen keep stable identities, and the
 // history is bounded.
 func TestHistoryLinesHaveStableIdentities(t *testing.T) {
@@ -369,15 +403,34 @@ func FuzzFeedNeverPanics(f *testing.F) {
 		"a" + strings.Repeat("́", 5000), "\x1bP$q",
 		strings.Repeat("\xff", 200), "\xc0\x80", "\xed\xa0\x80", "\xe2\x28\xa1",
 		fixtures["queries"], fixtures["rep and erase"],
+		// An OSC past maxString (64 KiB), aborted by a bare ESC (never a
+		// backslash), then a real query: zeocouncil's #127 LOW 1, reached
+		// only once an input can exceed maxString, past the old truncation.
+		"\x1b]52;c;" + strings.Repeat("Q", 70000) + "\x1b[6n",
 	} {
 		f.Add([]byte(s))
 	}
 	f.Fuzz(func(t *testing.T, b []byte) {
-		if len(b) > 1<<16 {
-			b = b[:1<<16] // the model's own bounds are what's under test, not an unbounded corpus
+		// Past maxString (64 KiB), so passString is reachable: the model's
+		// own bounds are what's under test, not an unbounded corpus.
+		const cap = 1 << 17
+		if len(b) > cap {
+			b = b[:cap]
 		}
 		term := New(80, 24, 100)
-		fwd := term.Feed(b)
+		var fwd []byte
+		if len(b) >= 2 {
+			// A resize mid-stream, derived from the input itself: the
+			// combining-mark cap, the ring buffer and the scroll region
+			// all have resize-dependent paths.
+			cols, rows := 1+int(b[0])%200, 1+int(b[1])%200
+			half := len(b) / 2
+			fwd = term.Feed(b[:half])
+			term.Resize(cols, rows)
+			fwd = append(fwd, term.Feed(b[half:])...)
+		} else {
+			fwd = term.Feed(b)
+		}
 		if len(fwd) > len(b) {
 			t.Fatalf("forwarded %d bytes from %d: queries are removed, never added", len(fwd), len(b))
 		}

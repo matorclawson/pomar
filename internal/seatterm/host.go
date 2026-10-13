@@ -236,6 +236,10 @@ func (h *SessionHost) forget(id string) {
 // returns once the program's leader is reaped, or ErrTerminateUncertain. It
 // waits on the reap itself, so a slow journal never makes it uncertain, and
 // it never signals a group whose leader is reaped, as that pid may be reused.
+// Since LOW 3, startSession's own reaper also kills the group immediately
+// behind every reap, whatever the cause: Terminate's own grace-then-kill is
+// mostly redundant with that now, but its HUP still asks first, before
+// either side reaches for SIGKILL.
 func (h *SessionHost) Terminate(operation, principal, id string) error {
 	s, ok := h.Session(id)
 	if !ok {
