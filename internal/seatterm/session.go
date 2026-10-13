@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -30,8 +31,8 @@ type Command struct {
 // such as the tmux server and the actor in it. It returns once the command
 // has exited.
 func Attach(stream Stream, c Command, cols, rows uint16) error {
-	if c.Path == "" || cols < 1 || cols > MaxCols || rows < 1 || rows > MaxRows {
-		return errors.New("attach needs its command and a bounded window size")
+	if !filepath.IsAbs(c.Path) || cols < 1 || cols > MaxCols || rows < 1 || rows > MaxRows {
+		return errors.New("attach needs its command's absolute path and a bounded window size")
 	}
 	master, tty, err := openPTY()
 	if err != nil {
@@ -56,7 +57,9 @@ func Attach(stream Stream, c Command, cols, rows uint16) error {
 		return err
 	}
 	cmd := exec.Command(c.Path, c.Args...)
-	cmd.Env, cmd.Dir = c.Env, c.Dir
+	// A nil environment is empty, never the host's own: nothing of the
+	// host reaches the attached command that its Command doesn't name.
+	cmd.Env, cmd.Dir = append([]string{}, c.Env...), c.Dir
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
 	if c.UID >= 0 && c.GID >= 0 {
