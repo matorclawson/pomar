@@ -354,3 +354,37 @@ func TestRandomStreamsContinueExactlyFromAnyCut(t *testing.T) {
 
 // repeats finds a REP (repeat the last character) in a stream.
 var repeats = regexp.MustCompile("\x1b\\[[0-9]*b")
+
+// FuzzFeedNeverPanics feeds raw, often malformed bytes to a fresh
+// terminal: truncated escapes, a huge CSI parameter, a flood of
+// combining marks, a nested OSC inside an unterminated one, and invalid
+// UTF-8 among them. Nothing here is well-formed by construction, unlike
+// tokens above, which TestRandomStreamsContinueExactlyFromAnyCut draws
+// from (zeocouncil's review of #126, LOW 5: "fuzzed" there is a seeded
+// search over well-formed tokens only, never hostile input).
+func FuzzFeedNeverPanics(f *testing.F) {
+	for _, s := range []string{
+		"", "\x1b", "\x1b[", "\x1b]", "\x1bP", "\x1b]2;x\x1b]52;c;QkFE\x07y\x07",
+		"\x1b[" + strings.Repeat("9", 100) + "b", "\x1b[999999999b",
+		"a" + strings.Repeat("́", 5000), "\x1bP$q",
+		strings.Repeat("\xff", 200), "\xc0\x80", "\xed\xa0\x80", "\xe2\x28\xa1",
+		fixtures["queries"], fixtures["rep and erase"],
+	} {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, b []byte) {
+		if len(b) > 1<<16 {
+			b = b[:1<<16] // the model's own bounds are what's under test, not an unbounded corpus
+		}
+		term := New(80, 24, 100)
+		fwd := term.Feed(b)
+		if len(fwd) > len(b) {
+			t.Fatalf("forwarded %d bytes from %d: queries are removed, never added", len(fwd), len(b))
+		}
+		snap := term.Snapshot()
+		const bound = 4 << 20 // generous for an 80x24 screen with full history; unbounded is exactly the MEDIUM this review found
+		if len(snap) > bound {
+			t.Fatalf("a %d-byte snapshot from a %d-byte input, want under %d", len(snap), len(b), bound)
+		}
+	})
+}
