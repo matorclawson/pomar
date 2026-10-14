@@ -88,7 +88,36 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 	}
 	// Authentication is not inferred from the presence of a credentials file.
 	// The TUI performs its own guest login; protocol login remains app-server's.
-	server := &http.Server{Handler: seatHandler(store, route, func() bool { return false }), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 8192}
+	handler := http.NewServeMux()
+	handler.Handle("/", seatHandler(store, route, func() bool { return false }))
+	handler.HandleFunc("GET /v1/codex/startup", func(w http.ResponseWriter, r *http.Request) {
+		s := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: seatStateDir + "/codex", Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
+		info, e := s.InspectStartup()
+		if e != nil {
+			http.Error(w, "startup inspection held", 409)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(info)
+	})
+	handler.HandleFunc("POST /v1/codex/startup/abandon", func(w http.ResponseWriter, r *http.Request) {
+		var req codexseat.ResetRequest
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&req) != nil || dec.Decode(new(any)) != io.EOF {
+			http.Error(w, "invalid reset request", 400)
+			return
+		}
+		launchRecord := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: seatStateDir + "/codex", Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
+		receipt, e := launchRecord.AbandonStart(req, "/var/lib/pomar-agent/codex-start-resets")
+		if e != nil {
+			http.Error(w, "original unbound startup remains held", 409)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(receipt)
+	})
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 8192}
 	return server.Serve(ln)
 }
 

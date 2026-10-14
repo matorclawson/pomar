@@ -167,3 +167,14 @@ import Foundation
     var withController = o; withController.controllerCapabilities = ["inbox"]
     #expect(!AgentEnvironment.valid(withController))
 }
+
+@Test func codexSeatRefusesMissingAndInconsistentLaunchAtOwnerGate() {
+    var o = agentOptions(); o.agent = "codex"; o.agentVersion = "0.160.0"; o.seat = "example"
+    #expect(!AgentEnvironment.valid(o))
+    o.seatLaunch = .init(sandbox:"read-only",approvals:"never",network_access:true,model:"fixture-model",effort:"high",cwd:"/work")
+    #expect(!AgentEnvironment.valid(o))
+    o.seatLaunch?.sandbox = "workspace-write"; o.seatLaunch?.effort = "max"
+    #expect(!AgentEnvironment.valid(o))
+    o.seat = nil; o.seatLaunch = nil
+    #expect(!AgentEnvironment.valid(o))
+}

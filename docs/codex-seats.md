@@ -29,18 +29,28 @@ explicitly. An absent, corrupt, redirected, configuration-mismatched or
 ambiguous binding holds further starts for inspection; no fresh conversation
 is invented to recover it. A lost initial acknowledgement stays held even if
 subsequent metadata might identify the original thread; explicit recovery
-qualification is still required. The actor inherits its exclusive lock, so
-supervisor disappearance alone does not permit a second actor.
+qualification is still required. The actor inherits its exclusive scope lock, so
+supervisor disappearance alone does not permit a second actor. Tool descendants
+can retain that descriptor: a background service is still part of that execution
+scope and can keep subsequent starts held until the owner fences it. Closing
+that lock silently would weaken the no-second-writer rule.
 
-The selected executable is hashed and executed through its retained Linux
-file descriptor. Its digest is the already pinned Codex artifact; this is
+The selected executable and helper directories must stay custodian-owned and
+not group/other writable. The first executable is hashed and executed through
+its retained Linux file descriptor; the trampoline closes the binary descriptor
+at native exec. Helper re-execs performed by Codex use paths and therefore rely
+on that directory custody, not a claim of descriptor pinning of every helper. Its digest is the already pinned Codex artifact; this is
 binary custody, not new interactive acceptance. Thread records bind the seat,
 version, executable, workspace and launch configuration and are written with
 file and directory synchronization. The VM owner must keep the executable
 immutable and preserve the original workspace, Codex home and startup record.
 
 Declared policy is carried unchanged for fresh launch and exact-ID resume.
-A changed declaration cannot restart a retained environment. The startup
+A changed declaration cannot restart a retained environment. Read-only plus enabled tool networking, and unrestricted sandbox plus disabled
+networking, are refused because those combinations cannot honor this override.
+The candidate effort set is medium/high only; actual Linux policy effects still
+require qualification. Non-seat app-server profiles retain their original
+no-agentVersion rule. The startup
 canary and live-policy comparison required for remote health are not implemented
 by this source change; flags alone do not prove effective live settings.
 
@@ -59,3 +69,26 @@ must agree on the state/receipt interface. Effect identity requires more than
 a latest-only committed-operation string. Managed-seat acceptance, the
 reviewed receiver, all fourteen criteria, the full qualification pilot and the operator attach test
 precede any existing-seat move. This change starts no VM and installs nothing.
+
+## Owner recovery of an unbound first start
+
+A missing startup record with any prior rollout is held, never treated as a
+new conversation. If Codex exits before producing a rollout, its `starting`
+record remains held; an ordinary start/resume cannot clear it.
+
+The VM owner can inspect `GET /v1/codex/startup` through the existing private
+owner-to-guest broker route. An attended recovery uses
+`POST /v1/codex/startup/abandon` with an original `operation_id`, the exact
+`record_sha256` from inspection, and `acknowledge_unknown:true`. This is a
+root-broker action, unavailable to coding-user processes. It requires no live
+scope-lock holder, no rollout and an unchanged unbound record. The original
+record and owner intent/receipt are synchronized in the custodian's private
+reset archive before/after removing only the matched startup pointer. Repeating
+the same operation returns its receipt; conflicts remain held.
+
+The owner must assess and fence any surviving execution scope before giving
+that disposition. The receipt says `UNKNOWN_NOT_RETRIED`; it does not assert
+that a tool succeeded, that no external effect occurred, or that a VM stopped.
+Bound threads, existing rollouts, mismatched records and live locks cannot be
+reset this way. This operation abandons an unbound conversation after explicit
+owner acknowledgement; it is not an automatic retry of an uncertain action.

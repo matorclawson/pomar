@@ -20,10 +20,14 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 	"github.com/zeroemployeeorg/pomar/internal/claudeactor"
+	"github.com/zeroemployeeorg/pomar/internal/codexseat"
 )
 
 func main() {
 	run := run
+	if len(os.Args) > 2 && os.Args[1] == "codex-seat-exec" && os.Args[2] == "--" {
+		run = func() error { return codexseat.ExecPinned(os.Args[3:]) }
+	}
 	if len(os.Args) > 1 && os.Args[1] == "seat-supervisor" {
 		run = runSeatSupervisor
 	}

@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func fixture(t *testing.T) Supervisor {
@@ -197,5 +200,119 @@ func TestFreshAndResumeUseDeclaredPolicy(t *testing.T) {
 	s.Launch = &l
 	if _, err := s.read(); !errors.Is(err, ErrHeld) {
 		t.Fatal("resume changed declared launch", err)
+	}
+}
+
+type testActor struct{ done chan error }
+
+func (a testActor) Wait() error { return <-a.done }
+func fakeNative(t *testing.T) func() (*os.File, error) {
+	t.Helper()
+	return func() (*os.File, error) { return os.Open(os.DevNull) }
+}
+func TestLostRecordWithExistingRolloutsNeverLaunches(t *testing.T) {
+	s := fixture(t)
+	rollout(t, s, "prior", id1, "cli")
+	called := false
+	for i := 0; i < 2; i++ {
+		err := s.start(fakeNative(t), func(record, *os.File, *os.File) (runningActor, error) { called = true; return nil, nil })
+		if !errors.Is(err, ErrHeld) {
+			t.Fatal("lost record not held", err)
+		}
+	}
+	if called {
+		t.Fatal("started a replacement conversation")
+	}
+}
+func TestStartRefusesHeldActorLockBeforeAnyDispatch(t *testing.T) {
+	s := fixture(t)
+	f, err := os.OpenFile(filepath.Join(s.StateDir, "actor.lock"), os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	err = s.start(fakeNative(t), func(record, *os.File, *os.File) (runningActor, error) { called = true; return nil, nil })
+	if !errors.Is(err, ErrActorRunning) || called {
+		t.Fatal("scope lock bypassed", err)
+	}
+}
+func TestStartTickBindsBeforeExitAndResumeUsesSameThread(t *testing.T) {
+	s := fixture(t)
+	child := testActor{make(chan error, 1)}
+	result := make(chan error, 1)
+	go func() {
+		result <- s.start(fakeNative(t), func(r record, _ *os.File, _ *os.File) (runningActor, error) {
+			if r.State != "starting" {
+				return nil, errors.New("missing startup intent")
+			}
+			return child, nil
+		})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		r, err := s.read()
+		if err == nil && r.State == "starting" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no intent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	rollout(t, s, "first", id1, "cli")
+	for {
+		r, _ := s.read()
+		if r.State == "bound" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tick did not durably bind")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	child.done <- nil
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	err := s.start(fakeNative(t), func(r record, _ *os.File, _ *os.File) (runningActor, error) {
+		if r.Thread != id1 {
+			return nil, errors.New("resume changed thread")
+		}
+		a := testActor{make(chan error, 1)}
+		a.done <- nil
+		return a, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+func TestFirstExitWithoutRolloutHoldsAndRetainsIntent(t *testing.T) {
+	s := fixture(t)
+	err := s.start(fakeNative(t), func(record, *os.File, *os.File) (runningActor, error) {
+		a := testActor{make(chan error, 1)}
+		a.done <- nil
+		return a, nil
+	})
+	if !errors.Is(err, ErrHeld) {
+		t.Fatal("missing binding became success", err)
+	}
+	r, _ := s.read()
+	if r.State != "starting" {
+		t.Fatal("lost original startup evidence")
+	}
+}
+func TestIdleCommandDoesNotConsumeTUIInput(t *testing.T) {
+	input := strings.NewReader("r\nTUI input\n")
+	line, err := readCommand(input)
+	if err != nil || line != "r" {
+		t.Fatal(line, err)
+	}
+	rest, _ := io.ReadAll(input)
+	if string(rest) != "TUI input\n" {
+		t.Fatal("prefetched actor input")
 	}
 }

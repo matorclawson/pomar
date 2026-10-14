@@ -210,3 +210,37 @@ func TestPinnedCodexSeatRetainsIdentityAndArchive(t *testing.T) {
 		t.Fatalf("lost Codex seat binding %+v %v", cfg, err)
 	}
 }
+
+func TestInheritedCodexSeatRefusesMissingAndInvalidLaunch(t *testing.T) {
+	for _, launch := range []*SeatLaunch{nil, {Sandbox: "workspace-write"}} {
+		root := t.TempDir()
+		os.Chmod(root, 0700)
+		p := EnvironmentProfile{Base: root + "/base", ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: root + "/source", SourceSHA: strings.Repeat("b", 40), Seat: "example", SeatDeclarationSHA256: strings.Repeat("c", 64), SeatLaunch: launch}
+		p.ImageRef = "example.invalid/image@" + p.ImageDigest
+		cfg := HostConfig{Root: root, Agent: "codex", MaxLive: 1, CPUs: 1, MemoryBytes: 512 << 20, Profiles: map[string]EnvironmentProfile{"seat-example": p}}
+		if h, err := OpenHost(cfg); err == nil {
+			h.Close()
+			t.Fatal("inherited Codex seat bypassed launch gate")
+		}
+	}
+}
+func TestStartRefusesChangedDeclarationAndPolicyBeforeIncarnation(t *testing.T) {
+	n := true
+	l := &SeatLaunch{Sandbox: "workspace-write", Approvals: "never", NetworkAccess: &n, Model: "fixture-model", Effort: "high", CWD: "/work"}
+	p := EnvironmentProfile{SourceSHA: strings.Repeat("a", 40), SeatDeclarationSHA256: strings.Repeat("b", 64), SeatLaunch: l}
+	h := &Host{config: HostConfig{MaxLive: 2, Profiles: map[string]EnvironmentProfile{"seat-example": p}}, envs: map[string]*Environment{}}
+	for _, change := range []string{"declaration", "policy"} {
+		spec := HostConfig{SourceSHA: p.SourceSHA, SeatDeclarationSHA256: p.SeatDeclarationSHA256, SeatLaunch: l}
+		if change == "declaration" {
+			spec.SeatDeclarationSHA256 = strings.Repeat("c", 64)
+		} else {
+			other := *l
+			other.Model = "different"
+			spec.SeatLaunch = &other
+		}
+		e := &Environment{Spec: VMSpec{HostConfig: spec, Profile: "seat-example", Incarnation: "original"}, Phase: "stopped"}
+		if err := h.start(e); err == nil || e.Spec.Incarnation != "original" || e.Phase != "stopped" {
+			t.Fatal("changed profile dispatched", change, err)
+		}
+	}
+}

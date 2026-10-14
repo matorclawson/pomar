@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -119,7 +120,7 @@ var claudeControllerVersions = map[string]bool{"2.1.280": true}
 func ValidateAgent(c HostConfig) error {
 	switch c.Agent {
 	case "", "codex":
-		if c.AgentVersion != "" && c.AgentVersion != "0.160.0" {
+		if c.AgentVersion != "" && (c.Seat == "" || c.AgentVersion != "0.160.0") {
 			return errors.New("Codex requires the supported pinned version 0.160.0")
 		}
 	case "claude":
@@ -276,16 +277,21 @@ func OpenHost(config HostConfig) (*Host, error) {
 			return nil, err
 		}
 		effective := config
-		if p.Seat != "" && p.Agent == "codex" {
+		effective.Seat = p.Seat
+		effective.ControllerCapabilities = p.ControllerCapabilities
+		if p.Agent != "" {
+			effective.Agent, effective.AgentVersion = p.Agent, p.AgentVersion
+		}
+		agent := effective.Agent
+		if agent == "" {
+			agent = "codex"
+		}
+		if p.Seat != "" && agent == "codex" {
 			if err := p.SeatLaunch.Validate(); err != nil {
 				return nil, fmt.Errorf("profile %s: %w", name, err)
 			}
 		} else if p.SeatLaunch != nil {
 			return nil, errors.New("declared Codex launch settings belong to a Codex seat profile")
-		}
-		effective.ControllerCapabilities = p.ControllerCapabilities
-		if p.Agent != "" {
-			effective.Agent, effective.AgentVersion = p.Agent, p.AgentVersion
 		}
 		if p.Seat != "" && (!seatProfileName.MatchString(p.Seat) || (effective.Agent != "claude" && (effective.Agent != "codex" || effective.AgentVersion != "0.160.0")) || len(p.ControllerCapabilities) > 0 || p.Qualification) {
 			return nil, fmt.Errorf("profile %s: a seat profile names a seat, runs a pinned supported coding agent, and has no controller capabilities or qualification fixture", name)
@@ -524,7 +530,7 @@ func (h *Host) start(e *Environment) error {
 	if err != nil {
 		return err
 	}
-	if cfg.SeatDeclarationSHA256 != e.Spec.SeatDeclarationSHA256 {
+	if cfg.SeatDeclarationSHA256 != e.Spec.SeatDeclarationSHA256 || !reflect.DeepEqual(cfg.SeatLaunch, e.Spec.SeatLaunch) {
 		return errors.New("retained seat declaration changed; original environment held")
 	}
 	if cfg.SourceSHA != e.Spec.SourceSHA || cfg.SourceBundle != e.Spec.SourceBundle || cfg.Base != e.Spec.Base || cfg.ImageDigest != e.Spec.ImageDigest || cfg.ImageRef != e.Spec.ImageRef {

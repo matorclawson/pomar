@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -122,6 +123,9 @@ var carriedSources = []string{"work"}
 // seat's current declaration compiles to; empty means it is current.
 func staleness(spec environmentSpec, want agentenv.EnvironmentProfile) []string {
 	var d []string
+	if !reflect.DeepEqual(spec.SeatLaunch, want.SeatLaunch) {
+		d = append(d, "seatLaunch differs from the declaration")
+	}
 	diff := func(field, got, want string) {
 		if got != want {
 			d = append(d, fmt.Sprintf("%s is %q, the declaration says %q", field, got, want))
@@ -152,20 +156,21 @@ type environmentRecord struct {
 // identity, and the inputs it was made from, which must be the ones the
 // seat's current declaration compiles to.
 type environmentSpec struct {
-	Profile                string   `json:"profile"`
-	Session                string   `json:"session"`
-	Incarnation            string   `json:"incarnation"`
-	Seat                   string   `json:"seat"`
-	SeatDeclarationSHA256  string   `json:"seatDeclarationSHA256"`
-	SourceSHA              string   `json:"sourceSHA"`
-	Base                   string   `json:"base"`
-	ImageRef               string   `json:"imageRef"`
-	ImageDigest            string   `json:"imageDigest"`
-	Agent                  string   `json:"agent"`
-	AgentVersion           string   `json:"agentVersion"`
-	CodexArchiveSHA256     string   `json:"codexArchiveSHA256"`
-	AllowedHosts           []string `json:"allowedHosts"`
-	ControllerCapabilities []string `json:"controllerCapabilities"`
+	SeatLaunch             *agentenv.SeatLaunch `json:"seatLaunch,omitempty"`
+	Profile                string               `json:"profile"`
+	Session                string               `json:"session"`
+	Incarnation            string               `json:"incarnation"`
+	Seat                   string               `json:"seat"`
+	SeatDeclarationSHA256  string               `json:"seatDeclarationSHA256"`
+	SourceSHA              string               `json:"sourceSHA"`
+	Base                   string               `json:"base"`
+	ImageRef               string               `json:"imageRef"`
+	ImageDigest            string               `json:"imageDigest"`
+	Agent                  string               `json:"agent"`
+	AgentVersion           string               `json:"agentVersion"`
+	CodexArchiveSHA256     string               `json:"codexArchiveSHA256"`
+	AllowedHosts           []string             `json:"allowedHosts"`
+	ControllerCapabilities []string             `json:"controllerCapabilities"`
 }
 
 // environment reads the seat's environment; ok is false when it doesn't

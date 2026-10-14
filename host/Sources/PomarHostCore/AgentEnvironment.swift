@@ -16,11 +16,12 @@ public enum AgentEnvironment {
             let first = model.first
             return ["read-only", "workspace-write", "danger-full-access"].contains(sandbox)
                 && ["never", "on-request"].contains(approvals)
-                && ["none", "minimal", "low", "medium", "high", "xhigh", "max"].contains(effort)
+                && ["medium", "high"].contains(effort)
                 && cwd == "/work" && first != nil && (first!.isLetter || first!.isNumber)
                 && model.utf8.count <= 128
                 && model.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || ".-_".contains($0)) }
                 && (sandbox != "danger-full-access" || network_access)
+                && (sandbox != "read-only" || !network_access)
         }
     }
     public struct Options: Codable, Sendable {
@@ -129,7 +130,7 @@ public enum AgentEnvironment {
     public static func validAgent(_ o: Options) -> Bool {
         switch o.agent ?? "codex" {
         case "codex":
-            guard o.agentVersion == nil || o.agentVersion == "0.160.0" else { return false }
+            guard o.seat != nil || o.agentVersion == nil else { return false }
             if let s = o.seat {
                 return o.seatLaunch?.valid == true && o.agentVersion == "0.160.0" && validSeatName(s)
                     && (o.controllerCapabilities ?? []).isEmpty && o.qualificationFixture == nil

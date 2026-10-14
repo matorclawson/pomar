@@ -4,6 +4,7 @@ package codexseat
 
 import (
 	"bufio"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -41,6 +42,7 @@ type Supervisor struct {
 }
 
 type record struct {
+	StartupNonce        string   `json:"startup_nonce,omitempty"`
 	Seat                string   `json:"seat"`
 	ConfigurationSHA256 string   `json:"configuration_sha256"`
 	Schema              string   `json:"schema"`
@@ -104,7 +106,8 @@ func (s Supervisor) write(r record) error {
 	return d.Sync()
 }
 
-func (s Supervisor) read() (record, error) {
+func (s Supervisor) read() (record, error) { return s.readAs(uint32(os.Getuid())) }
+func (s Supervisor) readAs(owner uint32) (record, error) {
 	var r record
 	path := filepath.Join(s.StateDir, "codex-thread.json")
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -117,7 +120,7 @@ func (s Supervisor) read() (record, error) {
 		return r, ErrHeld
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != uint32(os.Getuid()) || st.Nlink != 1 {
+	if !ok || st.Uid != owner || st.Nlink != 1 {
 		return r, ErrHeld
 	}
 	if json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&r) != nil {
@@ -222,7 +225,56 @@ func (s Supervisor) Args(thread string) []string {
 	return args
 }
 
-func (s Supervisor) Start() error {
+type runningActor interface{ Wait() error }
+
+func (s Supervisor) openNative() (*os.File, error) {
+	if err := immutableParents(s.Binary); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(s.Binary, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 1<<30 || fi.Mode().Perm()&0022 != 0 || fi.Mode().Perm()&0111 == 0 {
+		f.Close()
+		return nil, errors.New("Codex executable custody refused")
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Uid != 0 {
+		f.Close()
+		return nil, errors.New("Codex executable must remain owned by the guest custodian")
+	}
+	h := sha256.New()
+	_, err = io.Copy(h, f)
+	if err != nil || hex.EncodeToString(h.Sum(nil)) != LinuxExecutableSHA256 {
+		f.Close()
+		return nil, errors.New("Codex executable differs from the pinned Linux ARM64 artifact")
+	}
+
+	return f, nil
+}
+
+// The parent retains its scope lock while the native actor inherits it.
+// A trampoline closes the executable descriptor during the first exec.
+func (s Supervisor) launchNative(r record, lock, f *os.File) (runningActor, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	args := append([]string{"codex-seat-exec", "--", s.Binary}, s.Args(r.Thread)...)
+	cmd := exec.Command(self, args...)
+	cmd.Env = append([]string{}, s.Env...)
+	cmd.Dir = s.Workspace
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = s.In, s.Out, s.Out
+	cmd.ExtraFiles = []*os.File{lock, f}
+	if err = cmd.Start(); err != nil {
+		return nil, err
+	}
+	return cmd, nil
+}
+
+func (s Supervisor) Start() error { return s.start(s.openNative, s.launchNative) }
+func (s Supervisor) start(open func() (*os.File, error), launch func(record, *os.File, *os.File) (runningActor, error)) error {
 	if err := s.Launch.Validate(); err != nil {
 		return err
 	}
@@ -247,79 +299,105 @@ func (s Supervisor) Start() error {
 	}
 	defer lock.Close()
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return errors.New("Codex actor still owns this seat; another start is refused")
+		return ErrActorRunning
 	}
-	f, err := os.OpenFile(s.Binary, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return err
-	}
-	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 1<<30 || fi.Mode().Perm()&0022 != 0 || fi.Mode().Perm()&0111 == 0 {
-		f.Close()
-		return errors.New("Codex executable custody refused")
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Uid != 0 {
-		f.Close()
-		return errors.New("Codex executable must remain owned by the guest custodian")
-	}
-	h := sha256.New()
-	_, err = io.Copy(h, f)
-	if err != nil || hex.EncodeToString(h.Sum(nil)) != LinuxExecutableSHA256 {
-		f.Close()
-		return errors.New("Codex executable differs from the pinned Linux ARM64 artifact")
-	}
-	defer f.Close()
 	r, err := s.read()
+	fresh := false
 	if errors.Is(err, os.ErrNotExist) {
 		before, e := s.rollouts()
 		if e != nil {
 			return e
 		}
-		r = record{Seat: s.Seat, ConfigurationSHA256: s.configurationDigest(), Schema: "pomar.codex-seat-thread/v1", State: "starting", Before: before, Workspace: s.Workspace, BinarySHA256: LinuxExecutableSHA256, Version: Version}
-		if err = s.write(r); err != nil {
+		if len(before) != 0 {
+			return ErrHeld
+		}
+		fresh = true
+		nonce := make([]byte, 32)
+		if _, err = rand.Read(nonce); err != nil {
 			return err
 		}
+		r = record{StartupNonce: hex.EncodeToString(nonce), Seat: s.Seat, ConfigurationSHA256: s.configurationDigest(), Schema: "pomar.codex-seat-thread/v1", State: "starting", Before: before, Workspace: s.Workspace, BinarySHA256: LinuxExecutableSHA256, Version: Version}
 	} else if err != nil {
 		return err
 	} else if r.State == "starting" {
 		return ErrHeld
 	}
-	cmd := exec.Command("/proc/self/fd/4", s.Args(r.Thread)...)
-	cmd.Args[0] = s.Binary
-	cmd.Env = append([]string{}, s.Env...)
-	cmd.Dir = s.Workspace
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, s.Out, s.Out
-	cmd.ExtraFiles = []*os.File{lock, f}
-	if err = cmd.Start(); err != nil {
+	f, err := open()
+	if err != nil {
 		return err
 	}
+	defer f.Close()
+	if fresh {
+		if err = s.write(r); err != nil {
+			return err
+		}
+	}
+	process, err := launch(r, lock, f)
+	if err != nil {
+		return err
+	}
+	return s.waitBinding(r, process)
+}
+
+func (s Supervisor) waitBinding(r record, process runningActor) error {
 	if r.State == "bound" {
-		return cmd.Wait()
+		return process.Wait()
 	}
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() { done <- process.Wait() }()
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		select {
 		case exit := <-done:
-			if _, err = s.bind(r); err != nil {
+			if _, err := s.bind(r); err != nil {
 				return ErrHeld
 			}
 			return exit
 		case <-tick.C:
-			if _, err = s.bind(r); err == nil {
+			if _, err := s.bind(r); err == nil {
 				return <-done
 			}
 		}
 	}
 }
 
+var ErrActorRunning = errors.New("Codex actor still owns this execution scope; another start is refused")
+
+func immutableParents(binary string) error {
+	for p := filepath.Dir(binary); ; p = filepath.Dir(p) {
+		fi, err := os.Lstat(p)
+		if err != nil || !fi.IsDir() || fi.Mode().Perm()&0022 != 0 {
+			return errors.New("Codex helper directory custody refused")
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != 0 {
+			return errors.New("Codex helper directory must be custodian-owned")
+		}
+		if p == "/" {
+			return nil
+		}
+	}
+}
+
+// ExecPinned is the guest trampoline only. Descriptor 4 is closed by the
+// native ELF exec; descriptor 3 intentionally fences the whole tool scope.
+func ExecPinned(argv []string) error {
+	if len(argv) < 1 || !filepath.IsAbs(argv[0]) {
+		return errors.New("missing pinned native argv")
+	}
+	if err := syscall.SetNonblock(4, false); err != nil {
+		return err
+	}
+	syscall.CloseOnExec(4)
+	return syscall.Exec("/proc/self/fd/4", argv, os.Environ())
+}
+
 func (s Supervisor) Run() error {
-	in := bufio.NewReader(s.In)
+	in := s.In
 	for {
 		fmt.Fprintf(s.Out, "\nPomar Codex seat %s is idle. Type r to start/resume its bound conversation.\n> ", s.Seat)
-		line, err := in.ReadString('\n')
+		line, err := readCommand(in)
 		if err == io.EOF {
 			return nil
 		}
@@ -330,6 +408,27 @@ func (s Supervisor) Run() error {
 			if err = s.Start(); err != nil {
 				fmt.Fprintln(s.Out, "Codex start/resume refused:", err)
 			}
+		}
+	}
+}
+
+// Read only the idle command, never prefetch bytes that belong to the TUI.
+func readCommand(in io.Reader) (string, error) {
+	var b strings.Builder
+	one := make([]byte, 1)
+	for {
+		n, err := in.Read(one)
+		if n > 0 {
+			if one[0] == '\n' {
+				return b.String(), nil
+			}
+			if b.Len() >= 4096 {
+				return "", errors.New("idle command too long")
+			}
+			b.WriteByte(one[0])
+		}
+		if err != nil {
+			return "", err
 		}
 	}
 }
