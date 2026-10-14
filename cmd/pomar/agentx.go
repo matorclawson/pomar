@@ -145,7 +145,7 @@ func helpCatalogue() map[string]any {
 			{"seats", "List declared development seats", "pomar seats [-root DIR] [-json] [-menu]", "a table, or JSON with -json", []string{"never prompts unless -menu is given, which needs a terminal"}},
 			// session: POMAR-CC's entry, for Pomar to fold into the catalogue's release form.
 			{"session", "Named programs on terminals that outlive every client, from this user's session service",
-				"pomar session serve|new -id OP [-state] NAME -- /ABS/PROGRAM...|ls [-json]|show NAME|screen [-json] NAME|logs [-from N] [-limit N] [-o PATH] NAME|send -id OP [-enter] [-session ID] [-epoch N] [-when-ready] [-accept-wait D] NAME [--] TEXT|paste -id OP [-file PATH] [-raw] [-session ID] [-epoch N] NAME|attach [-view] [-take] NAME|stop -id OP NAME",
+				"pomar session serve|new -id OP [-state] [-expected-sha256 HEX] NAME -- /ABS/PROGRAM...|ls [-json]|show NAME|screen [-json] NAME|scrollback [-json] [-lines N] NAME|health NAME|logs [-from N] [-limit N] [-o PATH] NAME|send -id OP [-enter] [-session ID] [-epoch N] [-when-ready] [-accept-wait D] NAME [--] TEXT|paste -id OP [-file PATH] [-raw] [-session ID] [-epoch N] NAME|attach [-view] [-take] NAME|stop -id OP NAME",
 				"JSON (attach is the terminal; screen and logs print raw text/bytes, or JSON with -json where offered)",
 				[]string{"exit 3: no session service for the root; 4: no such name; 5: refused as it stands (a running name, another controller, an operation still running); 6: the program exited; 7: stale (the session changed since you read it); 8: unsupported (-when-ready without a state channel); 9: not ready in time",
 					"-id makes new, send, paste and stop once-only: a retry with the same ID returns what it did, and never acts twice",

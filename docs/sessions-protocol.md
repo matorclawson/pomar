@@ -92,6 +92,35 @@ Whether they still run isn't known; they are never reported as exited.
 
 `offset` is the output offset the screen reflects.
 
+### Scrollback
+
+`GET .../scrollback[?lines=N]` answers the lines scrolled off the screen,
+oldest first, up to `HistoryLines` (2000), readable without attaching:
+
+```json
+{"lines": ["each history line, trailing blanks trimmed"], "truncated": false}
+```
+
+`lines` (query, optional, a positive integer) bounds the most recent lines
+returned; `truncated` is `true` when more history is kept than was asked
+for.
+
+### Health
+
+`GET .../health` answers a passive, heuristic read of the current screen,
+for criterion 14 of the tmux-replacement acceptance (remote seat health,
+without the seat's cooperation):
+
+```json
+{"possible_panic": false, "possible_readonly_refusal": false, "possible_approval_prompt": false,
+ "last_output": "2026-10-14T17:00:00Z"}
+```
+
+Every `possible_*` field is a fixed, documented substring match against the
+current screen's text, nothing more: diagnostic only, never authoritative,
+never fed back into any control or readiness decision, and never a
+substitute for agent state (below) when an adapter can speak at all.
+
 ### A log chunk
 
 `GET .../logs` answers raw bytes, never JSON, with headers naming the whole
@@ -302,6 +331,30 @@ is a further hardening this document does not yet require.
 
 `s` carries a session's `agent`, as in the API. It is adapter-reported, and
 never derived from the screen.
+
+## The adapter-state channel: operations
+
+On the same `POMAR_SESSION_STATE` socket an adapter reports agent state on
+(one JSON object per line, at most 4096 bytes), it may also call a durable
+per-operation primitive, distinguished from a state report by carrying
+`"op"`:
+
+| Request | Reply |
+|---|---|
+| `{"op": "begin", "id": "OPID", "digest": "D"}` | `{"first": true}` (or `false` on a retry with the same digest) |
+| `{"op": "finish", "id": "OPID", "known": true\|false}` | `{"ok": true}` |
+| `{"op": "status", "id": "OPID"}` | `{"disposition": "pending"\|"sent"\|"acceptance_unknown"\|"not_found"}` |
+
+`id` is one printable-ASCII token, at most 128 bytes. A conflicting digest
+for an `id` already begun, or a `finish` on an `id` never begun or already
+finished, is `{"error": "..."}`, same as a malformed state report.
+
+This durably survives a service restart: any operation still `pending`
+when a session's journal is reopened becomes `acceptance_unknown` then and
+there. It is the session layer's own guarantee (no input byte replayed, no
+operation resubmitted) extended with a place an adapter can durably record
+whether its *own* effect is known to have landed — it is never a claim that
+the session layer can stop a model from choosing to act again on its own.
 
 ## Versioning
 

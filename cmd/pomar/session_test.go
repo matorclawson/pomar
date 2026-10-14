@@ -296,3 +296,78 @@ func TestSessionPasteBracketsAndFences(t *testing.T) {
 		t.Fatalf("over the paste bound: %d %s", rc, errb.String())
 	}
 }
+
+// pomar session scrollback reads history without attaching, and -lines
+// bounds it; pomar session health is a passive, heuristic screen read.
+func TestSessionScrollbackAndHealth(t *testing.T) {
+	dir, _ := os.MkdirTemp("/tmp", "psc")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	root := filepath.Join(dir, "r")
+	s, err := sessiond.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); s.Serve(ctx, func() { close(ready) }) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	var out, errb bytes.Buffer
+	script := "i=1; while [ $i -le 10 ]; do printf 'l%02d\\n' $i; i=$((i+1)); done; printf 'panic: boom\\n'; sleep 30"
+	if rc := run([]string{"session", "new", "-root", root, "-id", "op-1", "-rows", "3", "work", "--", "/bin/sh", "-c", script}, &out, &errb); rc != 0 {
+		t.Fatalf("new: %d %s", rc, errb.String())
+	}
+	var scr string
+	for i := 0; i < 200 && !strings.Contains(scr, "panic"); i++ {
+		out.Reset()
+		run([]string{"session", "screen", "-root", root, "work"}, &out, &errb)
+		scr = out.String()
+	}
+	out.Reset()
+	if rc := run([]string{"session", "scrollback", "-root", root, "work"}, &out, &errb); rc != 0 {
+		t.Fatalf("scrollback: %d %s", rc, errb.String())
+	}
+	if !strings.Contains(out.String(), "l01") {
+		t.Fatalf("scrollback should reach past the 3-row screen: %q", out.String())
+	}
+	out.Reset()
+	if rc := run([]string{"session", "scrollback", "-root", root, "-lines", "2", "-json", "work"}, &out, &errb); rc != 0 {
+		t.Fatalf("scrollback -lines -json: %d %s", rc, errb.String())
+	}
+	var sb seatterm.ScrollbackText
+	if json.Unmarshal(out.Bytes(), &sb) != nil || len(sb.Lines) != 2 || !sb.Truncated {
+		t.Fatalf("bounded scrollback: %s", out.String())
+	}
+	out.Reset()
+	if rc := run([]string{"session", "health", "-root", root, "work"}, &out, &errb); rc != 0 {
+		t.Fatalf("health: %d %s", rc, errb.String())
+	}
+	var h seatterm.Health
+	if json.Unmarshal(out.Bytes(), &h) != nil || !h.PossiblePanic || h.PossibleReadonlyRefusal || h.PossibleApprovalPrompt {
+		t.Fatalf("health should flag only possible_panic: %s", out.String())
+	}
+}
+
+// -expected-sha256 refuses a launch whose binary doesn't match.
+func TestSessionNewExpectedSHA256Refuses(t *testing.T) {
+	dir, _ := os.MkdirTemp("/tmp", "psc")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	root := filepath.Join(dir, "r")
+	s, err := sessiond.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); s.Serve(ctx, func() { close(ready) }) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	var out, errb bytes.Buffer
+	if rc := run([]string{"session", "new", "-root", root, "-id", "op-1", "-expected-sha256", strings.Repeat("0", 64), "work", "--", "/bin/sh", "-c", "echo ok"}, &out, &errb); rc == 0 {
+		t.Fatalf("a mismatched expected-sha256 should refuse the launch: %s", out.String())
+	}
+}

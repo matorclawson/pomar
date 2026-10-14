@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -50,6 +51,8 @@ type adapter struct {
 	ln   net.Listener
 	t    *seatterm.TermSession
 	j    *journal
+	root string
+	ops  *opJournal // opened once the session's ID is known, in start
 
 	mu   sync.Mutex
 	conn net.Conn
@@ -63,7 +66,9 @@ func statePath(root, principal, op string) string {
 }
 
 // listenState opens a state channel at path, admitting only this user.
-func listenState(path string, j *journal) (*adapter, error) {
+// root names where its op journal is opened, once start knows the session's
+// ID.
+func listenState(path, root string, j *journal) (*adapter, error) {
 	if len(path) > maxSocketPath {
 		return nil, errors.New("the state socket's path is too long for a Unix socket: choose a shorter root")
 	}
@@ -81,14 +86,18 @@ func listenState(path string, j *journal) (*adapter, error) {
 		ln.Close()
 		return nil, err
 	}
-	return &adapter{path: path, ln: ln, j: j}, nil
+	return &adapter{path: path, ln: ln, j: j, root: root}, nil
 }
 
 // start binds the channel to its session, then serves it: a connection made
 // before, while the program starts, waits in the backlog. It closes when
-// the session's program has exited.
+// the session's program has exited. Its op journal opens here too, now
+// that the session's ID (its filename) is known; a failure to open it
+// never blocks the session itself, only the begin/finish/status calls an
+// adapter makes, which then answer a plain error.
 func (a *adapter) start(t *seatterm.TermSession) {
 	a.t = t
+	a.ops, _ = openOpJournal(a.root, t.ID)
 	go a.serve()
 	go func() {
 		<-t.Done()
@@ -99,6 +108,9 @@ func (a *adapter) start(t *seatterm.TermSession) {
 func (a *adapter) close() {
 	a.ln.Close()
 	os.Remove(a.path)
+	if a.ops != nil {
+		a.ops.close()
+	}
 	a.mu.Lock()
 	if a.conn != nil {
 		a.conn.Close()
@@ -127,13 +139,36 @@ func (a *adapter) serve() {
 	}
 }
 
-// read takes an adapter's reports, one JSON line each. A malformed or
-// over-long line is answered with an error line and ends the connection.
+// opRequest is an adapter's begin, finish or status call, on the same
+// socket and line protocol as AdapterReport, distinguished by carrying
+// "op". Everything else on the channel is a plain state report.
+type opRequest struct {
+	Op     string `json:"op"`
+	ID     string `json:"id"`
+	Digest string `json:"digest,omitempty"`
+	Known  *bool  `json:"known,omitempty"`
+}
+
+var opIDWord = regexp.MustCompile(`^[\x21-\x7e]{1,128}$`) // one printable-ASCII token, bounded
+
+// read takes an adapter's reports and op calls, one JSON line each. A
+// malformed or over-long line is answered with an error line and ends the
+// connection.
 func (a *adapter) read(c net.Conn) {
 	defer c.Close()
 	sc := bufio.NewScanner(c)
 	sc.Buffer(make([]byte, 0, 512), maxStateLine)
 	for sc.Scan() {
+		var peek struct {
+			Op string `json:"op"`
+		}
+		if json.Unmarshal(sc.Bytes(), &peek) == nil && peek.Op != "" {
+			if err := a.op(c, sc.Bytes()); err != nil {
+				a.reply(c, map[string]string{"error": err.Error()})
+				return
+			}
+			continue
+		}
 		var r AdapterReport
 		dec := json.NewDecoder(bytes.NewReader(sc.Bytes()))
 		dec.DisallowUnknownFields()
@@ -152,6 +187,45 @@ func (a *adapter) read(c net.Conn) {
 	if sc.Err() != nil {
 		a.reply(c, map[string]string{"error": "line too long"})
 	}
+}
+
+// op answers a begin, finish or status call, replying on success itself;
+// an error it returns is what the caller reports and ends the connection
+// on, matching how a malformed AdapterReport is handled.
+func (a *adapter) op(c net.Conn, line []byte) error {
+	var req opRequest
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		return err
+	}
+	if !opIDWord.MatchString(req.ID) {
+		return errors.New("op needs an id: one printable token, at most 128 bytes")
+	}
+	if a.ops == nil {
+		return errors.New("this session's operation journal couldn't be opened; begin/finish/status aren't available")
+	}
+	switch req.Op {
+	case "begin":
+		first, err := a.ops.begin(req.ID, req.Digest)
+		if err != nil {
+			return err
+		}
+		a.reply(c, map[string]bool{"first": first})
+	case "finish":
+		if req.Known == nil {
+			return errors.New("finish needs known: true or false")
+		}
+		if err := a.ops.finish(req.ID, *req.Known); err != nil {
+			return err
+		}
+		a.reply(c, map[string]bool{"ok": true})
+	case "status":
+		a.reply(c, map[string]string{"disposition": a.ops.status(req.ID)})
+	default:
+		return errors.New("op must be begin, finish or status")
+	}
+	return nil
 }
 
 func (a *adapter) reply(c net.Conn, v any) {
