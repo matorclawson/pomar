@@ -296,6 +296,11 @@ type CreateRequest struct {
 	// StateChannel gives the session a socket, named by StateEnv in its
 	// environment, on which an adapter reports its agent state.
 	StateChannel bool `json:"state_channel,omitempty"`
+	// ExpectedSHA256, if set, pins the exact binary at Path: the launch is
+	// refused if the file doesn't hash to this, checked once as the file
+	// is opened for exec (seatterm.Command.ExpectedSHA256's own doc notes
+	// exactly what window this does and doesn't close, by platform).
+	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
 }
 
 // SessionView is a session as ls and show give it: the session host's
@@ -308,6 +313,10 @@ type SessionView struct {
 	Generation   int    `json:"generation"` // 1 for a name's first session, then one more for each that took the name
 	Outcome      string `json:"outcome"`    // running, or exited (with exit_code)
 	StateChannel bool   `json:"state_channel"`
+	// HeldOperations are this session's acceptance_unknown operations: an
+	// adapter's effect whose outcome was never confirmed. Shown so an
+	// attaching client sees them before typing anything.
+	HeldOperations []HeldOp `json:"held_operations,omitempty"`
 }
 
 // Created is a create's reply.
@@ -382,6 +391,27 @@ func (s *Server) mux() *http.ServeMux {
 			reply(w, http.StatusOK, t.Screen())
 		}
 	})
+	mux.HandleFunc("GET /v1/sessions/{name}/scrollback", func(w http.ResponseWriter, r *http.Request) {
+		t := s.lookup(w, r)
+		if t == nil {
+			return
+		}
+		lines := 0
+		if v := r.URL.Query().Get("lines"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				refuse(w, http.StatusBadRequest, KindUsage, "lines must be a positive integer")
+				return
+			}
+			lines = n
+		}
+		reply(w, http.StatusOK, t.Scrollback(lines))
+	})
+	mux.HandleFunc("GET /v1/sessions/{name}/health", func(w http.ResponseWriter, r *http.Request) {
+		if t := s.lookup(w, r); t != nil {
+			reply(w, http.StatusOK, t.Health())
+		}
+	})
 	mux.HandleFunc("GET /v1/sessions/{name}/logs", s.logs)
 	mux.HandleFunc("GET /v1/sessions/by-id/{id}/logs", s.logsByID)
 	mux.HandleFunc("POST /v1/sessions/{name}/send", s.send)
@@ -413,8 +443,15 @@ func (s *Server) view(t *seatterm.TermSession) SessionView {
 		v.Outcome = "exited"
 	}
 	s.mu.Lock()
-	v.Generation, v.StateChannel = s.gens[t.ID], s.adapters[t.ID] != nil
+	v.Generation = s.gens[t.ID]
+	a := s.adapters[t.ID]
 	s.mu.Unlock()
+	if a != nil {
+		v.StateChannel = true
+		if a.ops != nil {
+			v.HeldOperations = a.ops.held()
+		}
+	}
 	return v
 }
 
@@ -467,7 +504,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		env = append(env, StateEnv+"="+statePath)
 	}
 	spec := seatterm.SessionSpec{Name: req.Name, Kind: req.Kind, Cols: req.Cols, Rows: req.Rows,
-		Command: seatterm.Command{Path: req.Path, Args: req.Args, Env: env, Dir: req.Dir, UID: -1, GID: -1}}
+		Command: seatterm.Command{Path: req.Path, Args: req.Args, Env: env, Dir: req.Dir, UID: -1, GID: -1, ExpectedSHA256: req.ExpectedSHA256}}
 	key := p + "\x00" + req.Operation
 	s.mu.Lock()
 	name, retry := s.creates[key]
@@ -495,7 +532,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	var a *adapter
 	if req.StateChannel && !retry {
 		var err error
-		if a, err = listenState(statePath, s.j); err != nil {
+		if a, err = listenState(statePath, s.root, s.j); err != nil {
 			s.mu.Lock()
 			delete(s.creates, key)
 			s.mu.Unlock()

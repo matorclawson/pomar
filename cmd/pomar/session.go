@@ -39,11 +39,16 @@ const maxPasteBytes = 8 << 20
 
 const sessionUsage = `usage:
   pomar session serve [-root DIR]   run this user's session service (in the foreground)
-  pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] NAME -- /ABS/PROGRAM ARGS...
+  pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] [-expected-sha256 HEX] NAME -- /ABS/PROGRAM ARGS...
                                     -state: a state channel for an adapter ($POMAR_SESSION_STATE in its environment)
+                                    -expected-sha256: refuse the launch unless the program hashes to this
   pomar session ls [-json]
   pomar session show NAME           the session's state, as JSON
   pomar session screen [-json] NAME the current screen, as text
+  pomar session scrollback [-json] [-lines N] NAME
+                                    the lines scrolled off the screen, oldest first, readable without attaching
+  pomar session health NAME         a passive, heuristic read of the current screen: possible_panic,
+                                    possible_readonly_refusal, possible_approval_prompt, last_output
   pomar session logs [-from N] [-limit N] [-o PATH] NAME
                                     the session's durable log, paged; written to PATH, or stdout
   pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME [--] TEXT
@@ -77,27 +82,29 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		}
 	}
 	var (
-		asJSON = fs.Bool("json", false, "print JSON")
-		kind   = fs.String("kind", "program", "the session's kind: a lower-case word (agent, shell, ...)")
-		cols   = fs.Uint("cols", 0, "the window's columns (default: this terminal's, or 80)")
-		rows   = fs.Uint("rows", 0, "the window's rows (default: this terminal's, or 24)")
-		dir    = fs.String("dir", "", "the program's working directory")
-		enter  = fs.Bool("enter", false, "end the text with Enter (a carriage return)")
-		take   = fs.Bool("take", false, "take control from whoever holds it")
-		view   = fs.Bool("view", false, "view only: nothing you type is sent")
-		state  = fs.Bool("state", false, "give the session a state channel, on which an adapter reports its agent state")
-		gen    = fs.String("session", "", "the session ID (generation) you last read: refused as stale if the name now has another")
-		epoch  = fs.Int64("epoch", -1, "the grant epoch you last read: refused as stale if control changed since")
-		ready  = fs.Bool("when-ready", false, "write the text only once the session's adapter reports it waiting for input")
-		rwait  = fs.Duration("ready-wait", 0, "how long -when-ready waits (default 30s, at most 10m)")
-		await  = fs.Duration("accept-wait", 0, "how long to wait, after the write, for the adapter to report the input accepted")
-		title  = fs.Bool("title", true, "show your role and the agent state in the terminal's title while attached")
-		from   = fs.Int64("from", 0, "logs: the byte offset to start from")
-		limit  = fs.Int64("limit", 0, "logs: at most this many bytes (default and max 1 MiB)")
-		out    = fs.String("o", "", "logs: write to this path instead of stdout")
-		file   = fs.String("file", "", "paste: read the payload from this file, instead of stdin")
-		raw    = fs.Bool("raw", false, "paste: send the payload as is, without bracketed-paste markers")
-		envs   multiFlag
+		asJSON    = fs.Bool("json", false, "print JSON")
+		kind      = fs.String("kind", "program", "the session's kind: a lower-case word (agent, shell, ...)")
+		cols      = fs.Uint("cols", 0, "the window's columns (default: this terminal's, or 80)")
+		rows      = fs.Uint("rows", 0, "the window's rows (default: this terminal's, or 24)")
+		dir       = fs.String("dir", "", "the program's working directory")
+		enter     = fs.Bool("enter", false, "end the text with Enter (a carriage return)")
+		take      = fs.Bool("take", false, "take control from whoever holds it")
+		view      = fs.Bool("view", false, "view only: nothing you type is sent")
+		state     = fs.Bool("state", false, "give the session a state channel, on which an adapter reports its agent state")
+		expectSHA = fs.String("expected-sha256", "", "new: refuse the launch unless the program's file hashes to this")
+		gen       = fs.String("session", "", "the session ID (generation) you last read: refused as stale if the name now has another")
+		epoch     = fs.Int64("epoch", -1, "the grant epoch you last read: refused as stale if control changed since")
+		ready     = fs.Bool("when-ready", false, "write the text only once the session's adapter reports it waiting for input")
+		rwait     = fs.Duration("ready-wait", 0, "how long -when-ready waits (default 30s, at most 10m)")
+		await     = fs.Duration("accept-wait", 0, "how long to wait, after the write, for the adapter to report the input accepted")
+		title     = fs.Bool("title", true, "show your role and the agent state in the terminal's title while attached")
+		from      = fs.Int64("from", 0, "logs: the byte offset to start from")
+		limit     = fs.Int64("limit", 0, "logs: at most this many bytes (default and max 1 MiB)")
+		out       = fs.String("o", "", "logs: write to this path instead of stdout")
+		file      = fs.String("file", "", "paste: read the payload from this file, instead of stdin")
+		raw       = fs.Bool("raw", false, "paste: send the payload as is, without bracketed-paste markers")
+		lines     = fs.Int("lines", 0, "scrollback: at most this many of the most recent lines (default: all kept, up to HistoryLines)")
+		envs      multiFlag
 	)
 	fs.Var(&envs, "env", "K=V for the program's environment (repeatable); TERM, HOME, PATH and LANG come from yours unless set")
 	pos, err := parseMixed(fs, args)
@@ -161,7 +168,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		if *rows > 0 {
 			h = uint16(min(*rows, seatterm.MaxRows))
 		}
-		req := sessiond.CreateRequest{Operation: *op, Name: pos[0], Kind: *kind, Path: tail[0], Args: tail[1:], Env: sessionEnv(envs), Dir: *dir, Cols: w, Rows: h, StateChannel: *state}
+		req := sessiond.CreateRequest{Operation: *op, Name: pos[0], Kind: *kind, Path: tail[0], Args: tail[1:], Env: sessionEnv(envs), Dir: *dir, Cols: w, Rows: h, StateChannel: *state, ExpectedSHA256: *expectSHA}
 		var out sessiond.Created
 		if rc := call("POST", "/v1/sessions", req, &out); rc != 0 {
 			return rc
@@ -218,6 +225,35 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			lines = lines[:len(lines)-1] // the blank rows below the last text
 		}
 		fmt.Fprintln(stdout, strings.Join(lines, "\n"))
+	case "scrollback":
+		if !need(1, "scrollback names its session") {
+			return 2
+		}
+		path := "/v1/sessions/" + url.PathEscape(pos[0]) + "/scrollback"
+		if *lines > 0 {
+			path += "?lines=" + fmt.Sprint(*lines)
+		}
+		var sb seatterm.ScrollbackText
+		if rc := call("GET", path, nil, &sb); rc != 0 {
+			return rc
+		}
+		if *asJSON {
+			printJSON(sb)
+			return 0
+		}
+		fmt.Fprintln(stdout, strings.Join(sb.Lines, "\n"))
+		if sb.Truncated {
+			fmt.Fprintf(stderr, "pomar session scrollback: more history is kept than shown; raise -lines for it\n")
+		}
+	case "health":
+		if !need(1, "health names its session") {
+			return 2
+		}
+		var h seatterm.Health
+		if rc := call("GET", "/v1/sessions/"+url.PathEscape(pos[0])+"/health", nil, &h); rc != 0 {
+			return rc
+		}
+		printJSON(h)
 	case "logs":
 		if !need(1, "logs names its session") {
 			return 2
@@ -396,6 +432,20 @@ func sessionServe(root string, stdout, stderr io.Writer) int {
 }
 
 func sessionAttach(c *sessiond.Client, name string, view, take, title bool, stdin *os.File, stdout, stderr io.Writer) int {
+	// Held operations (an adapter's effect whose outcome was never
+	// confirmed) are shown before anything is typed, so "continue" isn't
+	// the reflex. A failed read here never blocks the attach itself.
+	var v sessiond.SessionView
+	if c.Do("GET", "/v1/sessions/"+url.PathEscape(name), nil, &v) == nil && len(v.HeldOperations) > 0 {
+		oldest := v.HeldOperations[0].AgeSecs
+		for _, h := range v.HeldOperations {
+			if h.AgeSecs > oldest {
+				oldest = h.AgeSecs
+			}
+		}
+		fmt.Fprintf(stderr, "pomar session attach: %d operation(s) have an unknown outcome, the oldest for %ds — check before continuing (pomar session show %s)\n",
+			len(v.HeldOperations), oldest, name)
+	}
 	st, err := c.Attach(name, view, take)
 	if err != nil {
 		return sessionExit("attach", "", err, stderr)

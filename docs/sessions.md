@@ -75,10 +75,12 @@ Every command takes `-root`. Everything but `attach` prints JSON (`screen` and
 
 | Command | What it does |
 |---|---|
-| `pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] NAME -- /ABS/PROGRAM ARGS...` | Starts PROGRAM on a terminal named NAME. A name that is running is refused; a name whose program ended is taken by a new generation. `-state` gives it a state channel (see [Agent state](#agent-state)). |
+| `pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] [-expected-sha256 HEX] NAME -- /ABS/PROGRAM ARGS...` | Starts PROGRAM on a terminal named NAME. A name that is running is refused; a name whose program ended is taken by a new generation. `-state` gives it a state channel (see [Agent state](#agent-state)). `-expected-sha256` refuses the launch unless PROGRAM's file hashes to it (see below). |
 | `pomar session ls [-json]` | Lists every session, and those an earlier service held (`unrecovered`). |
 | `pomar session show NAME` | One session's state (below). |
 | `pomar session screen [-json] NAME` | The current screen as text rows. With `-json`, also the cursor, the title and the output offset. |
+| `pomar session scrollback [-json] [-lines N] NAME` | The lines scrolled off the screen, oldest first, up to `HistoryLines` (2000), readable without attaching. |
+| `pomar session health NAME` | A passive, heuristic read of the current screen: `possible_panic`, `possible_readonly_refusal`, `possible_approval_prompt`, `last_output`. Diagnostic only; never fed back into any control decision. |
 | `pomar session logs [-from N] [-limit N] [-o PATH] NAME` | The session's durable log, paged (below). To stdout, or `-o PATH`. |
 | `pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME [--] TEXT` | Writes TEXT as the program's input (below). `-enter` adds a carriage return. After `--`, TEXT may begin with a dash. |
 | `pomar session paste -id OP [-file PATH] [-take] [-raw] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME` | Sends a file's, or stdin's, whole content as one write (below). |
@@ -99,6 +101,7 @@ Every command takes `-root`. Everything but `attach` prints JSON (`screen` and
 | `controller`, `viewers` | the principals controlling and attached |
 | `agent` | the state its adapter last reported, or `unknown` |
 | `state_channel` | whether it has one |
+| `held_operations` | its `acceptance_unknown` operation IDs and their age (see [Operations](#operations-a-durable-record-of-what-an-adapters-effects-did)) |
 | `cols`, `rows`, `last_output` | its window size, and when it last printed |
 
 **A new program's environment is exactly:**
@@ -108,6 +111,15 @@ Every command takes `-root`. Everything but `attach` prints JSON (`screen` and
 
 Nothing else of the caller's environment reaches it. Its window is your
 terminal's size, or 80x24.
+
+**A runtime receipt, if asked for:** `-expected-sha256` pins the exact
+binary PROGRAM must be. The file is opened once, hashed and compared before
+launch; a mismatch refuses it outright. On Linux this closes the window
+between the check and the exec completely: the checked file is handed to
+the program as an inherited descriptor and exec'd by that descriptor
+(`/proc/self/fd/N`), never re-resolved by name. On other platforms there is
+no equivalent, and the window between the check and the exec that follows
+it, though minimized, is not claimed closed.
 
 ### Logs
 
@@ -253,6 +265,37 @@ adapter is its owner's work).
 it. The program may have moved on since; `-when-ready` narrows the window
 in which a raw send would land mid-edit, and the adapter's acceptance is
 the only confirmation that it was taken.
+
+## Operations: a durable record of what an adapter's effects did
+
+The session layer's own guarantee is narrow: no input byte is ever
+replayed, and no operation is ever resubmitted by the layer itself — true
+by construction, since it only ever forwards what a client sends, once.
+Whether the *agent's own effect* committed (a tool call, a sent message) is
+not the session layer's to know. What it can give an adapter, on the same
+channel as agent state, is the durable per-operation primitive
+`agentenv.Store`'s headless broker already has (`BeginControl`/
+`FinishControl`), reused here in shape for any adapter that can only speak
+over a session's PTY:
+
+1. `{"op": "begin", "id": "OPID", "digest": "REQUEST_DIGEST"}` → `{"first": true}` the first time OPID is begun; `{"first": false}` on an exact retry with the same digest (nothing is done twice); an error if OPID was begun with a different digest.
+2. `{"op": "finish", "id": "OPID", "known": true}` once the adapter knows the effect landed (marks it `sent`), or `"known": false` if it can't tell (marks it `acceptance_unknown`, **permanently**: a later `finish` on the same `id`, either way, is refused, never silently overwritten).
+3. `{"op": "status", "id": "OPID"}` → `{"disposition": "pending" | "sent" | "acceptance_unknown" | "not_found"}`.
+
+This is durable (an append-only, fsynced file per session, separate from
+the audit journal and the output log) and survives a service restart: any
+operation still `pending` when a session's journal is opened becomes
+`acceptance_unknown` there and then — a restart never lets a pending
+operation look like it quietly became success.
+
+`show` and `ls` carry a session's `held_operations`: its `acceptance_unknown`
+IDs and their age. `attach` prints a one-line banner if any exist, before
+anything is typed, so "continue" isn't the reflex.
+
+**What this doesn't cover:** the session layer can tell an adapter whether
+*its own* effect's confirmation ever arrived. It cannot stop a model
+choosing to act again on its own after a resume — that is the agent's
+decision, outside anything a PTY carries.
 
 ## Entering a session
 

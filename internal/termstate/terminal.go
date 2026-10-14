@@ -217,6 +217,18 @@ func (t *Terminal) Row(y int) string {
 	return rowText(t.grid()[y])
 }
 
+// HistoryText renders History as text, oldest first, the same way Row
+// renders the active screen: readable without attaching, matching what an
+// attached client would have scrolled past.
+func (t *Terminal) HistoryText() []string {
+	h := t.History()
+	out := make([]string, len(h))
+	for i, line := range h {
+		out[i] = rowText(line.Cells)
+	}
+	return out
+}
+
 func rowText(r []Cell) string {
 	var b []byte
 	end := 0

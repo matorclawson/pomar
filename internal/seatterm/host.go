@@ -445,6 +445,11 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	if c.UID >= 0 && c.GID >= 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(c.UID), Gid: uint32(c.GID)}
 	}
+	if err = checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256); err != nil {
+		slave.Close()
+		master.Close()
+		return nil, err
+	}
 	err = cmd.Start()
 	slave.Close()
 	if err != nil {
@@ -714,6 +719,28 @@ func (s *TermSession) Screen() ScreenText {
 		out.Lines[i] = s.term.Row(i)
 	}
 	return out
+}
+
+// ScrollbackText is the lines scrolled off a session's screen, readable
+// without attaching, up to HistoryLines, oldest first.
+type ScrollbackText struct {
+	Lines []string `json:"lines"`
+	// Truncated is true when the session's own history (bounded at
+	// HistoryLines) holds more than Lines returns: lines was asked for
+	// fewer than the history kept.
+	Truncated bool `json:"truncated"`
+}
+
+// Scrollback returns up to lines of a session's history, the most recent
+// ones, oldest first; lines <= 0 or over HistoryLines returns all of it.
+func (s *TermSession) Scrollback(lines int) ScrollbackText {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all := s.term.HistoryText()
+	if lines <= 0 || lines >= len(all) {
+		return ScrollbackText{Lines: all}
+	}
+	return ScrollbackText{Lines: all[len(all)-lines:], Truncated: true}
 }
 
 // Attach adds a viewing client and returns it with its snapshot. Viewing

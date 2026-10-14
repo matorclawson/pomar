@@ -106,8 +106,10 @@ pomar session stop -id stop-1 build
 - **`stop` reads back** the leader's reap and whether anything remains in its process group.
 - **`logs` gives a session's durable output** (`pomar session logs NAME`), paged (`-from`, `-limit`), on disk from creation whether or not anything was ever attached. It survives a restart of the service, reachable by the session's exact ID even once its name is forgotten; nothing else here does.
 - **`paste` sends a whole file or stdin as one write** (`pomar session paste -id OP [-file PATH] NAME`), bracketed as a paste (`ESC[200~`…`ESC[201~`) unless `-raw`, through the same fenced send as `send`: it invents nothing of its own.
+- **`scrollback` reads history without attaching** (`pomar session scrollback [-lines N] NAME`), up to 2000 lines; **`health`** (`pomar session health NAME`) is a passive, heuristic screen read (`possible_panic`, `possible_readonly_refusal`, `possible_approval_prompt`) — diagnostic only, never authoritative.
 - **Exit codes:** 3, no service; 4, no such name; 5, refused as it stands; 6, the program exited; 7, stale; 8, unsupported; 9, not ready in time.
 - **Agent state is only what an adapter reports,** never the screen, and is `unknown` without one. The adapter contract is in docs/sessions.md.
+- **An adapter can also durably record whether its own effect landed** (`begin`/`finish`/`status` on the same state channel), so a stop and a resume don't repeat it. `show`'s `held_operations` lists any still `acceptance_unknown`, and `attach` banners them first.
 - **Sessions don't survive** a restart of the service, or a reboot; their durable logs do.
 - **A screen can show a secret.** Read it as you would read the terminal.
 
