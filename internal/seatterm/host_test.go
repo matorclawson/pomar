@@ -165,10 +165,10 @@ func TestOnlyTheControllerReachesThePTY(t *testing.T) {
 	}
 	ctl, snap, _ := s.Attach("operator")
 	defer ctl.Detach()
-	if _, err := ctl.Control(false, "test"); err != nil {
+	if _, err := ctl.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := viewer.Control(false, "test"); err != ErrControlled {
+	if _, err := viewer.Control(false, "test", nil); err != ErrControlled {
 		t.Fatalf("a second controller was granted: %v", err)
 	}
 	if err := ctl.Input([]byte("hello\n")); err != nil {
@@ -199,7 +199,7 @@ func TestATakeoverFencesTheOldControllersQueuedInput(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	a, snap, _ := s.Attach("seat")
 	defer a.Detach()
-	if _, err := a.Control(false, "test"); err != nil {
+	if _, err := a.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	filler := bytes.Repeat([]byte("."), MaxData)
@@ -214,7 +214,7 @@ func TestATakeoverFencesTheOldControllersQueuedInput(t *testing.T) {
 	b, _, _ := s.Attach("operator")
 	defer b.Detach()
 	start := time.Now()
-	if _, err := b.Control(true, "operator takeover"); err != nil {
+	if _, err := b.Control(true, "operator takeover", nil); err != nil {
 		t.Fatalf("takeover: %v", err)
 	}
 	if time.Since(start) > defaultFenceBound+time.Second {
@@ -245,7 +245,7 @@ func TestNoGrantWithoutItsJournalButRevocationAlways(t *testing.T) {
 	}
 	defer s.cmd.Process.Kill()
 	c, _, _ := s.Attach("operator")
-	if _, err := c.Control(false, "test"); err != nil {
+	if _, err := c.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	j.mu.Lock()
@@ -259,7 +259,7 @@ func TestNoGrantWithoutItsJournalButRevocationAlways(t *testing.T) {
 	if s.Info().Controller != "" {
 		t.Fatal("release was held up by the journal")
 	}
-	if _, err := c.Control(false, "test"); err != ErrAudit {
+	if _, err := c.Control(false, "test", nil); err != ErrAudit {
 		t.Fatalf("a grant without its journal: %v", err)
 	}
 	c.Detach()
@@ -320,7 +320,7 @@ func TestAnExitedSessionGrantsNothing(t *testing.T) {
 		t.Fatalf("state %+v", in)
 	}
 	c, _, _ := s.Attach("operator")
-	if _, err := c.Control(false, "test"); err != ErrSessionExited {
+	if _, err := c.Control(false, "test", nil); err != ErrSessionExited {
 		t.Fatalf("control of an exited session: %v", err)
 	}
 	if !j.has("exit", "outcome", "ok") {
@@ -339,11 +339,11 @@ func TestADetachedClientControlsNothing(t *testing.T) {
 	}
 	defer s.cmd.Process.Kill()
 	c, _, _ := s.Attach("operator")
-	if _, err := c.Control(false, "test"); err != nil {
+	if _, err := c.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	c.Detach()
-	if _, err := c.Control(false, "again"); err == nil {
+	if _, err := c.Control(false, "again", nil); err == nil {
 		t.Fatal("a detached client regained control")
 	}
 	if c.Input([]byte("x")) != ErrNotController || c.Resize(90, 30) != ErrNotController {
@@ -371,7 +371,7 @@ func TestDetachRacingControlNeverLeavesADetachedController(t *testing.T) {
 		}
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); c.Control(false, "race") }()
+		go func() { defer wg.Done(); c.Control(false, "race", nil) }()
 		go func() { defer wg.Done(); c.Detach() }()
 		wg.Wait()
 		if in := s.Info(); in.Controller == principal {
@@ -394,7 +394,7 @@ func TestWriteOutcomesAreCounted(t *testing.T) {
 	defer s.cmd.Process.Kill()
 	c, snap, _ := s.Attach("operator")
 	defer c.Detach()
-	if _, err := c.Control(false, "test"); err != nil {
+	if _, err := c.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	c.Input([]byte("one\n"))
@@ -421,7 +421,7 @@ func TestATakeoverCutsAWriteToAProgramThatNeverReads(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	a, _, _ := s.Attach("seat")
 	defer a.Detach()
-	a.Control(false, "test")
+	a.Control(false, "test", nil)
 	for i := 0; i < 4; i++ {
 		a.Input(bytes.Repeat([]byte("."), MaxData))
 	}
@@ -436,7 +436,7 @@ func TestATakeoverCutsAWriteToAProgramThatNeverReads(t *testing.T) {
 	b, _, _ := s.Attach("operator")
 	defer b.Detach()
 	start := time.Now()
-	epoch, err := b.Control(true, "takeover")
+	epoch, err := b.Control(true, "takeover", nil)
 	if err != nil {
 		t.Fatalf("takeover: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestATakeoverThatCantConfirmTheFenceGrantsNothing(t *testing.T) {
 	defer s.cmd.Process.Kill()
 	a, _, _ := s.Attach("seat")
 	defer a.Detach()
-	a.Control(false, "test")
+	a.Control(false, "test", nil)
 	a.Input([]byte("x"))
 	for d := time.Now().Add(5 * time.Second); time.Now().Before(d); time.Sleep(10 * time.Millisecond) {
 		s.mu.Lock()
@@ -478,7 +478,7 @@ func TestATakeoverThatCantConfirmTheFenceGrantsNothing(t *testing.T) {
 	}
 	b, _, _ := s.Attach("operator")
 	defer b.Detach()
-	if _, err := b.Control(true, "takeover"); err != ErrFenceUncertain {
+	if _, err := b.Control(true, "takeover", nil); err != ErrFenceUncertain {
 		t.Fatalf("an unconfirmed fence: %v", err)
 	}
 	if in := s.Info(); in.Controller != "" {
@@ -611,7 +611,7 @@ func TestASlowJournalHoldsNothingUp(t *testing.T) {
 	c, _, _ := s.Attach("operator")
 	defer c.Detach()
 	delay.Store(true)
-	go c.Control(false, "slow")
+	go c.Control(false, "slow", nil)
 	time.Sleep(700 * time.Millisecond) // past the intent's record, inside the outcome's
 	start := time.Now()
 	s.Info()
@@ -734,7 +734,7 @@ func TestTheScreenCutRendersTheLiveScreen(t *testing.T) {
 	}
 	op, _, _ := s.Attach("operator")
 	defer op.Detach()
-	if _, err := op.Control(false, "test"); err != nil {
+	if _, err := op.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	op.Input([]byte("go\n"))

@@ -25,13 +25,14 @@ import (
 
 // Exit codes of `pomar session`, beyond 0, 1 and 2.
 const (
-	exitNoService = 3 // no session service runs for the root: start one with `pomar session serve`
-	exitNotFound  = 4 // no session has that name
-	exitConflict  = 5 // refused as it stands: the name runs, another client controls it, or the operation is still running
-	exitExited    = 6 // the session's program has exited
-	exitStale     = 7 // the send named a generation or grant epoch the session no longer has: read it again
-	exitUnsupp    = 8 // the session can't do it as asked: a when-ready send to a session without a state channel
-	exitNotReady  = 9 // a when-ready send's session didn't report itself waiting for input in time: nothing was written
+	exitNoService = 3  // no session service runs for the root: start one with `pomar session serve`
+	exitNotFound  = 4  // no session has that name
+	exitConflict  = 5  // refused as it stands: the name runs, another client controls it, or the operation is still running
+	exitExited    = 6  // the session's program has exited
+	exitStale     = 7  // the send named a generation or grant epoch the session no longer has: read it again
+	exitUnsupp    = 8  // the session can't do it as asked: a when-ready send to a session without a state channel
+	exitNotReady  = 9  // a when-ready send's session didn't report itself waiting for input in time: nothing was written
+	exitUncertain = 10 // a stop could not confirm the leader or its group gone: it may still be running
 )
 
 const sessionUsage = `usage:
@@ -280,6 +281,9 @@ func sessionExit(verb, op string, err error, stderr io.Writer) int {
 			return exitUnsupp
 		case sessiond.KindNotReady:
 			return exitNotReady
+		case sessiond.KindUncertain:
+			fmt.Fprintln(stderr, "The program's exit could not be confirmed; it may still be running. Check `pomar session show`.")
+			return exitUncertain
 		}
 	}
 	return 1

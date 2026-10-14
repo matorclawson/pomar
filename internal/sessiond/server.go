@@ -287,6 +287,8 @@ func hostError(w http.ResponseWriter, err error) {
 		refuse(w, http.StatusConflict, KindExited, err.Error())
 	case errors.Is(err, seatterm.ErrFenceUncertain), errors.Is(err, seatterm.ErrTerminateUncertain):
 		refuse(w, http.StatusConflict, KindUncertain, err.Error())
+	case errors.Is(err, seatterm.ErrEpochStale):
+		refuse(w, http.StatusConflict, KindStale, err.Error())
 	default:
 		refuse(w, http.StatusInternalServerError, KindInternal, err.Error())
 	}
@@ -804,7 +806,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	}
 	detach := sync.OnceFunc(c.Detach)
 	defer detach()
-	if _, err := c.Control(req.Take, "send "+req.Operation); err != nil {
+	if _, err := c.Control(req.Take, "send "+req.Operation, req.Epoch); err != nil {
 		s.drop(res)
 		hostError(w, err)
 		return
@@ -887,12 +889,24 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		s.drop(res)
 		return
 	}
+	// A group left behind is never reported as a clean 200, whether the
+	// session had already exited or this stop just ended it: a straggler
+	// still holding the PTY is exactly what Terminate's own audit already
+	// calls uncertain (internal/seatterm/host.go:306), and the caller must
+	// see that, not a false "stopped" (the Architect's review of #128's
+	// stack, H3).
 	exited := func() {
 		out := opResult{Session: t.ID, Outcome: "already-exited", Leader: "reaped", Group: "gone"}
+		code := http.StatusOK
 		if t.GroupRemains() {
-			out.Group = "remaining"
+			out.Outcome, out.Group, code = "uncertain", "remaining", http.StatusConflict
 		}
-		reply(w, http.StatusOK, s.settle(res, out))
+		out = s.settle(res, out)
+		if code != http.StatusOK {
+			refuse(w, code, KindUncertain, "the program had already exited, but a process in its group remains")
+			return
+		}
+		reply(w, code, out)
 	}
 	if !t.Info().Running {
 		exited()
@@ -906,6 +920,12 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		}
 		s.settle(res, opResult{Session: t.ID, Outcome: "uncertain", Detail: err.Error(), Leader: rep.Leader, Group: rep.Group, GroupKilled: rep.GroupKilled})
 		hostError(w, err)
+		return
+	}
+	if rep.Leader != "reaped" || rep.Group != "gone" {
+		out := s.settle(res, opResult{Session: t.ID, Outcome: "uncertain", Leader: rep.Leader, Group: rep.Group, GroupKilled: rep.GroupKilled,
+			Detail: "the leader or a process in its group could not be confirmed gone"})
+		refuse(w, http.StatusConflict, KindUncertain, out.Detail)
 		return
 	}
 	reply(w, http.StatusOK, s.settle(res, opResult{Session: t.ID, Outcome: "stopped", Leader: rep.Leader, Group: rep.Group, GroupKilled: rep.GroupKilled}))

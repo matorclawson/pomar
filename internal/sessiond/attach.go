@@ -113,7 +113,7 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 
 	controls := false
 	if !view {
-		if epoch, err := c.Control(take, "attach"); err == nil {
+		if epoch, err := c.Control(take, "attach", nil); err == nil {
 			controls = true
 			meta(seatterm.Control, seatterm.ControlMsg{Event: "granted", Epoch: epoch})
 			// The session takes the controller's size; the screen is cut
@@ -166,7 +166,7 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 				json.Unmarshal(payload, &m)
 				switch m.Op {
 				case "request", "take":
-					if epoch, err := c.Control(m.Op == "take", "attach "+m.Op); err != nil {
+					if epoch, err := c.Control(m.Op == "take", "attach "+m.Op, nil); err != nil {
 						meta(seatterm.Control, seatterm.ControlMsg{Event: "refused", Epoch: t.Info().Epoch, Reason: err.Error()})
 					} else {
 						meta(seatterm.Control, seatterm.ControlMsg{Event: "granted", Epoch: epoch})

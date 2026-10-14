@@ -194,3 +194,46 @@ func TestCreateRefusesARetryAfterTheHostHasPrunedItsOwnRecord(t *testing.T) {
 		t.Fatalf("foo has %d entries, want exactly 1 (no orphaned second program)", n)
 	}
 }
+
+// H3: a stop whose leader was reaped and whose group is confirmed gone
+// still reports a clean 200/stopped; the fix only changes what happens
+// when the host can't confirm that (internal/seatterm/host.go:303-308),
+// which needs a group member that survives a SIGKILL to reproduce and
+// isn't practical to force deterministically in a fast test. Checked
+// instead by reading the fix itself: stop's two success paths
+// (server.go's "exited" closure and its own final reply) both now gate on
+// rep.Leader=="reaped" && rep.Group=="gone" before reporting 200/stopped,
+// the exact two citations the review named.
+func TestStopReportsCleanlyWhenNothingRemains(t *testing.T) {
+	r := root(t)
+	_, c := serve(t, r)
+	var created Created
+	if err := c.Do("POST", "/v1/sessions", shell("op-1", "a", "sleep 30"), &created); err != nil {
+		t.Fatal(err)
+	}
+	var out opResult
+	if err := c.Do("POST", "/v1/sessions/a/stop", StopRequest{Operation: "op-2"}, &out); err != nil {
+		t.Fatalf("a plain stop: %v", err)
+	}
+	if out.Outcome != "stopped" || out.Leader != "reaped" || out.Group != "gone" {
+		t.Fatalf("a clean stop: %+v", out)
+	}
+	// Already exited, cleanly: the "already-exited" path reports the same
+	// clean shape, not uncertain.
+	if err := c.Do("POST", "/v1/sessions", shell("op-3", "b", "true"), &created); err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		var info seatterm.SessionInfo
+		if c.Do("GET", "/v1/sessions/b", nil, &info) == nil && !info.Running {
+			break
+		}
+	}
+	var out2 opResult
+	if err := c.Do("POST", "/v1/sessions/b/stop", StopRequest{Operation: "op-4"}, &out2); err != nil {
+		t.Fatalf("stop on an already-exited session: %v", err)
+	}
+	if out2.Outcome != "already-exited" || out2.Leader != "reaped" || out2.Group != "gone" {
+		t.Fatalf("already-exited, cleanly: %+v", out2)
+	}
+}

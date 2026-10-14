@@ -31,12 +31,33 @@ type Client struct {
 	http *http.Client
 }
 
-// NewClient returns a client for the service serving root.
+// NewClient returns a client for the service serving root. The client
+// itself carries no blanket timeout: Do bounds each call by its own
+// context, long enough for whatever it actually asked the server to wait
+// for (the Architect's review of #128's stack, M3) -- a flat client
+// timeout shorter than a send's own -ready-wait/-accept-wait would abort
+// the call while the server is still legitimately working on it.
 func NewClient(root string) *Client {
 	root = canonical(root)
 	c := localclient.New(filepath.Join(root, SocketName), os.Geteuid())
-	c.Timeout = 30 * time.Second
 	return &Client{Root: root, http: c}
+}
+
+// callTimeout bounds one call: the default 30s, or, for a send that asks
+// the server to wait (ready-wait, accept-wait), those waits plus a margin,
+// so the client's own bound is never shorter than what it asked the server
+// to do.
+func callTimeout(body any) time.Duration {
+	const def, margin = 30 * time.Second, 15 * time.Second
+	req, ok := body.(SendRequest)
+	if !ok {
+		return def
+	}
+	wait := time.Duration(req.ReadyWaitMS+req.AcceptWaitMS) * time.Millisecond
+	if wait <= 0 {
+		return def
+	}
+	return wait + margin
 }
 
 // Refusal is a refusal from the service, with its kind.
@@ -59,7 +80,9 @@ func (c *Client) Do(method, path string, body, out any) error {
 		b, _ := json.Marshal(body)
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, "http://sessions"+path, rd)
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout(body))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, "http://sessions"+path, rd)
 	if err != nil {
 		return err
 	}

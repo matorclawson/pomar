@@ -242,6 +242,19 @@ The service answers with `event`:
 - **A viewer's** `d` and `r` frames are dropped, and it is told once by a
   notice.
 
+**Same-user scope.** The service admits any connection from its own uid (see
+Transport), and grants send, take and stop to any of them alike: a program
+running inside session A, under the same uid, can send to, take control of,
+or stop session B exactly as session B's own client could. The adapter
+socket's own newest-connection-wins replacement (see Agent state in
+sessions.md) is the same: any process of the uid can present itself as B's
+adapter. **A seat's uid must therefore never be shared** between sessions
+that should not be able to act on each other — this is a hard precondition
+of the service's security model, not a detail of one deployment. Making the
+adapter replacement itself require an authenticated adapter token, so a
+same-uid process without the token cannot take over an adapter's identity,
+is a further hardening this document does not yet require.
+
 ### Presence
 
 ```json

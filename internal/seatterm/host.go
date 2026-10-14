@@ -70,6 +70,7 @@ var (
 	ErrOperationConflict  = errors.New("this operation ID already created a session with a different spec")
 	ErrTerminateUncertain = errors.New("the program could not be confirmed stopped")
 	ErrCreating           = errors.New("this operation is still creating its session; ask again")
+	ErrEpochStale         = errors.New("control has changed since the epoch you expected; read it again")
 )
 
 // AuditRecord is the metadata the host journals for every grant, revocation
@@ -273,8 +274,14 @@ func (h *SessionHost) Stop(operation, principal, id string) (StopReport, error) 
 	pgid := s.cmd.Process.Pid
 	signal := func(sig syscall.Signal) {
 		select {
-		case <-s.reaped: // the leader's pid may be free: signal the group only if it is still there
-			if groupExists(pgid) {
+		case <-s.reaped:
+			// The leader's pid is free for reuse. groupExists alone only
+			// asks "does any group with this id exist", which a reused pid
+			// answers yes to for someone else's unrelated session (the
+			// Architect's review of #128's stack, M1): confirm the group
+			// this PTY's own slave side currently has is still exactly
+			// this one before ever signalling it.
+			if pg, err := foregroundPgrp(s.master); err == nil && pg == pgid {
 				syscall.Kill(-pgid, sig)
 			}
 		default:
@@ -819,8 +826,12 @@ drain:
 // grant's intent is journaled before anything changes, and its outcome after
 // the session's lock is released. A write the take cuts short may already
 // have been partly delivered: Outcomes counts it as partial, and nothing of
-// it is resent.
-func (c *Client) Control(take bool, reason string) (uint64, error) {
+// it is resent. expectEpoch, if given, is compared against the session's
+// current epoch under its own lock, not as a separate check beforehand: a
+// caller that read the epoch, then called Control, must be refused if
+// control changed in between, not only if it had already changed before the
+// read (the Architect's review of #128's stack, M5).
+func (c *Client) Control(take bool, reason string, expectEpoch *uint64) (uint64, error) {
 	s := c.s
 	action := "grant"
 	if take {
@@ -831,13 +842,13 @@ func (c *Client) Control(take bool, reason string) (uint64, error) {
 	if err := s.host.record(AuditRecord{Operation: op, Action: action, Phase: "intent", Principal: c.Principal, Session: s.ID, Reason: reason}); err != nil {
 		return 0, ErrAudit
 	}
-	epoch, result, why, err := c.control(take)
+	epoch, result, why, err := c.control(take, expectEpoch)
 	// journaled after the lock is released, as for Attach
 	s.host.record(AuditRecord{Operation: op, Action: action, Phase: "outcome", Principal: c.Principal, Session: s.ID, Epoch: epoch, Outcome: result, Reason: why})
 	return epoch, err
 }
 
-func (c *Client) control(take bool) (uint64, string, string, error) {
+func (c *Client) control(take bool, expectEpoch *uint64) (uint64, string, string, error) {
 	s := c.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -846,6 +857,8 @@ func (c *Client) control(take bool) (uint64, string, string, error) {
 		return 0, "refused", "detached", ErrNotController
 	case s.exited:
 		return 0, "refused", "exited", ErrSessionExited
+	case expectEpoch != nil && s.epoch != *expectEpoch:
+		return 0, "refused", "stale epoch", ErrEpochStale
 	case s.controller == c:
 		return s.epoch, "ok", "already controls", nil
 	case s.controller != nil && !take:
