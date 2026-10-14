@@ -212,15 +212,29 @@ func TestPinnedCodexSeatRetainsIdentityAndArchive(t *testing.T) {
 }
 
 func TestInheritedCodexSeatRefusesMissingAndInvalidLaunch(t *testing.T) {
-	for _, launch := range []*SeatLaunch{nil, {Sandbox: "workspace-write"}} {
-		root := t.TempDir()
-		os.Chmod(root, 0700)
-		p := EnvironmentProfile{Base: root + "/base", ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: root + "/source", SourceSHA: strings.Repeat("b", 40), Seat: "example", SeatDeclarationSHA256: strings.Repeat("c", 64), SeatLaunch: launch}
-		p.ImageRef = "example.invalid/image@" + p.ImageDigest
-		cfg := HostConfig{Root: root, Agent: "codex", MaxLive: 1, CPUs: 1, MemoryBytes: 512 << 20, Profiles: map[string]EnvironmentProfile{"seat-example": p}}
-		if h, err := OpenHost(cfg); err == nil {
-			h.Close()
-			t.Fatal("inherited Codex seat bypassed launch gate")
+	for _, explicit := range []bool{false, true} {
+		for _, launch := range []*SeatLaunch{nil, {Sandbox: "workspace-write"}} {
+			root := t.TempDir()
+			os.Chmod(root, 0700)
+			p := EnvironmentProfile{Base: root + "/base", ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: root + "/source", SourceSHA: strings.Repeat("b", 40), Seat: "example", SeatDeclarationSHA256: strings.Repeat("c", 64), SeatLaunch: launch}
+			if explicit {
+				p.Agent = "codex"
+				p.AgentVersion = "0.160.0"
+				p.AgentArchive = root + "/codex.tar.gz"
+				p.AgentArchiveSHA256 = strings.Repeat("d", 64)
+			}
+			p.ImageRef = "example.invalid/image@" + p.ImageDigest
+			cfg := HostConfig{Root: root, Agent: "codex", MaxLive: 1, CPUs: 1, MemoryBytes: 512 << 20, Profiles: map[string]EnvironmentProfile{"seat-example": p}}
+			h, err := OpenHost(cfg)
+			if err == nil {
+				h.Close()
+				t.Fatal("missing launch accepted")
+			}
+			// Assert this exact gate, not an incidental version/archive refusal.
+			want := "profile seat-example: " + launch.Validate().Error()
+			if err.Error() != want {
+				t.Fatalf("launch gate not reached: got %v want %s", err, want)
+			}
 		}
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,12 +18,14 @@ type ResetRequest struct {
 	AcknowledgeUnknown bool   `json:"acknowledge_unknown"`
 }
 type ResetReceipt struct {
-	Schema      string `json:"schema"`
-	OperationID string `json:"operation_id"`
-	PriorSHA256 string `json:"prior_sha256"`
-	Disposition string `json:"disposition"`
-	Effects     string `json:"effects"`
-	ObservedAt  string `json:"observed_at"`
+	Schema        string `json:"schema"`
+	OperationID   string `json:"operation_id"`
+	PriorSHA256   string `json:"prior_sha256"`
+	Disposition   string `json:"disposition"`
+	Effects       string `json:"effects"`
+	ObservedAt    string `json:"observed_at"`
+	CurrentState  string `json:"current_state"`
+	CurrentSHA256 string `json:"current_sha256,omitempty"`
 }
 
 // AbandonStart is an attended VM-owner action on the private root broker.
@@ -34,7 +35,10 @@ func (s Supervisor) AbandonStart(req ResetRequest, archive string) (ResetReceipt
 	if os.Geteuid() != 0 {
 		return ResetReceipt{}, errors.New("unbound-start abandonment requires the VM owner")
 	}
-	return s.abandonStart(req, archive, 1000, 0)
+	if err := immutableParents(filepath.Join(s.StateDir, "actor.lock")); err != nil {
+		return ResetReceipt{}, err
+	}
+	return s.abandonChecked(req, archive, 1000, 0, func() error { return noCodingProcesses("/proc", 1000) })
 }
 
 func ownedDir(path string, uid uint32) error {
@@ -55,11 +59,14 @@ func ownedDir(path string, uid uint32) error {
 // ownerUID parameters are internal fixture/custody checks; the public entry
 // above fixes the real guest owner IDs and performs the actual euid check.
 func (s Supervisor) abandonStart(req ResetRequest, archive string, guestUID, ownerUID uint32) (ResetReceipt, error) {
+	return s.abandonChecked(req, archive, guestUID, ownerUID, func() error { return nil }) // non-native fixture only
+}
+func (s Supervisor) abandonChecked(req ResetRequest, archive string, guestUID, ownerUID uint32, quiescent func() error) (ResetReceipt, error) {
 	var receipt ResetReceipt
 	if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`).MatchString(req.OperationID) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(req.RecordSHA256) || !req.AcknowledgeUnknown {
 		return receipt, ErrHeld
 	}
-	if err := ownedDir(s.StateDir, guestUID); err != nil {
+	if err := ownedDir(s.StateDir, ownerUID); err != nil {
 		return receipt, err
 	}
 	if err := ownedDir(s.Home, guestUID); err != nil {
@@ -82,7 +89,7 @@ func (s Supervisor) abandonStart(req ResetRequest, archive string, guestUID, own
 		if json.Unmarshal(data, &receipt) != nil || receipt.OperationID != req.OperationID || receipt.PriorSHA256 != req.RecordSHA256 {
 			return ResetReceipt{}, ErrHeld
 		}
-		return receipt, nil
+		return s.currentReceipt(receipt, ownerUID)
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return receipt, e
 	}
@@ -93,6 +100,9 @@ func (s Supervisor) abandonStart(req ResetRequest, archive string, guestUID, own
 	defer lock.Close()
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return receipt, ErrActorRunning
+	}
+	if err = quiescent(); err != nil {
+		return ResetReceipt{}, err
 	}
 	// Resume only this owner transaction after a crash between unlink and
 	// final receipt. Never clear a newer record or infer success of effects.
@@ -131,9 +141,12 @@ func (s Supervisor) abandonStart(req ResetRequest, archive string, guestUID, own
 		}
 		e = d.Sync()
 		d.Close()
-		return receipt, e
+		if e != nil {
+			return ResetReceipt{}, e
+		}
+		return s.currentReceipt(receipt, ownerUID)
 	}
-	r, err := s.readAs(guestUID)
+	r, data, info, err := s.readSnapshot(ownerUID)
 	if err != nil || r.State != "starting" || len(r.Before) != 0 {
 		return receipt, ErrHeld
 	}
@@ -146,21 +159,6 @@ func (s Supervisor) abandonStart(req ResetRequest, archive string, guestUID, own
 		return receipt, err
 	}
 	defer root.Close()
-	f, err := root.OpenFile("codex-thread.json", os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return receipt, err
-	}
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
-		f.Close()
-		return receipt, ErrHeld
-	}
-	data := make([]byte, info.Size())
-	n, err := f.Read(data)
-	f.Close()
-	if err != nil || n != len(data) {
-		return receipt, ErrHeld
-	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != req.RecordSHA256 {
 		return receipt, ErrHeld
@@ -236,7 +234,10 @@ func (s Supervisor) abandonStart(req ResetRequest, archive string, guestUID, own
 	}
 	err = ad.Sync()
 	ad.Close()
-	return receipt, err
+	if err != nil {
+		return ResetReceipt{}, err
+	}
+	return s.currentReceipt(receipt, ownerUID)
 }
 
 // InspectStartup is metadata-only and available only to the private VM owner.
@@ -244,19 +245,28 @@ func (s Supervisor) InspectStartup() (map[string]any, error) {
 	if os.Geteuid() != 0 {
 		return nil, errors.New("startup inspection requires the VM owner")
 	}
-	r, err := s.readAs(1000)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(filepath.Join(s.StateDir, "codex-thread.json"), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	r, data, _, err := s.readSnapshot(0)
 	if err != nil {
 		return nil, err
 	}
 	sha := sha256.Sum256(data)
 	return map[string]any{"state": r.State, "thread": r.Thread, "record_sha256": hex.EncodeToString(sha[:]), "effects": "UNKNOWN_NOT_INFERRED"}, nil
+}
+
+// The durable original receipt is immutable; current state is a fresh snapshot
+// attached to every response, including idempotent replay of an older reset.
+func (s Supervisor) currentReceipt(receipt ResetReceipt, owner uint32) (ResetReceipt, error) {
+	r, data, _, err := s.readSnapshot(owner)
+	if errors.Is(err, os.ErrNotExist) {
+		receipt.CurrentState = "absent"
+		receipt.CurrentSHA256 = ""
+		return receipt, nil
+	}
+	if err != nil {
+		return ResetReceipt{}, err
+	}
+	sha := sha256.Sum256(data)
+	receipt.CurrentState = r.State
+	receipt.CurrentSHA256 = hex.EncodeToString(sha[:])
+	return receipt, nil
 }

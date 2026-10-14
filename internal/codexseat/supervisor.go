@@ -108,28 +108,35 @@ func (s Supervisor) write(r record) error {
 
 func (s Supervisor) read() (record, error) { return s.readAs(uint32(os.Getuid())) }
 func (s Supervisor) readAs(owner uint32) (record, error) {
+	r, _, _, err := s.readSnapshot(owner)
+	return r, err
+}
+
+// Parse, validate and hash only one no-follow opened snapshot.
+func (s Supervisor) readSnapshot(owner uint32) (record, []byte, os.FileInfo, error) {
 	var r record
 	path := filepath.Join(s.StateDir, "codex-thread.json")
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return r, err
+		return r, nil, nil, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 1<<20 || fi.Mode().Perm()&0077 != 0 {
-		return r, ErrHeld
+		return r, nil, nil, ErrHeld
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok || st.Uid != owner || st.Nlink != 1 {
-		return r, ErrHeld
+		return r, nil, nil, ErrHeld
 	}
-	if json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&r) != nil {
-		return r, ErrHeld
+	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if err != nil || len(data) > 1<<20 || json.Unmarshal(data, &r) != nil {
+		return r, nil, nil, ErrHeld
 	}
 	if r.Seat != s.Seat || r.ConfigurationSHA256 != s.configurationDigest() || r.Schema != "pomar.codex-seat-thread/v1" || r.Version != Version || r.BinarySHA256 != LinuxExecutableSHA256 || r.Workspace != s.Workspace || (r.State != "starting" && r.State != "bound") || (r.State == "bound" && !threadID.MatchString(r.Thread)) || (r.State == "starting" && r.Thread != "") || len(r.Before) > 4096 {
-		return r, ErrHeld
+		return r, nil, nil, ErrHeld
 	}
-	return r, nil
+	return r, data, fi, nil
 }
 
 func (s Supervisor) rollouts() ([]string, error) {
@@ -254,27 +261,49 @@ func (s Supervisor) openNative() (*os.File, error) {
 	return f, nil
 }
 
-// The parent retains its scope lock while the native actor inherits it.
-// A trampoline closes the executable descriptor during the first exec.
+// Only the root supervisor owns the fence. The coding actor receives no
+// fence descriptor and is launched with coding-user credentials.
 func (s Supervisor) launchNative(r record, lock, f *os.File) (runningActor, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	args := append([]string{"codex-seat-exec", "--", s.Binary}, s.Args(r.Thread)...)
-	cmd := exec.Command(self, args...)
-	cmd.Env = append([]string{}, s.Env...)
-	cmd.Dir = s.Workspace
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = s.In, s.Out, s.Out
-	cmd.ExtraFiles = []*os.File{lock, f}
+	if err := immutableExecutable(self); err != nil {
+		return nil, err
+	}
+	cmd := s.nativeCommand(self, r, f)
 	if err = cmd.Start(); err != nil {
 		return nil, err
 	}
 	return cmd, nil
 }
+func (s Supervisor) nativeCommand(self string, r record, f *os.File) *exec.Cmd {
+	args := append([]string{"codex-seat-exec", "--", s.Binary}, s.Args(r.Thread)...)
+	cmd := exec.Command(self, args...)
+	cmd.Env = append([]string{}, s.Env...)
+	cmd.Dir = s.Workspace
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = s.In, s.Out, s.Out
+	cmd.ExtraFiles = []*os.File{f} // no actor fence descriptor
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{1000}}}
+	return cmd
+}
 
-func (s Supervisor) Start() error { return s.start(s.openNative, s.launchNative) }
+func (s Supervisor) Start() error {
+	if os.Geteuid() != 0 {
+		return errors.New("Codex seat start requires the root custodian")
+	}
+	if err := ownedDir(s.Home, 1000); err != nil {
+		return err
+	}
+	if err := immutableParents(filepath.Join(s.StateDir, "actor.lock")); err != nil {
+		return err
+	}
+	return s.startChecked(s.openNative, s.launchNative, func() error { return noCodingProcesses("/proc", 1000) })
+}
 func (s Supervisor) start(open func() (*os.File, error), launch func(record, *os.File, *os.File) (runningActor, error)) error {
+	return s.startChecked(open, launch, func() error { return nil }) // fixture orchestration only
+}
+func (s Supervisor) startChecked(open func() (*os.File, error), launch func(record, *os.File, *os.File) (runningActor, error), quiescent func() error) error {
 	if err := s.Launch.Validate(); err != nil {
 		return err
 	}
@@ -284,9 +313,7 @@ func (s Supervisor) start(open func() (*os.File, error), launch func(record, *os
 	if !filepath.IsAbs(s.Binary) || !filepath.IsAbs(s.Workspace) {
 		return errors.New("Codex binary and workspace must be absolute")
 	}
-	if err := privateDir(s.Home); err != nil {
-		return err
-	}
+
 	if err := os.MkdirAll(s.StateDir, 0700); err != nil {
 		return err
 	}
@@ -300,6 +327,12 @@ func (s Supervisor) start(open func() (*os.File, error), launch func(record, *os
 	defer lock.Close()
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return ErrActorRunning
+	}
+	if err = quiescent(); err != nil {
+		return err
+	}
+	if err = s.writeFenceHolder(); err != nil {
+		return err
 	}
 	r, err := s.read()
 	fresh := false
@@ -362,7 +395,7 @@ func (s Supervisor) waitBinding(r record, process runningActor) error {
 	}
 }
 
-var ErrActorRunning = errors.New("Codex actor still owns this execution scope; another start is refused")
+var ErrActorRunning = errors.New("Codex coding scope is live or its custodian fence is held; another start is refused")
 
 func immutableParents(binary string) error {
 	for p := filepath.Dir(binary); ; p = filepath.Dir(p) {
@@ -380,17 +413,17 @@ func immutableParents(binary string) error {
 	}
 }
 
-// ExecPinned is the guest trampoline only. Descriptor 4 is closed by the
-// native ELF exec; descriptor 3 intentionally fences the whole tool scope.
+// ExecPinned is the unprivileged guest trampoline. Its only inherited extra
+// descriptor is the pinned executable, closed at native exec. No fence is passed.
 func ExecPinned(argv []string) error {
 	if len(argv) < 1 || !filepath.IsAbs(argv[0]) {
 		return errors.New("missing pinned native argv")
 	}
-	if err := syscall.SetNonblock(4, false); err != nil {
+	if err := syscall.SetNonblock(3, false); err != nil {
 		return err
 	}
-	syscall.CloseOnExec(4)
-	return syscall.Exec("/proc/self/fd/4", argv, os.Environ())
+	syscall.CloseOnExec(3)
+	return syscall.Exec("/proc/self/fd/3", argv, os.Environ())
 }
 
 func (s Supervisor) Run() error {

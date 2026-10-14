@@ -11,7 +11,7 @@ silently replaced. Missing policy or an incompatible network promise is refused.
 launcher accept this supported Codex seat while retaining the existing name,
 source, fixture, controller and resource refusals. Other versions are refused.
 
-The guest runs the Codex-specific supervisor as the coding user, behind the
+The guest runs the Codex-specific supervisor as the root custodian, behind the
 same private, session/incarnation-bound terminal route. The supervisor stays
 idle until asked to start. It launches the pinned Linux ARM64 executable with
 an explicit guest environment, file-based guest authentication and its declared sandbox, approvals, network,
@@ -29,16 +29,30 @@ explicitly. An absent, corrupt, redirected, configuration-mismatched or
 ambiguous binding holds further starts for inspection; no fresh conversation
 is invented to recover it. A lost initial acknowledgement stays held even if
 subsequent metadata might identify the original thread; explicit recovery
-qualification is still required. The actor inherits its exclusive scope lock, so
-supervisor disappearance alone does not permit a second actor. Tool descendants
-can retain that descriptor: a background service is still part of that execution
-scope and can keep subsequent starts held until the owner fences it. Closing
-that lock silently would weaken the no-second-writer rule.
+qualification is still required. The custodian owns the startup record and
+exclusive fence under its private, immutable-parent state directory. The actor
+and all native tools run as UID/GID1000, with supplementary groups replaced,
+and receive no fence descriptor: they cannot unlock, replace or unlink it.
+Before start or abandonment the root custodian scans the guest process table
+for any UID1000 process (real, effective, saved or filesystem UID). A surviving
+server holds the operation even after supervisor loss; missing/unreadable process
+entries fail closed. Nothing kills a process to clear that hold.
+
+The dedicated tmux server/socket and configuration are root-owned and private.
+It uses only the fixed supervisor, no user configuration, command/key bindings,
+usable default shell or environment update. Terminal access remains an owner
+capability. The native actor uses only the declared guest environment; the root
+terminal uses a separate fixed environment. This privileged terminal separation,
+Linux process observation and attempted UID1000 interference still require
+native qualification before use.
 
 The selected executable and helper directories must stay custodian-owned and
 not group/other writable. The first executable is hashed and executed through
 its retained Linux file descriptor; the trampoline closes the binary descriptor
-at native exec. Helper re-execs performed by Codex use paths and therefore rely
+at native exec. The trampoline itself starts by the path returned by
+`os.Executable()`; its executable and every parent directory are checked for
+root ownership, no redirects and no group/other writes before launch. This is
+path custody, not descriptor pinning of the trampoline. Helper re-execs performed by Codex use paths and therefore rely
 on that directory custody, not a claim of descriptor pinning of every helper. Its digest is the already pinned Codex artifact; this is
 binary custody, not new interactive acceptance. Thread records bind the seat,
 version, executable, workspace and launch configuration and are written with
@@ -80,11 +94,18 @@ The VM owner can inspect `GET /v1/codex/startup` through the existing private
 owner-to-guest broker route. An attended recovery uses
 `POST /v1/codex/startup/abandon` with an original `operation_id`, the exact
 `record_sha256` from inspection, and `acknowledge_unknown:true`. This is a
-root-broker action, unavailable to coding-user processes. It requires no live
-scope-lock holder, no rollout and an unchanged unbound record. The original
+root-broker action, unavailable to coding-user processes. These recovery and
+inspection routes have no additional session/run binding: anyone able to reach
+the host owner socket can call them. That is acceptable only while that socket
+remains owner-only (0600), with the guest broker root-only. It requires the root
+fence and an independent empty coding-user process-table observation, no rollout
+and an unchanged unbound record. Parsed state and SHA256 come from the same
+no-follow opened snapshot. The original
 record and owner intent/receipt are synchronized in the custodian's private
 reset archive before/after removing only the matched startup pointer. Repeating
-the same operation returns its receipt; conflicts remain held.
+the same operation returns its immutable original receipt plus a fresh
+`current_state` and `current_sha256`, so an old receipt cannot conceal a newer
+stuck start. Conflicts remain held. The original receipt is not rewritten.
 
 The owner must assess and fence any surviving execution scope before giving
 that disposition. The receipt says `UNKNOWN_NOT_RETRIED`; it does not assert
@@ -92,3 +113,18 @@ that a tool succeeded, that no external effect occurred, or that a VM stopped.
 Bound threads, existing rollouts, mismatched records and live locks cannot be
 reset this way. This operation abandons an unbound conversation after explicit
 owner acknowledgement; it is not an automatic retry of an uncertain action.
+
+A read-only owner diagnostic names the root supervisor (PID, command name and
+boot-relative start ticks) when it still holds the fence, plus every remaining
+coding-scope process. It includes no command arguments, transcripts or auth.
+Use the explicitly selected development owner root and original environment ID:
+
+```sh
+curl --fail --unix-socket "$OWNER_ROOT/host.sock" \
+  "http://owner/v1/environments/$ENVIRONMENT_ID/agent/codex/fence"
+```
+
+An absent holder is not proof of quiescence; `coding_processes` and a successful
+custodian observation are separate. Unsupported `/proc` or a raced/unreadable
+entry yields an unavailable observation, never a healthy empty scope. These
+metadata receipts do not prove external effects committed.

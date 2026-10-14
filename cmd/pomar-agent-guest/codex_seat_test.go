@@ -35,3 +35,18 @@ func TestGuestLaunchRequiresCompleteExactPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexCustodianTerminalDoesNotLoadActorConfigOrCommands(t *testing.T) {
+	args := codexTmuxEnsure("example", "/opt/codex", "/custodian/guest", "/work", &agentenv.SeatLaunch{})
+	if slices.Index(args, codexTmuxConfig) < 0 || slices.Index(args, codexTmuxSocket) < 0 {
+		t.Fatal("root terminal missing private config/socket", args)
+	}
+	for _, required := range []string{"prefix None", "prefix2 None", "default-shell /bin/false", `update-environment ""`, "unbind-key -a -T root", "unbind-key -a -T copy-mode", "unbind-key -a -T copy-mode-vi"} {
+		if !strings.Contains(codexCustodianTmuxConfig, required) {
+			t.Fatal("root command path left available", required)
+		}
+	}
+	if strings.Contains(strings.Join(codexCustodianEnv(), "\n"), seatHome) {
+		t.Fatal("root terminal uses actor home")
+	}
+}

@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
@@ -19,13 +18,37 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/seatterm"
 )
 
+const codexStateDir = "/var/lib/pomar-agent/codex-seat"
+const codexTmuxDir = "/run/pomar-codex-seat"
+const codexTmuxSocket = codexTmuxDir + "/tmux.sock"
+const codexTmuxConfig = codexTmuxDir + "/tmux.conf"
+
+// Custodian terminal has no command bindings, user config, environment update,
+// or usable shell. Only the fixed supervisor command can run in its one pane.
+const codexCustodianTmuxConfig = `set-option -g prefix None
+set-option -g prefix2 None
+set-option -g default-shell /bin/false
+set-option -g update-environment ""
+set-option -g mouse off
+unbind-key -a
+unbind-key -a -T root
+unbind-key -a -T copy-mode
+unbind-key -a -T copy-mode-vi
+`
+
+func codexCustodianEnv() []string {
+	return []string{"HOME=/root", "PATH=/usr/bin:/bin", "TERM=xterm-256color", "LANG=C.UTF-8"}
+}
+func codexTmuxHas() []string {
+	return []string{seatTmux, "-f", codexTmuxConfig, "-S", codexTmuxSocket, "has-session", "-t", seatSession}
+}
 func codexSeatEnv() []string {
 	return []string{"HOME=" + seatHome, "CODEX_HOME=" + seatHome + "/.codex", "PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TERM=xterm-256color", "LANG=C.UTF-8", "HTTPS_PROXY=http://127.0.0.1:7072", "HTTP_PROXY=http://127.0.0.1:7072", "ALL_PROXY=http://127.0.0.1:7072", "GOPROXY=http://127.0.0.1:7070", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly"}
 }
 
 func codexTmuxEnsure(seat, binary, self, workspace string, launch *agentenv.SeatLaunch) []string {
 	data, _ := json.Marshal(launch)
-	return []string{seatTmux, "-S", seatTmuxSocket, "new-session", "-d", "-s", seatSession, "-x", "200", "-y", "50", "--", self, "codex-seat-supervisor", "-seat", seat, "-codex", binary, "-workspace", workspace, "-codex-launch", string(data)}
+	return []string{seatTmux, "-f", codexTmuxConfig, "-S", codexTmuxSocket, "new-session", "-d", "-s", seatSession, "-x", "200", "-y", "50", "--", self, "codex-seat-supervisor", "-seat", seat, "-codex", binary, "-workspace", workspace, "-codex-launch", string(data)}
 }
 
 func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socket string, launch *agentenv.SeatLaunch) error {
@@ -42,30 +65,43 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(seatTmuxDir, 0700); err != nil {
+	if os.Geteuid() != 0 {
+		return errors.New("Codex seat broker requires the VM custodian")
+	}
+	for _, dir := range []string{codexTmuxDir, codexStateDir} {
+		if err = os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		if err = codexseat.CheckCustodianDirectory(dir); err != nil {
+			return err
+		}
+	}
+	if err = codexseat.CheckCustodianExecutable(seatTmux); err != nil {
 		return err
 	}
-	if err = os.Chown(seatTmuxDir, seatUID, seatGID); err != nil {
+	if err = codexseat.CheckCustodianExecutable(self); err != nil {
+		return err
+	}
+	// Never read a coding-user tmux config as root.
+	if err = os.WriteFile(codexTmuxConfig, []byte(codexCustodianTmuxConfig), 0600); err != nil {
 		return err
 	}
 	command := func(argv []string) *exec.Cmd {
 		c := exec.Command(argv[0], argv[1:]...)
-		c.Env = codexSeatEnv()
-		c.Dir = seatHome
-		c.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: seatUID, Gid: seatGID}}
+		c.Env = codexCustodianEnv()
+		c.Dir = "/"
 		return c
 	}
 	ensure := func() error {
-		if command(tmuxHas()).Run() == nil {
+		if command(codexTmuxHas()).Run() == nil {
 			return nil
 		}
 		if err := command(codexTmuxEnsure(seat, binary, self, workspace, launch)).Run(); err != nil {
-			return errors.New("Codex seat supervisor did not start; inspect guest custody")
+			return errors.New("Codex root supervisor did not start; inspect guest custody")
 		}
 		return nil
 	}
-	attach := tmuxAttach()
-	attach.Env = codexSeatEnv()
+	attach := seatterm.Command{Path: seatTmux, Args: []string{"-f", codexTmuxConfig, "-S", codexTmuxSocket, "attach-session", "-t", seatSession}, Env: codexCustodianEnv(), Dir: "/", UID: 0, GID: 0}
 	route, err := seatterm.NewRoute(seatBinding(store), ensure, attach)
 	if err != nil {
 		return err
@@ -91,10 +127,20 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 	handler := http.NewServeMux()
 	handler.Handle("/", seatHandler(store, route, func() bool { return false }))
 	handler.HandleFunc("GET /v1/codex/startup", func(w http.ResponseWriter, r *http.Request) {
-		s := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: seatStateDir + "/codex", Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
+		s := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
 		info, e := s.InspectStartup()
 		if e != nil {
 			http.Error(w, "startup inspection held", 409)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(info)
+	})
+	handler.HandleFunc("GET /v1/codex/fence", func(w http.ResponseWriter, r *http.Request) {
+		s := codexseat.Supervisor{StateDir: codexStateDir}
+		info, e := s.InspectFence()
+		if e != nil {
+			http.Error(w, "fence observation unavailable", 409)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -108,7 +154,7 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 			http.Error(w, "invalid reset request", 400)
 			return
 		}
-		launchRecord := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: seatStateDir + "/codex", Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
+		launchRecord := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
 		receipt, e := launchRecord.AbandonStart(req, "/var/lib/pomar-agent/codex-start-resets")
 		if e != nil {
 			http.Error(w, "original unbound startup remains held", 409)
@@ -137,7 +183,7 @@ func runCodexSeatSupervisor() error {
 	if err != nil {
 		return err
 	}
-	return (codexseat.Supervisor{Launch: launch, Seat: *seat, Binary: *binary, Home: seatHome + "/.codex", StateDir: seatStateDir + "/codex", Workspace: *workspace, Env: codexSeatEnv(), In: os.Stdin, Out: os.Stdout}).Run()
+	return (codexseat.Supervisor{Launch: launch, Seat: *seat, Binary: *binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: *workspace, Env: codexSeatEnv(), In: os.Stdin, Out: os.Stdout}).Run()
 }
 
 func parseCodexLaunch(raw string) (*agentenv.SeatLaunch, error) {
