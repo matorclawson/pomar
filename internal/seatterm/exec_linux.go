@@ -14,42 +14,62 @@ import (
 // exec time: the opened file is handed to the child as an inherited
 // descriptor (cmd.ExtraFiles), and cmd.Path becomes that descriptor's
 // /proc/self/fd entry, which the kernel resolves to the exact inode
-// already opened and hashed, never a name. A file replaced at path after
-// this check returns can't be what actually runs: the window this check
-// closes is the gap between reading the bytes and exec'ing them, which is
-// genuinely zero here, not merely small.
-func checkExpectedSHA256(cmd *exec.Cmd, path, expected string) error {
+// already opened and hashed, never a name. A file REPLACED at path (a
+// rename, or unlink+create swapping in a different inode) after this
+// check returns can't be what actually runs, since the pinned exec never
+// looks the name up again: that is the window this closes, and it is
+// genuinely zero for a replacement.
+//
+// CORRECTED CLAIM (this used to say the window was zero, full stop,
+// which overclaimed): a WRITE into the SAME inode -- not a replacement --
+// between the hash finishing (io.Copy above) and the kernel's own read of
+// that inode's bytes during execve is NOT closed by this. Both this
+// function's read and the eventual exec go through the same fd/inode, so
+// anyone with write access to the file's own bytes (not merely rename
+// rights on its directory) can still alter what actually runs in that
+// gap; the file is read-write open here, not sealed against writes. A
+// sealed, write-once memfd (memfd_create + fcntl F_ADD_SEALS with
+// F_SEAL_WRITE) copied from these exact hashed bytes, exec'd instead of
+// this fd, would close that remaining window too -- not implemented here;
+// this is a named, not a silently assumed-away, gap.
+//
+// It returns closeAfterStart: cmd.Start() dup2s f into the child, which
+// then holds its own copy, so the parent's f is the caller's to close
+// once Start has returned (success or not) -- os/exec never closes an
+// ExtraFiles entry for you, and this package's own host never did either,
+// leaking one fd per launch for as long as the host itself runs.
+func checkExpectedSHA256(cmd *exec.Cmd, path, expected string) (closeAfterStart func(), err error) {
 	if expected == "" {
-		return nil
+		return nil, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
-		return err
+		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
 		f.Close()
-		return fmt.Errorf("%s isn't a regular file", path)
+		return nil, fmt.Errorf("%s isn't a regular file", path)
 	}
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		f.Close()
-		return err
+		return nil, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != expected {
 		f.Close()
-		return fmt.Errorf("%s hashes to %s, not the expected %s; refusing to launch", path, got, expected)
+		return nil, fmt.Errorf("%s hashes to %s, not the expected %s; refusing to launch", path, got, expected)
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		f.Close()
-		return err
+		return nil, err
 	}
 	cmd.ExtraFiles = append(cmd.ExtraFiles, f)
 	// ExtraFiles start at fd 3 in the child (0, 1, 2 are stdin/stdout/stderr).
 	cmd.Path = fmt.Sprintf("/proc/self/fd/%d", 3+len(cmd.ExtraFiles)-1)
-	return nil
+	return func() { f.Close() }, nil
 }

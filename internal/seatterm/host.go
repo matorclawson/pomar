@@ -452,12 +452,16 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	if c.UID >= 0 && c.GID >= 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(c.UID), Gid: uint32(c.GID)}
 	}
-	if err = checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256); err != nil {
+	closeAfterStart, err := checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256)
+	if err != nil {
 		slave.Close()
 		master.Close()
 		return nil, err
 	}
 	err = cmd.Start()
+	if closeAfterStart != nil {
+		closeAfterStart() // the child has its own copy now; the parent's would otherwise leak one fd per launch
+	}
 	slave.Close()
 	if err != nil {
 		master.Close()

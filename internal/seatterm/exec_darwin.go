@@ -35,49 +35,55 @@ import (
 // is unaffected; a shebang script is unaffected too, since the kernel execs
 // the named interpreter from its own real path, never the script itself.
 // ExpectedSHA256 on a platform binary will fail at exec, not at the check.
-func checkExpectedSHA256(cmd *exec.Cmd, path, expected string) error {
+//
+// closeAfterStart is always a no-op here: unlike the Linux version, this
+// never hands cmd an inherited descriptor (cmd.Path names a plain path,
+// the private copy, not a /proc/self/fd entry), so there is nothing left
+// open for the caller to close once Start returns. The signature matches
+// the Linux version's so host.go's call site is platform-agnostic.
+func checkExpectedSHA256(cmd *exec.Cmd, path, expected string) (closeAfterStart func(), err error) {
 	if expected == "" {
-		return nil
+		return nil, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%s isn't a regular file", path)
+		return nil, fmt.Errorf("%s isn't a regular file", path)
 	}
 	dir, err := os.MkdirTemp("", "pomar-launch-")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cp, err := os.OpenFile(dir+"/bin", os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o500)
 	if err != nil {
 		os.RemoveAll(dir)
-		return err
+		return nil, err
 	}
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(h, cp), f); err != nil {
 		cp.Close()
 		os.RemoveAll(dir)
-		return err
+		return nil, err
 	}
 	if err := cp.Close(); err != nil {
 		os.RemoveAll(dir)
-		return err
+		return nil, err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != expected {
 		os.RemoveAll(dir)
-		return fmt.Errorf("%s hashes to %s, not the expected %s; refusing to launch", path, got, expected)
+		return nil, fmt.Errorf("%s hashes to %s, not the expected %s; refusing to launch", path, got, expected)
 	}
 	// The copy is left on disk, named uniquely per launch under the OS
 	// temp directory (0700, Go's own MkdirTemp default): forensic evidence
 	// of exactly what ran, not cleaned up here. Its parent's cleanup is the
 	// OS's own temp-directory reaping, the same as everything else under it.
 	cmd.Path = cp.Name()
-	return nil
+	return nil, nil
 }

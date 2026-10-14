@@ -114,12 +114,18 @@ terminal's size, or 80x24.
 
 **A runtime receipt, if asked for:** `-expected-sha256` pins the exact
 binary PROGRAM must be. The file is opened once, hashed and compared before
-launch; a mismatch refuses it outright. On Linux this closes the window
-between the check and the exec completely: the checked file is handed to
-the program as an inherited descriptor and exec'd by that descriptor
-(`/proc/self/fd/N`), never re-resolved by name. On other platforms there is
-no equivalent, and the window between the check and the exec that follows
-it, though minimized, is not claimed closed.
+launch; a mismatch refuses it outright. On Linux the checked file is
+handed to the program as an inherited descriptor and exec'd by that
+descriptor (`/proc/self/fd/N`), never re-resolved by name: PROGRAM being
+REPLACED at its path afterward (a rename, or unlink+create swapping in a
+different file) can't be what runs, since the name is never looked up
+again. This does NOT close every window, though: a WRITE into the SAME
+file's bytes, by anyone with write access to it (not merely rename rights
+on its directory), between the hash finishing and the kernel's own read of
+it during exec, is not caught -- both go through the same open file. On
+other platforms there is no equivalent to the inherited-descriptor pin at
+all, and the window between the check and the exec that follows, though
+minimized, is narrower, not closed.
 
 ### Logs
 

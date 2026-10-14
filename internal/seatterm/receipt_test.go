@@ -160,7 +160,8 @@ func TestExpectedSHA256SurvivesReplacementAfterTheCheck(t *testing.T) {
 	expected := sha256OfFile(t, path)
 
 	cmd := exec.Command(path)
-	if err := checkExpectedSHA256(cmd, path, expected); err != nil {
+	closeAfterStart, err := checkExpectedSHA256(cmd, path, expected)
+	if err != nil {
 		t.Fatalf("the check should pass on the original bytes: %v", err)
 	}
 	if cmd.Path == path {
@@ -174,6 +175,9 @@ func TestExpectedSHA256SurvivesReplacementAfterTheCheck(t *testing.T) {
 	}
 
 	out, err := cmd.Output()
+	if closeAfterStart != nil {
+		closeAfterStart()
+	}
 	if err != nil {
 		t.Fatalf("the pinned launch should still run: %v", err)
 	}
