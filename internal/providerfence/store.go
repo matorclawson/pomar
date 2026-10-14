@@ -269,6 +269,7 @@ func (s *Store) transaction(opening bool, mutate func(*state) error) error {
 		}
 		decoder := json.NewDecoder(bytes.NewReader(b))
 		decoder.DisallowUnknownFields()
+		st = state{} // Missing required fields cannot inherit initialization defaults.
 		if err = decoder.Decode(&st); err != nil {
 			return err
 		}

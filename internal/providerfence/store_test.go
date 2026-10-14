@@ -252,7 +252,7 @@ func TestHardLinksCorruptionAndNamespaceBounds(t *testing.T) {
 			}
 		})
 	}
-	for _, data := range []string{"not json", `{"schema":"future","namespace":"host-one","records":{}}`} {
+	for _, data := range []string{"not json", `{}`, `{"schema":"future","namespace":"host-one","records":{}}`} {
 		dir := privateDir(t)
 		s := newStore(t, dir, "boot-one", time.Now)
 		if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte(data), 0600); err != nil {
