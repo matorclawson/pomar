@@ -195,7 +195,10 @@ func TestPinnedCodexSeatRetainsIdentityAndArchive(t *testing.T) {
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	p := EnvironmentProfile{Base: root + "/base", ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: root + "/source", SourceSHA: strings.Repeat("b", 40), Agent: "codex", AgentVersion: "0.160.0", AgentArchive: root + "/codex.tar.gz", AgentArchiveSHA256: strings.Repeat("c", 64), Seat: "example", SeatDeclarationSHA256: strings.Repeat("d", 64)}
+	p := EnvironmentProfile{Base: root + "/base", ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: root + "/source", SourceSHA: strings.Repeat("b", 40), Agent: "codex", AgentVersion: "0.160.0", SeatLaunch: func() *SeatLaunch {
+		n := true
+		return &SeatLaunch{Sandbox: "workspace-write", Approvals: "on-request", NetworkAccess: &n, Model: "fixture-model", Effort: "high", CWD: "/work"}
+	}(), AgentArchive: root + "/codex.tar.gz", AgentArchiveSHA256: strings.Repeat("c", 64), Seat: "example", SeatDeclarationSHA256: strings.Repeat("d", 64)}
 	p.ImageRef = "example.invalid/image@" + p.ImageDigest
 	h, err := OpenHost(HostConfig{Root: root, MaxLive: 1, CPUs: 1, MemoryBytes: 512 << 20, Profiles: map[string]EnvironmentProfile{"seat-example": p}})
 	if err != nil {

@@ -27,6 +27,7 @@ import (
 // HostConfig is supplied by the service owner, never by a guest. A dedicated
 // development data root is required; CI manager state is not opened here.
 type HostConfig struct {
+	SeatLaunch             *SeatLaunch                   `json:"seatLaunch,omitempty"`
 	ControllerCapabilities []string                      `json:"controllerCapabilities,omitempty"`
 	Root                   string                        `json:"root"`
 	Helper                 string                        `json:"helper"`
@@ -78,13 +79,14 @@ type HostConfig struct {
 // EnvironmentProfile selects project inputs supplied by the service owner.
 // Creation accepts only a name; a controller cannot supply filesystem paths.
 type EnvironmentProfile struct {
-	ControllerCapabilities []string `json:"controllerCapabilities,omitempty"`
-	Base                   string   `json:"base"`
-	ImageRef               string   `json:"imageRef"`
-	ImageDigest            string   `json:"imageDigest"`
-	SourceBundle           string   `json:"sourceBundle"`
-	SourceSHA              string   `json:"sourceSHA"`
-	AllowedHosts           []string `json:"allowedHosts"`
+	SeatLaunch             *SeatLaunch `json:"seatLaunch,omitempty"`
+	ControllerCapabilities []string    `json:"controllerCapabilities,omitempty"`
+	Base                   string      `json:"base"`
+	ImageRef               string      `json:"imageRef"`
+	ImageDigest            string      `json:"imageDigest"`
+	SourceBundle           string      `json:"sourceBundle"`
+	SourceSHA              string      `json:"sourceSHA"`
+	AllowedHosts           []string    `json:"allowedHosts"`
 	// Agent, AgentVersion and AgentArchive(SHA256) select a profile's own
 	// coding agent and its pinned package; empty keeps the host's.
 	Agent              string `json:"agent,omitempty"`
@@ -155,6 +157,7 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 	}
 	c.QualificationFixture = nil
 	c.Seat, c.SeatDeclarationSHA256 = p.Seat, p.SeatDeclarationSHA256
+	c.SeatLaunch = p.SeatLaunch
 	if p.Qualification && p.QualificationFixture != nil {
 		f := *p.QualificationFixture
 		c.QualificationFixture = &f
@@ -250,7 +253,7 @@ func OpenHost(config HostConfig) (*Host, error) {
 	if err := ValidateAgent(config); err != nil {
 		return nil, err
 	}
-	if config.Seat != "" || config.SeatDeclarationSHA256 != "" {
+	if config.Seat != "" || config.SeatDeclarationSHA256 != "" || config.SeatLaunch != nil {
 		return nil, errors.New("a seat belongs to a seat profile, not the host configuration")
 	}
 	if config.QualificationFixture != nil {
@@ -273,6 +276,13 @@ func OpenHost(config HostConfig) (*Host, error) {
 			return nil, err
 		}
 		effective := config
+		if p.Seat != "" && p.Agent == "codex" {
+			if err := p.SeatLaunch.Validate(); err != nil {
+				return nil, fmt.Errorf("profile %s: %w", name, err)
+			}
+		} else if p.SeatLaunch != nil {
+			return nil, errors.New("declared Codex launch settings belong to a Codex seat profile")
+		}
 		effective.ControllerCapabilities = p.ControllerCapabilities
 		if p.Agent != "" {
 			effective.Agent, effective.AgentVersion = p.Agent, p.AgentVersion
@@ -513,6 +523,9 @@ func (h *Host) start(e *Environment) error {
 	cfg, err := h.profileConfig(e.Spec.Profile)
 	if err != nil {
 		return err
+	}
+	if cfg.SeatDeclarationSHA256 != e.Spec.SeatDeclarationSHA256 {
+		return errors.New("retained seat declaration changed; original environment held")
 	}
 	if cfg.SourceSHA != e.Spec.SourceSHA || cfg.SourceBundle != e.Spec.SourceBundle || cfg.Base != e.Spec.Base || cfg.ImageDigest != e.Spec.ImageDigest || cfg.ImageRef != e.Spec.ImageRef {
 		return errors.New("retained project inputs changed; use a distinct environment")

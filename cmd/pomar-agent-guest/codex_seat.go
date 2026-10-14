@@ -1,13 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,11 +23,18 @@ func codexSeatEnv() []string {
 	return []string{"HOME=" + seatHome, "CODEX_HOME=" + seatHome + "/.codex", "PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TERM=xterm-256color", "LANG=C.UTF-8", "HTTPS_PROXY=http://127.0.0.1:7072", "HTTP_PROXY=http://127.0.0.1:7072", "ALL_PROXY=http://127.0.0.1:7072", "GOPROXY=http://127.0.0.1:7070", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly"}
 }
 
-func codexTmuxEnsure(seat, binary, self, workspace string) []string {
-	return []string{seatTmux, "-S", seatTmuxSocket, "new-session", "-d", "-s", seatSession, "-x", "200", "-y", "50", "--", self, "codex-seat-supervisor", "-seat", seat, "-codex", binary, "-workspace", workspace}
+func codexTmuxEnsure(seat, binary, self, workspace string, launch *agentenv.SeatLaunch) []string {
+	data, _ := json.Marshal(launch)
+	return []string{seatTmux, "-S", seatTmuxSocket, "new-session", "-d", "-s", seatSession, "-x", "200", "-y", "50", "--", self, "codex-seat-supervisor", "-seat", seat, "-codex", binary, "-workspace", workspace, "-codex-launch", string(data)}
 }
 
-func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socket string) error {
+func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socket string, launch *agentenv.SeatLaunch) error {
+	if err := launch.Validate(); err != nil {
+		return err
+	}
+	if launch.CWD != workspace {
+		return errors.New("declared cwd differs from guest source")
+	}
 	if !seatName.MatchString(seat) || version != codexseat.Version || !filepath.IsAbs(binary) || !filepath.IsAbs(workspace) {
 		return errors.New("Codex seat requires a valid seat, pinned version and absolute guest paths")
 	}
@@ -49,7 +59,7 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 		if command(tmuxHas()).Run() == nil {
 			return nil
 		}
-		if err := command(codexTmuxEnsure(seat, binary, self, workspace)).Run(); err != nil {
+		if err := command(codexTmuxEnsure(seat, binary, self, workspace, launch)).Run(); err != nil {
 			return errors.New("Codex seat supervisor did not start; inspect guest custody")
 		}
 		return nil
@@ -84,6 +94,7 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 
 func runCodexSeatSupervisor() error {
 	fs := flag.NewFlagSet("codex-seat-supervisor", flag.ContinueOnError)
+	launchRaw := fs.String("codex-launch", "", "declared launch JSON")
 	seat := fs.String("seat", "", "seat name")
 	binary := fs.String("codex", "/opt/pomar-codex/bin/codex", "pinned guest executable")
 	workspace := fs.String("workspace", "/work", "guest workspace")
@@ -93,5 +104,28 @@ func runCodexSeatSupervisor() error {
 	if !seatName.MatchString(*seat) || fs.NArg() != 0 {
 		return errors.New("Codex supervisor needs a valid seat")
 	}
-	return (codexseat.Supervisor{Seat: *seat, Binary: *binary, Home: seatHome + "/.codex", StateDir: seatStateDir + "/codex", Workspace: *workspace, Env: codexSeatEnv(), In: os.Stdin, Out: os.Stdout}).Run()
+	launch, err := parseCodexLaunch(*launchRaw)
+	if err != nil {
+		return err
+	}
+	return (codexseat.Supervisor{Launch: launch, Seat: *seat, Binary: *binary, Home: seatHome + "/.codex", StateDir: seatStateDir + "/codex", Workspace: *workspace, Env: codexSeatEnv(), In: os.Stdin, Out: os.Stdout}).Run()
+}
+
+func parseCodexLaunch(raw string) (*agentenv.SeatLaunch, error) {
+	if len(raw) > 4096 {
+		return nil, errors.New("launch declaration too large")
+	}
+	var l agentenv.SeatLaunch
+	d := json.NewDecoder(strings.NewReader(raw))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&l); err != nil {
+		return nil, errors.New("invalid launch declaration")
+	}
+	if d.Decode(new(any)) != io.EOF {
+		return nil, errors.New("trailing launch declaration")
+	}
+	if err := l.Validate(); err != nil {
+		return nil, err
+	}
+	return &l, nil
 }

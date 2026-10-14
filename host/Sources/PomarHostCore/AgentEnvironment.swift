@@ -5,7 +5,26 @@ import CryptoKit
 /// Development agent VM owner. Its writable filesystem lives outside the
 /// container directory and is retained on stop. CI Helper remains unchanged.
 public enum AgentEnvironment {
+    public struct SeatLaunch: Codable, Sendable {
+        public var sandbox: String
+        public var approvals: String
+        public var network_access: Bool
+        public var model: String
+        public var effort: String
+        public var cwd: String
+        public var valid: Bool {
+            let first = model.first
+            return ["read-only", "workspace-write", "danger-full-access"].contains(sandbox)
+                && ["never", "on-request"].contains(approvals)
+                && ["none", "minimal", "low", "medium", "high", "xhigh", "max"].contains(effort)
+                && cwd == "/work" && first != nil && (first!.isLetter || first!.isNumber)
+                && model.utf8.count <= 128
+                && model.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || ".-_".contains($0)) }
+                && (sandbox != "danger-full-access" || network_access)
+        }
+    }
     public struct Options: Codable, Sendable {
+        public var seatLaunch: SeatLaunch? = nil
         public var environment: String
         public var session: String
         public var incarnation: String
@@ -112,11 +131,12 @@ public enum AgentEnvironment {
         case "codex":
             guard o.agentVersion == nil || o.agentVersion == "0.160.0" else { return false }
             if let s = o.seat {
-                return o.agentVersion == "0.160.0" && validSeatName(s)
+                return o.seatLaunch?.valid == true && o.agentVersion == "0.160.0" && validSeatName(s)
                     && (o.controllerCapabilities ?? []).isEmpty && o.qualificationFixture == nil
             }
-            return true
+            return o.seatLaunch == nil
         case "claude":
+            guard o.seatLaunch == nil else { return false }
             // A dotted numeric version only. Controller capabilities pass
             // through: the guest broker enables them only for an
             // owner-selected Claude Code executable pinned as qualified
@@ -208,7 +228,7 @@ public enum AgentEnvironment {
         var args = ["/pomar/agent-guest", "-environment", o.environment, "-session", o.session, "-incarnation", o.incarnation, "-source-sha", o.sourceSHA,
                     "-controller-capabilities", (o.controllerCapabilities ?? []).joined(separator: ",")]
         if (o.agent ?? "codex") == "codex", let seat = o.seat {
-            args += ["-actor", "codex-seat", "-seat", seat, "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", o.agentVersion ?? ""]
+            args += ["-actor", "codex-seat", "-seat", seat, "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", o.agentVersion ?? "", "-codex-launch", String(data: (try? JSONEncoder().encode(o.seatLaunch)) ?? Data(), encoding: .utf8) ?? ""]
         } else if o.agent == "claude" {
             if let seat = o.seat {
                 args += ["-actor", "seat", "-seat", seat, "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", o.agentVersion ?? ""]

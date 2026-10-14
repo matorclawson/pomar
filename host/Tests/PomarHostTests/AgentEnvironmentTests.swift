@@ -152,8 +152,10 @@ import Foundation
     var codexSeat = agentOptions(); codexSeat.agent = "codex"; codexSeat.seat = "zeocreator"
     #expect(!AgentEnvironment.valid(codexSeat))
     codexSeat.agentVersion = "0.160.0"
+    codexSeat.seatLaunch = .init(sandbox:"workspace-write",approvals:"on-request",network_access:true,model:"fixture-model",effort:"high",cwd:"/work")
     #expect(AgentEnvironment.valid(codexSeat))
-    #expect(AgentEnvironment.brokerArguments(codexSeat) == codex + ["-actor", "codex-seat", "-seat", "zeocreator", "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", "0.160.0"])
+    #expect(Array(AgentEnvironment.brokerArguments(codexSeat).prefix(codex.count+8)) == codex + ["-actor", "codex-seat", "-seat", "zeocreator", "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", "0.160.0"])
+    #expect(AgentEnvironment.brokerArguments(codexSeat).contains("-codex-launch"))
     codexSeat.controllerCapabilities = ["inbox"]
     #expect(!AgentEnvironment.valid(codexSeat))
     codexSeat.controllerCapabilities = []; codexSeat.agentVersion = "0.170.0"

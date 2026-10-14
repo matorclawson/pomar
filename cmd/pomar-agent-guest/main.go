@@ -96,6 +96,7 @@ func run() error {
 	workspace := flag.String("workspace", "/work", "isolated workspace")
 	sourceSHA := flag.String("source-sha", "", "initial source commit")
 	capabilities := flag.String("controller-capabilities", "", "owner-configured comma-separated controller capability names")
+	codexLaunch := flag.String("codex-launch", "", "declared Codex seat launch JSON")
 	codexVersion := flag.String("codex-version", "", "the pinned Codex seat version")
 	actorKind := flag.String("actor", "codex", "the coding agent: codex (app-server), claude (Claude Code, stream-json) or seat (an interactive Claude Code seat)")
 	seat := flag.String("seat", "", "with -actor seat: the seat's name")
@@ -120,7 +121,11 @@ func run() error {
 		if *capabilities != "" {
 			return errors.New("a Codex TUI seat does not accept controller capabilities")
 		}
-		return runCodexSeat(store, *seat, *codex, *codexVersion, *workspace, *socket)
+		launch, err := parseCodexLaunch(*codexLaunch)
+		if err != nil {
+			return err
+		}
+		return runCodexSeat(store, *seat, *codex, *codexVersion, *workspace, *socket, launch)
 	}
 	if *actorKind == "seat" {
 		self, err := os.Executable()

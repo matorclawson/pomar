@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,7 +22,8 @@ func fixture(t *testing.T) Supervisor {
 			t.Fatal(err)
 		}
 	}
-	return Supervisor{Seat: "example", Home: home, StateDir: state, Workspace: "/work", Binary: "/opt/codex", In: strings.NewReader(""), Out: &bytes.Buffer{}}
+	network := true
+	return Supervisor{Launch: &agentenv.SeatLaunch{Sandbox: "workspace-write", Approvals: "on-request", NetworkAccess: &network, Model: "fixture-model", Effort: "high", CWD: "/work"}, Seat: "example", Home: home, StateDir: state, Workspace: "/work", Binary: "/opt/codex", In: strings.NewReader(""), Out: &bytes.Buffer{}}
 }
 func pending(s Supervisor) record {
 	return record{Seat: s.Seat, ConfigurationSHA256: s.configurationDigest(), Schema: "pomar.codex-seat-thread/v1", State: "starting", Before: []string{}, Workspace: s.Workspace, BinarySHA256: LinuxExecutableSHA256, Version: Version}
@@ -173,5 +175,27 @@ func TestRedirectedOrUnpinnedExecutableNeverStarts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.StateDir, "codex-thread.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("rejected executable created startup intent")
+	}
+}
+
+func TestFreshAndResumeUseDeclaredPolicy(t *testing.T) {
+	s := fixture(t)
+	s.Launch.Sandbox, s.Launch.Approvals = "danger-full-access", "never"
+	for _, id := range []string{"", id1} {
+		args := s.Args(id)
+		for _, want := range []string{"danger-full-access", "never", "fixture-model", "model_reasoning_effort=\"high\"", "sandbox_workspace_write.network_access=true"} {
+			if !slices.Contains(args, want) {
+				t.Fatal("declaration setting dropped", want, args)
+			}
+		}
+	}
+	r := pending(s)
+	r.State, r.Thread = "bound", id1
+	s.write(r)
+	l := *s.Launch
+	l.Effort = "low"
+	s.Launch = &l
+	if _, err := s.read(); !errors.Is(err, ErrHeld) {
+		t.Fatal("resume changed declared launch", err)
 	}
 }

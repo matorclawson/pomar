@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 )
 
 const Version = "0.160.0"
@@ -31,6 +33,7 @@ var ErrHeld = errors.New("Codex thread identity held; inspect the original start
 // Supervisor never inherits the caller's environment or chooses a newest
 // thread. StateDir and Home must be private directories inside this guest.
 type Supervisor struct {
+	Launch                                  *agentenv.SeatLaunch
 	Seat, Binary, Home, StateDir, Workspace string
 	Env                                     []string
 	In                                      io.Reader
@@ -207,7 +210,12 @@ func (s Supervisor) bind(r record) (record, error) {
 }
 
 func (s Supervisor) Args(thread string) []string {
-	args := []string{"--ask-for-approval", "on-request", "--sandbox", "workspace-write", "--no-alt-screen", "-c", `cli_auth_credentials_store="file"`, "-c", "analytics.enabled=false", "--cd", s.Workspace}
+	l := s.Launch
+	if l == nil {
+		return nil
+	}
+	effort, _ := json.Marshal(l.Effort)
+	args := []string{"--ask-for-approval", l.Approvals, "--sandbox", l.Sandbox, "--model", l.Model, "-c", "model_reasoning_effort=" + string(effort), "-c", fmt.Sprintf("sandbox_workspace_write.network_access=%t", *l.NetworkAccess), "--no-alt-screen", "-c", `cli_auth_credentials_store="file"`, "-c", "analytics.enabled=false", "--cd", s.Workspace}
 	if thread != "" {
 		args = append([]string{"resume", thread}, args...)
 	}
@@ -215,6 +223,12 @@ func (s Supervisor) Args(thread string) []string {
 }
 
 func (s Supervisor) Start() error {
+	if err := s.Launch.Validate(); err != nil {
+		return err
+	}
+	if s.Launch.CWD != s.Workspace {
+		return errors.New("declared workspace differs from guest materialization")
+	}
 	if !filepath.IsAbs(s.Binary) || !filepath.IsAbs(s.Workspace) {
 		return errors.New("Codex binary and workspace must be absolute")
 	}
@@ -240,9 +254,13 @@ func (s Supervisor) Start() error {
 		return err
 	}
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 1<<30 || fi.Mode().Perm()&0022 != 0 {
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 1<<30 || fi.Mode().Perm()&0022 != 0 || fi.Mode().Perm()&0111 == 0 {
 		f.Close()
 		return errors.New("Codex executable custody refused")
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || st.Uid != 0 {
+		f.Close()
+		return errors.New("Codex executable must remain owned by the guest custodian")
 	}
 	h := sha256.New()
 	_, err = io.Copy(h, f)

@@ -2,6 +2,7 @@ package seatdecl
 
 import (
 	"encoding/json"
+	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 	"strings"
 	"testing"
 )
@@ -148,6 +149,8 @@ func TestParseClassesRefusesAKeyGivenTwice(t *testing.T) {
 func TestCodexSeatCompilationPreservesPinnedVersion(t *testing.T) {
 	d := valid()
 	d.Provider.Agent, d.Provider.Version = "codex", "0.160.0"
+	n := true
+	d.Launch = &agentenv.SeatLaunch{Sandbox: "workspace-write", Approvals: "on-request", NetworkAccess: &n, Model: "fixture-model", Effort: "high", CWD: "/work"}
 	c := catalogue("interactive fixture")
 	cl := c.Classes[d.Class]
 	a := cl.Agents["claude@2.1.280"]

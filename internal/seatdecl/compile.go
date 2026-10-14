@@ -135,7 +135,7 @@ func Compile(d Declaration, sum string, c Classes) (Compiled, error) {
 		AgentArchive: a.Archive, AgentArchiveSHA256: a.ArchiveSHA256,
 	}
 	if p.Agent == "codex" {
-		p.Agent, p.AgentVersion = "codex", d.Provider.Version
+		p.Agent, p.AgentVersion, p.SeatLaunch = "codex", d.Provider.Version, d.Launch
 	}
 	var sources []Binding
 	for _, s := range d.Sources {
