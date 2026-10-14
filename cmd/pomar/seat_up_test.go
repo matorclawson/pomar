@@ -249,10 +249,12 @@ func TestSeatStopNeverReportsUncertainCustodyAsStopped(t *testing.T) {
 			f.envs["seat-zeocreator"] = map[string]any{"phase": phase}
 			f.mu.Unlock()
 			rec := records(t)
-			var out, errb bytes.Buffer
-			code := seatStopCmd([]string{"-root", root, "-records", rec, "zeocreator"}, &out, &errb)
-			if code != 1 || out.Len() != 0 || !strings.Contains(errb.String(), "stop not confirmed") {
-				t.Fatalf("uncertain stop: code %d, stdout %q, stderr %q", code, out.String(), errb.String())
+			for attempt := 0; attempt < 2; attempt++ {
+				var out, errb bytes.Buffer
+				code := seatStopCmd([]string{"-root", root, "-records", rec, "zeocreator"}, &out, &errb)
+				if code != 1 || out.Len() != 0 || !strings.Contains(errb.String(), "stop not confirmed") {
+					t.Fatalf("uncertain stop: code %d, stdout %q, stderr %q", code, out.String(), errb.String())
+				}
 			}
 			f.mu.Lock()
 			stops := f.stops
