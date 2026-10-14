@@ -105,10 +105,19 @@ func (c *Client) Do(method, path string, body, out any) error {
 	if resp.StatusCode >= 300 {
 		r := &Refusal{Status: resp.StatusCode}
 		if json.Unmarshal(b, &r.APIError) != nil || r.Kind == "" {
-			// a send or stop that did something reports its outcome, not a refusal
+			// a send or stop that did something reports its outcome, not a
+			// refusal: out, if the caller gave one, is still filled in with
+			// the full result (queued/written/epoch, leader/group, ...),
+			// not only the one-line error string -- a retry's 409 replay
+			// of an original partial/uncertain result is exactly this
+			// shape, and a caller (the CLI) needs those fields to tell the
+			// operator anything useful, not just that it was "uncertain."
 			var res opResult
 			if json.Unmarshal(b, &res) == nil && res.Outcome != "" {
 				r.Kind, r.APIError.Error = KindUncertain, res.Outcome+": "+res.Detail
+				if out != nil {
+					json.Unmarshal(b, out)
+				}
 			} else {
 				r.Kind, r.APIError.Error = KindInternal, resp.Status
 			}

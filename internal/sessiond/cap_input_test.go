@@ -2,7 +2,11 @@ package sessiond
 
 import (
 	"bufio"
+	"errors"
+	"fmt"
 	"net"
+	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -185,5 +189,40 @@ func TestPasteIsNotCappedAtAnOrdinarySendsBound(t *testing.T) {
 	var out OpResult
 	if err := c.Do("POST", "/v1/sessions/echo-cap/send", SendRequest{Operation: "paste-cap-1", Text: big, Paste: true}, &out); err != nil || out.Outcome != "written" {
 		t.Fatalf("a paste over maxSendBytes but under maxPasteBytes should be written, not capped at an ordinary send's bound: %v %+v", err, out)
+	}
+}
+
+// Council's P1-2: a same-ID retry of an operation that originally settled
+// as partial or uncertain must replay that EXACT original status as a
+// 409, never a fresh 200 -- stop already got this (H3); send must too.
+// recorded (the single function both send's and stop's retries go
+// through) is planted directly with a settled "partial" send, exactly as
+// the real handler would leave it, then retried through the real HTTP
+// path: both halves are checked in one test -- the server replays 409
+// (not 200), and the client's Do populates the caller's out with the
+// full result (queued/written/epoch/detail), not only the error string.
+func TestSendRetryReplaysItsOriginalPartialOrUncertainStatus(t *testing.T) {
+	s, c := serve(t, root(t))
+	var made Created
+	if err := c.Do("POST", "/v1/sessions", shell("op-retry-partial", "retry-partial", "cat"), &made); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	const op, text = "op-retry-1", "hello\r"
+	p := fmt.Sprintf("uid:%d", os.Geteuid())
+	fp := opFingerprint("retry-partial", text, "false")
+	res, fresh, err := s.begin("send", p, op, fp)
+	if err != nil || !fresh {
+		t.Fatalf("plant begin: fresh=%v err=%v", fresh, err)
+	}
+	s.settle(res, opResult{Session: made.ID, Outcome: "partial", Detail: "3 of 6 bytes queued: a fake failure", Mode: "raw", InputID: op, Queued: true})
+
+	var out OpResult
+	err = c.Do("POST", "/v1/sessions/retry-partial/send", SendRequest{Operation: op, Text: text}, &out)
+	var r *Refusal
+	if !errors.As(err, &r) || r.Status != http.StatusConflict || r.Kind != KindUncertain {
+		t.Fatalf("a retry of a partial send should replay 409/uncertain, not a fresh 200: err=%v", err)
+	}
+	if out.Outcome != "partial" || !out.Queued || out.InputID != op {
+		t.Fatalf("the client's out should still carry the full original result on a 409, not just the error string: %+v", out)
 	}
 }

@@ -154,6 +154,20 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	call := func(method, path string, body, out any) int {
 		return sessionExit(verb, *op, c.Do(method, path, body, out), stderr)
 	}
+	// callOp is call for a send/paste/stop: out is a sessiond.OpResult, and
+	// a refusal that still carries one (a same-ID retry's 409 replay of an
+	// original partial or uncertain result, not a hard refusal with no
+	// result at all) is printed before the exit code is returned, not
+	// silently dropped -- the queued/written/epoch fields are exactly what
+	// an operator needs to see on that outcome, same as a clean 200 prints
+	// them.
+	callOp := func(method, path string, body any, out *sessiond.OpResult) int {
+		rc := sessionExit(verb, *op, c.Do(method, path, body, out), stderr)
+		if rc != 0 && out.Outcome != "" {
+			printJSON(*out)
+		}
+		return rc
+	}
 	switch verb {
 	case "serve":
 		if !need(0, "serve takes no arguments") {
@@ -315,7 +329,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			req.Epoch = &e
 		}
 		var out sessiond.OpResult
-		if rc := call("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/send", req, &out); rc != 0 {
+		if rc := callOp("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/send", req, &out); rc != 0 {
 			return rc
 		}
 		printJSON(out)
@@ -364,7 +378,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			req.Epoch = &e
 		}
 		var out sessiond.OpResult
-		if rc := call("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/send", req, &out); rc != 0 {
+		if rc := callOp("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/send", req, &out); rc != 0 {
 			return rc
 		}
 		printJSON(out)
@@ -373,7 +387,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			return 2
 		}
 		var out sessiond.OpResult
-		if rc := call("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/stop", sessiond.StopRequest{Operation: *op}, &out); rc != 0 {
+		if rc := callOp("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/stop", sessiond.StopRequest{Operation: *op}, &out); rc != 0 {
 			return rc
 		}
 		printJSON(out)

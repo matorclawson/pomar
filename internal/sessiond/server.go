@@ -823,7 +823,24 @@ func (s *Server) recorded(w http.ResponseWriter, r *opResult) {
 		refuse(w, http.StatusConflict, KindInProgress, "this operation is still running; ask again with the same ID")
 		return
 	}
-	reply(w, http.StatusOK, out)
+	reply(w, outcomeStatus(out.Outcome), out)
+}
+
+// outcomeStatus is the status a settled outcome replays as, on every retry
+// of the operation that settled it: 409 for partial or uncertain (the
+// caller must not mistake a retry for a clean success it never was), 200
+// for everything else (written, accepted, stopped, already-exited).
+// Without this, a retry of an operation that originally settled as
+// partial or uncertain silently replayed as a plain 200 -- the ONE
+// situation where a retry answering differently from the original call
+// would matter most (council's P1-2).
+func outcomeStatus(outcome string) int {
+	switch outcome {
+	case "partial", "uncertain":
+		return http.StatusConflict
+	default:
+		return http.StatusOK
+	}
 }
 
 // settle records what an operation did, for every retry of it.
@@ -1207,13 +1224,13 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		out := opResult{Session: t.ID, Outcome: "already-exited", Leader: "reaped", Group: "gone"}
 		code := http.StatusOK
 		if t.GroupRemains() {
-			out.Outcome, out.Group, code = "uncertain", "remaining", http.StatusConflict
+			out.Outcome, out.Group, out.Detail, code = "uncertain", "remaining", "the program had already exited, but a process in its group remains", http.StatusConflict
 		}
 		out = s.settle(res, out)
-		if code != http.StatusOK {
-			refuse(w, code, KindUncertain, "the program had already exited, but a process in its group remains")
-			return
-		}
+		// The full result (session, leader, group), not only an error
+		// string, so a caller sees exactly what a retry's 409 replay also
+		// gives it (recorded/outcomeStatus): an uncertain outcome is still
+		// an operation result, not merely a refusal.
 		reply(w, code, out)
 	}
 	if !t.Info().Running {
@@ -1233,7 +1250,9 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	if rep.Leader != "reaped" || rep.Group != "gone" {
 		out := s.settle(res, opResult{Session: t.ID, Outcome: "uncertain", Leader: rep.Leader, Group: rep.Group, GroupKilled: rep.GroupKilled,
 			Detail: "the leader or a process in its group could not be confirmed gone"})
-		refuse(w, http.StatusConflict, KindUncertain, out.Detail)
+		// The full result, not only an error string: see exited's own
+		// comment above.
+		reply(w, http.StatusConflict, out)
 		return
 	}
 	reply(w, http.StatusOK, s.settle(res, opResult{Session: t.ID, Outcome: "stopped", Leader: rep.Leader, Group: rep.Group, GroupKilled: rep.GroupKilled}))
