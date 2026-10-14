@@ -9,15 +9,32 @@ import (
 	"os/exec"
 )
 
-// checkExpectedSHA256 opens path once, hashes it, and refuses on a
-// mismatch, same as the Linux version. Darwin has no portable fexecve
-// equivalent (no reliable /proc/self/fd-style path that names an open
-// descriptor's exact inode for exec), so this does NOT close the full
-// check-then-exec window the Linux version does: the check closes the
-// file and this returns, and the caller execs cmd.Path by name immediately
-// after, with no code of its own in between. A sufficiently privileged,
-// precisely timed replacement of the file at path in that gap would still
-// run unchecked. That residual window is real and is not claimed closed.
+// checkExpectedSHA256 opens path once, hashes it while copying its bytes
+// into a fresh private directory, and execs the copy, never path itself.
+// Darwin has no portable fexecve equivalent (no reliable /proc/self/fd-style
+// path that names an open descriptor's exact inode for exec), so unlike the
+// Linux version this cannot hand the kernel the exact already-hashed inode.
+// The copy instead closes the specific gap the council named — path being
+// replaced after the check, before the exec that follows — because what
+// actually runs is a file nothing but this process ever wrote, not path.
+// It is copied from the SAME open descriptor the hash was taken from, never
+// a second open of path, so the copy's bytes are exactly what was hashed.
+// This narrows, not eliminates, the window: a sufficiently privileged,
+// precisely timed replacement of path between this function's first open
+// and its first read could still substitute what gets hashed and copied.
+// That earlier, narrower window is real and is not claimed closed.
+//
+// One confirmed, named limit: this cannot pin a macOS platform binary (one
+// signed by Apple with a platform identifier, as every binary under
+// /bin, /usr/bin and the rest of the signed system volume is). The kernel's
+// code-signing enforcement kills a copy of one of those on exec, regardless
+// of where the copy lives or that its bytes are byte-identical (confirmed:
+// copying /bin/sh and exec'ing the copy exits 137, SIGKILL). An ordinarily
+// signed or ad-hoc-signed executable — which is what this exists to pin:
+// Pomar's own binaries, Claude Code, Codex — is not a platform binary and
+// is unaffected; a shebang script is unaffected too, since the kernel execs
+// the named interpreter from its own real path, never the script itself.
+// ExpectedSHA256 on a platform binary will fail at exec, not at the check.
 func checkExpectedSHA256(cmd *exec.Cmd, path, expected string) error {
 	if expected == "" {
 		return nil
@@ -34,12 +51,33 @@ func checkExpectedSHA256(cmd *exec.Cmd, path, expected string) error {
 	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("%s isn't a regular file", path)
 	}
+	dir, err := os.MkdirTemp("", "pomar-launch-")
+	if err != nil {
+		return err
+	}
+	cp, err := os.OpenFile(dir+"/bin", os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o500)
+	if err != nil {
+		os.RemoveAll(dir)
+		return err
+	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(io.MultiWriter(h, cp), f); err != nil {
+		cp.Close()
+		os.RemoveAll(dir)
+		return err
+	}
+	if err := cp.Close(); err != nil {
+		os.RemoveAll(dir)
 		return err
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != expected {
+		os.RemoveAll(dir)
 		return fmt.Errorf("%s hashes to %s, not the expected %s; refusing to launch", path, got, expected)
 	}
+	// The copy is left on disk, named uniquely per launch under the OS
+	// temp directory (0700, Go's own MkdirTemp default): forensic evidence
+	// of exactly what ran, not cleaned up here. Its parent's cleanup is the
+	// OS's own temp-directory reaping, the same as everything else under it.
+	cmd.Path = cp.Name()
 	return nil
 }

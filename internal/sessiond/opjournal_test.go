@@ -242,3 +242,50 @@ func TestShowListsHeldOperationsWithAge(t *testing.T) {
 		t.Fatalf("held_operations: %+v", v.HeldOperations)
 	}
 }
+
+// zeocouncil's B1 fix: while any operation is held, a send (raw or
+// when-ready) refuses unless AckUnknown is given, so a wake or a typed
+// "continue" can't be the thing that resumes past an unresolved action.
+// AckUnknown never clears the hold itself.
+func TestSendRefusesWhileHeldUnlessAcknowledged(t *testing.T) {
+	_, c := serve(t, root(t))
+	o, path, _ := newAgentSession(t, c, "agent")
+
+	o.call(t, opRequest{Op: "begin", ID: "held-2", Digest: "d"})
+	known := false
+	o.call(t, opRequest{Op: "finish", ID: "held-2", Known: &known})
+
+	if err := c.Do("POST", "/v1/sessions/agent/send", SendRequest{Operation: "s-held-1", Text: "no\r"}, nil); kindOf(err) != KindHeld {
+		t.Fatalf("a plain send should refuse while held: %v", err)
+	}
+	if err := c.Do("POST", "/v1/sessions/agent/send", SendRequest{Operation: "s-held-2", Text: "no\r", WhenReady: true}, nil); kindOf(err) != KindHeld {
+		t.Fatalf("a when-ready send should refuse while held too: %v", err)
+	}
+	var out OpResult
+	if err := c.Do("POST", "/v1/sessions/agent/send", SendRequest{Operation: "s-held-3", Text: "yes\r", AckUnknown: true}, &out); err != nil || out.Outcome != "written" {
+		t.Fatalf("-ack-unknown should let it through: %v %+v", err, out)
+	}
+	// A fresh connection for the status check: the one just-written send
+	// pushed its own write notification to o, which a status call on the
+	// same connection would read instead of its reply.
+	o2 := dialOps(t, path)
+	if r := o2.call(t, opRequest{Op: "status", ID: "held-2"}); r["disposition"] != "acceptance_unknown" {
+		t.Fatalf("ack-unknown must not clear the hold itself: %+v", r)
+	}
+}
+
+// A session with no held operations is unaffected: plain sends still work
+// exactly as before this fix.
+func TestSendIsUnaffectedWithoutAnyHeldOperation(t *testing.T) {
+	_, c := serve(t, root(t))
+	req := shell("op-work", "work", `read l; printf 'got:%s\n' "$l"`)
+	req.Cols = 80
+	var made Created
+	if err := c.Do("POST", "/v1/sessions", req, &made); err != nil {
+		t.Fatal(err)
+	}
+	var out OpResult
+	if err := c.Do("POST", "/v1/sessions/work/send", SendRequest{Operation: "s-plain", Text: "hi\r"}, &out); err != nil || out.Outcome != "written" {
+		t.Fatalf("a session with no state channel, and so no held operations, should send normally: %v %+v", err, out)
+	}
+}
