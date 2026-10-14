@@ -33,6 +33,7 @@ const (
 	exitUnsupp    = 8  // the session can't do it as asked: a when-ready send to a session without a state channel
 	exitNotReady  = 9  // a when-ready send's session didn't report itself waiting for input in time: nothing was written
 	exitHeld      = 10 // the session has an operation whose outcome is unknown: pass -ack-unknown to send anyway
+	exitTooLarge  = 11 // the send's text is over the 64 KiB bound: nothing was sent; use paste for bulk content
 )
 
 // maxPasteBytes bounds one paste's payload; past it, nothing is sent.
@@ -57,6 +58,9 @@ const sessionUsage = `usage:
                                     -session/-epoch: refused as stale if the session changed since you read it
                                     -when-ready: written once the session's adapter reports it waiting for input
                                     refused (exit 10) if an operation's outcome is unknown, unless -ack-unknown
+                                    text over 64 KiB is refused outright (exit 11), never truncated; use paste for bulk content
+  pomar session input NAME INPUT_ID  a send's current acceptance, read live: yes, pending, unsupported or unknown
+                                    distinct from a retried send's own frozen reply; never re-sends anything
   pomar session paste -id OP [-file PATH] [-take] [-raw] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] [-ack-unknown] NAME
                                     sends a file's (or stdin's) whole content as one write, bracketed as a paste unless -raw
                                     same held-operation refusal as send
@@ -312,6 +316,15 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			return rc
 		}
 		printJSON(out)
+	case "input":
+		if !need(2, "input names its session and the input ID to ask about") {
+			return 2
+		}
+		var st sessiond.InputStatusResult
+		if rc := call("GET", "/v1/sessions/"+url.PathEscape(pos[0])+"/input?id="+url.QueryEscape(pos[1]), nil, &st); rc != 0 {
+			return rc
+		}
+		printJSON(st)
 	case "paste":
 		if !need(1, "paste names its session") || !needOp() {
 			return 2
@@ -412,6 +425,8 @@ func sessionExit(verb, op string, err error, stderr io.Writer) int {
 		case sessiond.KindHeld:
 			fmt.Fprintln(stderr, "Pass -ack-unknown to send anyway; the hold itself is not cleared by that.")
 			return exitHeld
+		case sessiond.KindTooLarge:
+			return exitTooLarge
 		}
 	}
 	return 1

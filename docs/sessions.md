@@ -117,9 +117,18 @@ binary PROGRAM must be. The file is opened once, hashed and compared before
 launch; a mismatch refuses it outright. On Linux this closes the window
 between the check and the exec completely: the checked file is handed to
 the program as an inherited descriptor and exec'd by that descriptor
-(`/proc/self/fd/N`), never re-resolved by name. On other platforms there is
-no equivalent, and the window between the check and the exec that follows
-it, though minimized, is not claimed closed.
+(`/proc/self/fd/N`), never re-resolved by name. On macOS, which has no
+equivalent, the verified bytes are instead copied into a fresh private
+directory and that copy is exec'd, so a replacement of PROGRAM's original
+path after the check has no effect; the narrower window around the first
+read is real and not claimed closed. One stated boundary on macOS: a
+platform binary (one Apple signs with a platform identifier — everything
+under `/bin`, `/usr/bin` and the rest of the signed system volume) cannot be
+pinned this way at all; the kernel kills a copy of one on exec regardless of
+where it lives. A declared profile must never name a platform binary as
+`-expected-sha256`'s target; it will fail at exec, not at the check. This
+never affects what the feature exists to pin — Pomar's own binaries, Claude
+Code, Codex — none of which are platform binaries.
 
 ### Logs
 
@@ -189,6 +198,28 @@ has seen the hold and chooses to send anyway; it never clears it.
 | `epoch` | the grant epoch after the send |
 | `outcome` | `written`, `accepted` (with `-accept-wait`, once confirmed), `partial` (some bytes reached the program, and nothing is resent) or `uncertain` (the program didn't read in time) |
 
+**It is bounded** at 64 KiB: a send carries a line, a wake, or a short
+command, never bulk content (`paste` exists for that, bounded at 8 MiB).
+Text over the bound is refused outright (exit 11), never truncated, and
+nothing reaches the program's PTY; a retry with the same `-id` refuses the
+same way, since nothing was recorded for it either.
+
+### Reading a send's live acceptance
+
+`pomar session input NAME INPUT_ID` answers "has this input been accepted
+yet" by reading the session's adapter state fresh, at call time — not by
+retrying the send. A send retried with the same `-id` still returns its own
+frozen reply (whatever `accepted` it settled on when it ran); `input` always
+reflects the adapter's current report, so `pending` can become `yes` later
+without resending anything. It returns `yes`, `pending`, `unsupported` (no
+state channel), or `unknown` (this session has never seen that input ID).
+
+This is a different question from the operation ledger's `status` (below):
+`input` asks whether a terminal program confirmed receiving one particular
+write; `begin`/`finish`/`status` tracks whether an agent's own tool-call
+operation committed. The names are easy to conflate; the mechanisms and
+their stores are entirely separate.
+
 ### Pasting
 
 A paste is a big send, not a separate wire primitive: `pomar session paste`
@@ -238,6 +269,8 @@ exist: once the leader is reaped and the group is empty, its id may be reused.
 | 7 | stale: the send named a generation or epoch the session no longer has; nothing was written |
 | 8 | unsupported: a `-when-ready` send to a session without a state channel; nothing was written |
 | 9 | not ready: the adapter didn't report the program waiting for input in time; nothing was written |
+| 10 | held: the session has an operation whose outcome is `acceptance_unknown`; pass `-ack-unknown` to send anyway (the hold itself is not cleared) |
+| 11 | too large: the send's text is over the 64 KiB bound; nothing was sent (use `paste` for bulk content) |
 
 ## Agent state
 
