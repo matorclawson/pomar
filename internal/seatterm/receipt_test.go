@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -19,18 +20,29 @@ func sha256OfFile(t *testing.T, path string) string {
 }
 
 // A matching ExpectedSHA256 launches normally; a mismatch refuses the
-// launch outright, before anything runs.
+// launch outright, before anything runs. The pinned program is this test's
+// own script, never a macOS platform binary: AMFI kills a copy of one of
+// those on exec (confirmed: copying /bin/sh and exec'ing the copy exits
+// 137), which checkExpectedSHA256's Darwin copy would trip over for a
+// platform binary specifically. An agent's own binary (Pomar's, Claude
+// Code's, Codex's) is ordinarily signed, not a platform binary, and isn't
+// affected; this is named here, not glossed over.
 func TestExpectedSHA256PinsTheExactBinary(t *testing.T) {
 	h, _ := newHost(t)
-	spec := sh("echo ok")
-	spec.Command.ExpectedSHA256 = sha256OfFile(t, "/bin/sh")
+	dir := t.TempDir()
+	path := dir + "/prog"
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec := SessionSpec{Name: "agent", Kind: "agent", Command: Command{Path: path, UID: -1, GID: -1}, Cols: 80, Rows: 24}
+	spec.Command.ExpectedSHA256 = sha256OfFile(t, path)
 	s, _, err := h.Create("op-sha-1", "operator", spec)
 	if err != nil {
 		t.Fatalf("a matching hash should launch: %v", err)
 	}
 	collect(t, mustAttach(t, s, "v"), nil, "ok")
 
-	spec2 := sh("echo ok")
+	spec2 := spec
 	spec2.Command.ExpectedSHA256 = strings.Repeat("0", 64)
 	if _, _, err := h.Create("op-sha-2", "operator", spec2); err == nil {
 		t.Fatal("a mismatched hash should refuse the launch")
@@ -131,5 +143,66 @@ func TestScrollbackGivesHistoryBeyondTheScreen(t *testing.T) {
 	full := s.Scrollback(0)
 	if limited.Lines[0] != full.Lines[len(full.Lines)-2] || limited.Lines[1] != full.Lines[len(full.Lines)-1] {
 		t.Fatalf("a bounded read should be the most recent lines: got %v, want the tail of %v", limited.Lines, full.Lines)
+	}
+}
+
+// A file replaced at path after the check, before the exec that follows,
+// can't be what actually runs: checkExpectedSHA256 pins the launch to the
+// exact bytes it hashed, by platform-specific means (an inherited
+// descriptor on Linux, a private copy on Darwin), not merely to the name.
+func TestExpectedSHA256SurvivesReplacementAfterTheCheck(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/prog"
+	original := []byte("#!/bin/sh\necho original\n")
+	if err := os.WriteFile(path, original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256OfFile(t, path)
+
+	cmd := exec.Command(path)
+	if err := checkExpectedSHA256(cmd, path, expected); err != nil {
+		t.Fatalf("the check should pass on the original bytes: %v", err)
+	}
+	if cmd.Path == path {
+		t.Fatal("the launch must be pinned away from the original path, not merely re-checked at exec time")
+	}
+
+	// The race: the original is replaced the instant the check returns,
+	// before anything execs.
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho replaced\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("the pinned launch should still run: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "original" {
+		t.Fatalf("the launch reflected the replaced file, not what was checked: got %q", got)
+	}
+}
+
+// A pattern that has already scrolled off the visible screen is still
+// found, up to healthScanLines back; the version string names which list
+// matched.
+func TestHealthScansScrollbackNotOnlyTheScreen(t *testing.T) {
+	h, _ := newHost(t)
+	spec := sh(`printf 'panic: boom\n'; i=1; while [ $i -le 10 ]; do printf 'line%02d\n' $i; i=$((i+1)); done; sleep 30`)
+	spec.Rows = 4
+	s, _, err := h.Create("op-health-scroll-1", "operator", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := mustAttach(t, s, "v")
+	collect(t, c, nil, "line10")
+	if scr := s.Screen(); strings.Contains(strings.Join(scr.Lines, "\n"), "panic:") {
+		t.Fatal("the panic line should have scrolled off the 4-row screen by now")
+	}
+	hl := s.Health()
+	if !hl.PossiblePanic {
+		t.Fatalf("a panic scrolled into history should still be found: %+v", hl)
+	}
+	if hl.PatternVersion != PatternVersion {
+		t.Fatalf("health should name its pattern version: %+v", hl)
 	}
 }

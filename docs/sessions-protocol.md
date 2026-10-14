@@ -107,19 +107,29 @@ for.
 
 ### Health
 
-`GET .../health` answers a passive, heuristic read of the current screen,
-for criterion 14 of the tmux-replacement acceptance (remote seat health,
-without the seat's cooperation):
+`GET .../health` answers a passive, heuristic read of the current screen
+plus its last 200 lines of scrollback (so a marker already scrolled off the
+visible rows is still found, pinned at this number), for criterion 14 of
+the tmux-replacement acceptance (remote seat health, without the seat's
+cooperation):
 
 ```json
 {"possible_panic": false, "possible_readonly_refusal": false, "possible_approval_prompt": false,
- "last_output": "2026-10-14T17:00:00Z"}
+ "last_output": "2026-10-14T17:00:00Z", "pattern_version": "pomar.seat-health-patterns/v1"}
 ```
 
-Every `possible_*` field is a fixed, documented substring match against the
-current screen's text, nothing more: diagnostic only, never authoritative,
-never fed back into any control or readiness decision, and never a
-substitute for agent state (below) when an adapter can speak at all.
+Every `possible_*` field is a fixed, documented substring match against that
+text, nothing more: diagnostic only, never authoritative, never fed back
+into any control or readiness decision, and never a substitute for agent
+state (below) when an adapter can speak at all. **It never raises an alarm
+by itself** — the acceptance's four alarm conditions (a failed canary, a
+declared/live mismatch, no tool success in 30 minutes while a SOW is
+ACTIVE, or a missed heartbeat with a stale record) are what an alarm
+consumer (zeo-rt's orgchart) actually fires on; these fields only enrich
+that alarm's text with what the screen showed. `pattern_version` names
+which pattern list matched, since the lists change over time and an older
+alarm shouldn't be read against today's. This route exports no screen
+content, transcript or title: exactly the fields above, nothing else.
 
 ### A log chunk
 
@@ -152,12 +162,18 @@ X-Pomar-Log-Truncated: true
 
 ```json
 {"operation": "OP", "text": "…", "take": false, "session": "ID", "epoch": 7,
- "when_ready": true, "ready_wait_ms": 30000, "accept_wait_ms": 5000}
+ "when_ready": true, "ready_wait_ms": 30000, "accept_wait_ms": 5000, "ack_unknown": false}
 ```
 
 - **`session` and `epoch`** are optional fences: the generation and grant
   epoch the caller last read. A session that has changed since is refused as
   `stale`.
+- **`ack_unknown`** lets the send proceed despite a held
+  (`acceptance_unknown`) operation on the session ([Operations](#operations-a-durable-record-of-what-an-adapters-effects-did)).
+  Without it, any send to a session with one or more held operations is
+  refused as `held`, naming them. `ack_unknown` never clears the hold itself
+  — only an adapter's own `finish` can set a disposition, and
+  `acceptance_unknown` is permanent once set.
 - **`when_ready`** holds the text until the adapter reports `waiting-input`,
   in a report no send has used.
   - It waits `ready_wait_ms`, by default 30 s and at most 10 min. A session
@@ -202,8 +218,8 @@ of its operation:
 - **An operation still running** is refused as `in_progress`. Ask again with
   the same ID.
 - **An operation refused before it acted** (`stale`, `unsupported`,
-  `not_ready`, `exited`, `not_found`) did nothing. Its ID decides afresh on a
-  retry.
+  `not_ready`, `held`, `exited`, `not_found`) did nothing. Its ID decides
+  afresh on a retry.
 
 ### Refusals
 
@@ -219,6 +235,7 @@ A refusal's body is `{"error": "…", "kind": "…"}`:
 | `stale` | 409 | the request named a generation or epoch the session no longer has |
 | `unsupported` | 409 | a `when_ready` send to a session without a state channel |
 | `not_ready` | 409 | the adapter didn't report the program waiting for input in time |
+| `held` | 409 | the session has an operation whose outcome is `acceptance_unknown`; pass `ack_unknown` to send anyway |
 | `uncertain` | 409 | the outcome couldn't be confirmed: a take's fence, or a stop |
 | `internal` | 500 | anything else |
 

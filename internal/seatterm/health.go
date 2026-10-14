@@ -21,7 +21,21 @@ type Health struct {
 	PossibleReadonlyRefusal bool   `json:"possible_readonly_refusal"`
 	PossibleApprovalPrompt  bool   `json:"possible_approval_prompt"`
 	LastOutput              string `json:"last_output,omitempty"`
+	// PatternVersion names which pattern list matched, so an alarm record
+	// can cite it: the lists change over time, and a stale alarm shouldn't
+	// be read against today's lists.
+	PatternVersion string `json:"pattern_version"`
 }
+
+// PatternVersion is HealthPatterns' own version: bump it whenever
+// panicMarkers, readonlyMarkers or approvalMarkers change.
+const PatternVersion = "pomar.seat-health-patterns/v1"
+
+// healthScanLines bounds how far back a health scan reads: the current
+// screen plus this many of the most recent scrolled-off lines, pinned here
+// so the acceptance record can cite an exact number. A marker that scrolled
+// off earlier than this is not found; this is a diagnostic, not a search.
+const healthScanLines = 200
 
 // These lists are a starting point, not exhaustive: amend them as real
 // failures are found that don't match, rather than claiming completeness.
@@ -59,15 +73,17 @@ func containsAny(lines []string, markers []string) bool {
 	return false
 }
 
-// Health runs the pattern checks against the session's current screen (its
-// visible rows; a marker scrolled into history isn't read back for this).
+// Health runs the pattern checks against the session's current screen plus
+// its last healthScanLines lines of scrollback, current screen last, so a
+// marker that has already scrolled off the visible rows is still found.
 func (s *TermSession) Health() Health {
-	scr := s.Screen()
+	lines := append(s.Scrollback(healthScanLines).Lines, s.Screen().Lines...)
 	in := s.Info()
 	return Health{
-		PossiblePanic:           containsAny(scr.Lines, panicMarkers),
-		PossibleReadonlyRefusal: containsAny(scr.Lines, readonlyMarkers),
-		PossibleApprovalPrompt:  containsAny(scr.Lines, approvalMarkers),
+		PossiblePanic:           containsAny(lines, panicMarkers),
+		PossibleReadonlyRefusal: containsAny(lines, readonlyMarkers),
+		PossibleApprovalPrompt:  containsAny(lines, approvalMarkers),
 		LastOutput:              in.LastOutput,
+		PatternVersion:          PatternVersion,
 	}
 }

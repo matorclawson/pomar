@@ -80,7 +80,7 @@ Every command takes `-root`. Everything but `attach` prints JSON (`screen` and
 | `pomar session show NAME` | One session's state (below). |
 | `pomar session screen [-json] NAME` | The current screen as text rows. With `-json`, also the cursor, the title and the output offset. |
 | `pomar session scrollback [-json] [-lines N] NAME` | The lines scrolled off the screen, oldest first, up to `HistoryLines` (2000), readable without attaching. |
-| `pomar session health NAME` | A passive, heuristic read of the current screen: `possible_panic`, `possible_readonly_refusal`, `possible_approval_prompt`, `last_output`. Diagnostic only; never fed back into any control decision. |
+| `pomar session health NAME` | A passive, heuristic read of the current screen plus its last 200 lines of scrollback: `possible_panic`, `possible_readonly_refusal`, `possible_approval_prompt`, `last_output`, `pattern_version`. Diagnostic only; never raises an alarm or any control decision by itself. |
 | `pomar session logs [-from N] [-limit N] [-o PATH] NAME` | The session's durable log, paged (below). To stdout, or `-o PATH`. |
 | `pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME [--] TEXT` | Writes TEXT as the program's input (below). `-enter` adds a carriage return. After `--`, TEXT may begin with a dash. |
 | `pomar session paste -id OP [-file PATH] [-take] [-raw] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME` | Sends a file's, or stdin's, whole content as one write (below). |
@@ -156,8 +156,10 @@ from `show`, a session that has changed since is refused as stale (exit 7),
 and nothing is written. The name may have a new generation, or control may
 have changed hands. Read it again, then decide.
 
-**It is raw by default,** and says so: `"mode": "raw"`. A raw send can land
-while a person is typing at a prompt; that is what tmux's send-keys does too.
+**It is raw by default,** and says so: `"mode": "raw"`. Like `attach`, a send
+only takes control when nobody holds it (or, with `-take`, from whoever
+does): an attached, typing operator already holds control, so an ordinary
+send is refused (exit 5), never interleaved with their keystrokes.
 **`-when-ready` waits instead:**
 - the text is held until the session's adapter reports the program
   `waiting-input`, in a report no send has used yet, for up to `-ready-wait`
@@ -166,6 +168,15 @@ while a person is typing at a prompt; that is what tmux's send-keys does too.
   nothing is written;
 - a session without a state channel can't say when it is ready, so a
   `-when-ready` send to it is refused (exit 8), never written raw.
+
+**It refuses while an operation is held.** If `show` lists any
+`held_operations` (an operation whose outcome is `acceptance_unknown`,
+below), a send or paste is refused (exit 10) unless `-ack-unknown` is given.
+This is the fix for a stop mid-effect followed by a resume and a reflexive
+"continue" (or an unattended wake) repeating it: nothing — not even a
+`-when-ready` wake — writes into a session with an unresolved hold without
+an explicit, deliberate acknowledgement. `-ack-unknown` only says the caller
+has seen the hold and chooses to send anyway; it never clears it.
 
 **Its reply tells each stage apart:**
 
@@ -193,8 +204,9 @@ program can't keep up with reports `partial`, exactly as a huge `send` would.
 - **It's bounded** at 8 MiB; over that, it is refused (exit 2), and nothing
   is sent.
 - **Fencing is identical to `send`'s:** `-session`/`-epoch` refuse it as
-  stale (exit 7) if the session changed since you read it; a stale paste
-  writes nothing, same as a stale send.
+  stale (exit 7) if the session changed since you read it, and a held
+  operation refuses it (exit 10) unless `-ack-unknown`, same as `send`; a
+  stale or held paste writes nothing.
 
 ### Stopping
 
@@ -290,12 +302,49 @@ operation look like it quietly became success.
 
 `show` and `ls` carry a session's `held_operations`: its `acceptance_unknown`
 IDs and their age. `attach` prints a one-line banner if any exist, before
-anything is typed, so "continue" isn't the reflex.
+anything is typed, so "continue" isn't the reflex — and
+[`send`/`paste` refuse outright](#writing-to-a-session) unless `-ack-unknown`
+is given, so a wake or an unattended retry can't be the thing that resumes
+past an unresolved action either.
 
 **What this doesn't cover:** the session layer can tell an adapter whether
 *its own* effect's confirmation ever arrived. It cannot stop a model
 choosing to act again on its own after a resume — that is the agent's
 decision, outside anything a PTY carries.
+
+### Wiring it to Claude Code
+
+Nothing here is shipped: it's the named caller zeocouncil's review asked
+for, for whoever builds the Claude Code guest adapter to adapt. The shape
+that fits Claude Code's own hook events:
+
+- **`PreToolUse`** calls `begin`, before the tool runs, with an operation ID
+  of the agent's choosing (its own tool-call ID, if it has one) and a
+  digest of the tool call's own request (a hash of its name and input is
+  enough: this only has to be stable across an exact retry, never secret).
+- **`PostToolUse`** calls `finish(known=true)`, after the tool call
+  completes and its result is recorded.
+- **If the process stops between the two,** the operation is found
+  `acceptance_unknown` on the next `status` or `show` — by design, not a
+  failure of the hook.
+
+An illustrative hook configuration (adapt the command to wherever the
+adapter's own script lives; this is an example, not a shipped one):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "pomar-claude-op-begin"}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "pomar-claude-op-finish"}]}]
+  }
+}
+```
+
+Each script reads `$POMAR_SESSION_STATE` (set in the session's own
+environment at creation, [above](#the-service)) and the hook's own JSON on
+stdin, and writes one `begin` or `finish` line to that socket, in the shape
+[Operations](#operations-a-durable-record-of-what-an-adapters-effects-did)
+already describes.
 
 ## Entering a session
 

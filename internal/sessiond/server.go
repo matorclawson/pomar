@@ -247,6 +247,11 @@ const (
 	// KindNotReady is a when-ready send whose session's adapter didn't
 	// report it ready for input in time: nothing was written.
 	KindNotReady = "not_ready"
+	// KindHeld is a send refused because the session has an operation whose
+	// outcome is acceptance_unknown: a stop mid-effect, never resolved.
+	// Pass AckUnknown (-ack-unknown) to send anyway; the hold itself is
+	// never cleared by that, only acknowledged.
+	KindHeld = "held"
 )
 
 // APIError is every refusal's body.
@@ -343,6 +348,11 @@ type SendRequest struct {
 	// AcceptWaitMS waits, after the write, for the adapter to report the
 	// input accepted.
 	AcceptWaitMS int `json:"accept_wait_ms,omitempty"`
+	// AckUnknown lets a send proceed despite a held (acceptance_unknown)
+	// operation on this session. It never resolves the hold itself — that
+	// stays acceptance_unknown forever, per opJournal's own rule — it only
+	// says the caller has seen it and chooses to send anyway.
+	AckUnknown bool `json:"ack_unknown,omitempty"`
 }
 
 // Bounds on a send's waits.
@@ -669,6 +679,17 @@ func stale(t *seatterm.TermSession, req SendRequest) string {
 	return ""
 }
 
+// heldMessage names every acceptance_unknown operation a send is refused
+// behind, so the caller sees exactly what it's being asked to acknowledge.
+func heldMessage(held []HeldOp) string {
+	ids := make([]string, len(held))
+	for i, h := range held {
+		ids[i] = fmt.Sprintf("%s (%ds old)", h.ID, h.AgeSecs)
+	}
+	return fmt.Sprintf("this session has %d operation(s) whose outcome is unknown: %s; pass -ack-unknown to send anyway (the hold itself is not cleared)",
+		len(held), strings.Join(ids, ", "))
+}
+
 // waitMS is a send's wait, bounded, or def when it names none.
 func waitMS(ms int, def time.Duration) time.Duration {
 	if ms <= 0 {
@@ -765,6 +786,13 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	a := s.adapters[t.ID]
 	s.mu.Unlock()
+	if a != nil && !req.AckUnknown {
+		if held := a.ops.held(); len(held) > 0 {
+			s.drop(res)
+			refuse(w, http.StatusConflict, KindHeld, heldMessage(held))
+			return
+		}
+	}
 	mode := "raw"
 	if req.WhenReady {
 		mode = "when-ready"

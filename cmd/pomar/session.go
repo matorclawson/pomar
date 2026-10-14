@@ -25,13 +25,14 @@ import (
 
 // Exit codes of `pomar session`, beyond 0, 1 and 2.
 const (
-	exitNoService = 3 // no session service runs for the root: start one with `pomar session serve`
-	exitNotFound  = 4 // no session has that name
-	exitConflict  = 5 // refused as it stands: the name runs, another client controls it, or the operation is still running
-	exitExited    = 6 // the session's program has exited
-	exitStale     = 7 // the send named a generation or grant epoch the session no longer has: read it again
-	exitUnsupp    = 8 // the session can't do it as asked: a when-ready send to a session without a state channel
-	exitNotReady  = 9 // a when-ready send's session didn't report itself waiting for input in time: nothing was written
+	exitNoService = 3  // no session service runs for the root: start one with `pomar session serve`
+	exitNotFound  = 4  // no session has that name
+	exitConflict  = 5  // refused as it stands: the name runs, another client controls it, or the operation is still running
+	exitExited    = 6  // the session's program has exited
+	exitStale     = 7  // the send named a generation or grant epoch the session no longer has: read it again
+	exitUnsupp    = 8  // the session can't do it as asked: a when-ready send to a session without a state channel
+	exitNotReady  = 9  // a when-ready send's session didn't report itself waiting for input in time: nothing was written
+	exitHeld      = 10 // the session has an operation whose outcome is unknown: pass -ack-unknown to send anyway
 )
 
 // maxPasteBytes bounds one paste's payload; past it, nothing is sent.
@@ -47,15 +48,18 @@ const sessionUsage = `usage:
   pomar session screen [-json] NAME the current screen, as text
   pomar session scrollback [-json] [-lines N] NAME
                                     the lines scrolled off the screen, oldest first, readable without attaching
-  pomar session health NAME         a passive, heuristic read of the current screen: possible_panic,
-                                    possible_readonly_refusal, possible_approval_prompt, last_output
+  pomar session health NAME         a passive, heuristic read of the screen and last 200 scrollback lines:
+                                    possible_panic, possible_readonly_refusal, possible_approval_prompt,
+                                    last_output, pattern_version
   pomar session logs [-from N] [-limit N] [-o PATH] NAME
                                     the session's durable log, paged; written to PATH, or stdout
-  pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME [--] TEXT
+  pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] [-ack-unknown] NAME [--] TEXT
                                     -session/-epoch: refused as stale if the session changed since you read it
                                     -when-ready: written once the session's adapter reports it waiting for input
-  pomar session paste -id OP [-file PATH] [-take] [-raw] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME
+                                    refused (exit 10) if an operation's outcome is unknown, unless -ack-unknown
+  pomar session paste -id OP [-file PATH] [-take] [-raw] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] [-ack-unknown] NAME
                                     sends a file's (or stdin's) whole content as one write, bracketed as a paste unless -raw
+                                    same held-operation refusal as send
   pomar session attach [-view] [-take] [-title=false] NAME
                                     the session's terminal; Ctrl-] detaches, and the program keeps running
   pomar session stop -id OP NAME    the program's leader and process group are read back
@@ -97,6 +101,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		ready     = fs.Bool("when-ready", false, "write the text only once the session's adapter reports it waiting for input")
 		rwait     = fs.Duration("ready-wait", 0, "how long -when-ready waits (default 30s, at most 10m)")
 		await     = fs.Duration("accept-wait", 0, "how long to wait, after the write, for the adapter to report the input accepted")
+		ackUnk    = fs.Bool("ack-unknown", false, "send, paste: proceed despite a held (acceptance_unknown) operation; the hold itself is not cleared")
 		title     = fs.Bool("title", true, "show your role and the agent state in the terminal's title while attached")
 		from      = fs.Int64("from", 0, "logs: the byte offset to start from")
 		limit     = fs.Int64("limit", 0, "logs: at most this many bytes (default and max 1 MiB)")
@@ -297,7 +302,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			text += "\r"
 		}
 		req := sessiond.SendRequest{Operation: *op, Text: text, Take: *take, Session: *gen, WhenReady: *ready,
-			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds())}
+			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds()), AckUnknown: *ackUnk}
 		if *epoch >= 0 {
 			e := uint64(*epoch)
 			req.Epoch = &e
@@ -339,7 +344,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			text = "\x1b[200~" + text + "\x1b[201~"
 		}
 		req := sessiond.SendRequest{Operation: *op, Text: text, Take: *take, Session: *gen, WhenReady: *ready,
-			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds())}
+			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds()), AckUnknown: *ackUnk}
 		if *epoch >= 0 {
 			e := uint64(*epoch)
 			req.Epoch = &e
@@ -404,6 +409,9 @@ func sessionExit(verb, op string, err error, stderr io.Writer) int {
 			return exitUnsupp
 		case sessiond.KindNotReady:
 			return exitNotReady
+		case sessiond.KindHeld:
+			fmt.Fprintln(stderr, "Pass -ack-unknown to send anyway; the hold itself is not cleared by that.")
+			return exitHeld
 		}
 	}
 	return 1
