@@ -144,3 +144,24 @@ func TestParseClassesRefusesAKeyGivenTwice(t *testing.T) {
 		t.Fatal("a duplicate key was accepted")
 	}
 }
+
+func TestCodexSeatCompilationPreservesPinnedVersion(t *testing.T) {
+	d := valid()
+	d.Provider.Agent, d.Provider.Version = "codex", "0.160.0"
+	c := catalogue("interactive fixture")
+	cl := c.Classes[d.Class]
+	a := cl.Agents["claude@2.1.280"]
+	cl.Agents["codex@0.160.0"] = a
+	c.Classes[d.Class] = cl
+	parsedDecl, sum := parsed(t, d)
+	got, err := Compile(parsedDecl, sum, c)
+	if err != nil || got.Profile.Agent != "codex" || got.Profile.AgentVersion != "0.160.0" {
+		t.Fatalf("lost pin %+v %v", got.Profile, err)
+	}
+	a.InteractiveQualified = ""
+	cl.Agents["codex@0.160.0"] = a
+	c.Classes[d.Class] = cl
+	if _, err = Compile(parsedDecl, sum, c); err == nil {
+		t.Fatal("headless qualification substituted for interactive")
+	}
+}

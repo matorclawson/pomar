@@ -149,7 +149,14 @@ import Foundation
     #expect(AgentEnvironment.valid(o))
     let codex = AgentEnvironment.brokerArguments(agentOptions())
     #expect(AgentEnvironment.brokerArguments(o) == codex + ["-actor", "seat", "-seat", "zeocreator", "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", "2.1.280"])
-    var codexSeat = agentOptions(); codexSeat.seat = "zeocreator"
+    var codexSeat = agentOptions(); codexSeat.agent = "codex"; codexSeat.seat = "zeocreator"
+    #expect(!AgentEnvironment.valid(codexSeat))
+    codexSeat.agentVersion = "0.160.0"
+    #expect(AgentEnvironment.valid(codexSeat))
+    #expect(AgentEnvironment.brokerArguments(codexSeat) == codex + ["-actor", "codex-seat", "-seat", "zeocreator", "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", "0.160.0"])
+    codexSeat.controllerCapabilities = ["inbox"]
+    #expect(!AgentEnvironment.valid(codexSeat))
+    codexSeat.controllerCapabilities = []; codexSeat.agentVersion = "0.170.0"
     #expect(!AgentEnvironment.valid(codexSeat))
     for bad in ["", "Zeocreator", "1seat", "zeo creator", "zeo/../x", String(repeating: "a", count: 64)] {
         var b = o; b.seat = bad

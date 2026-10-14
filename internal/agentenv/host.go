@@ -98,7 +98,7 @@ type EnvironmentProfile struct {
 	QualificationFixture *QualificationFixture `json:"qualificationFixture,omitempty"`
 
 	// Seat makes this an interactive seat's profile (POMAR-CC SOW 15 §5): a
-	// Claude Code agent with no controller capabilities, run as the seat.
+	// pinned Claude Code or Codex agent with no controller capabilities.
 	Seat string `json:"seat,omitempty"`
 	// SeatDeclarationSHA256 binds a seat profile, and so every environment
 	// made from it, to the one declaration it was compiled from.
@@ -117,8 +117,8 @@ var claudeControllerVersions = map[string]bool{"2.1.280": true}
 func ValidateAgent(c HostConfig) error {
 	switch c.Agent {
 	case "", "codex":
-		if c.AgentVersion != "" {
-			return errors.New("an agent version applies to the claude agent only")
+		if c.AgentVersion != "" && c.AgentVersion != "0.160.0" {
+			return errors.New("Codex requires the supported pinned version 0.160.0")
 		}
 	case "claude":
 		if !agentVersion.MatchString(c.AgentVersion) {
@@ -277,8 +277,8 @@ func OpenHost(config HostConfig) (*Host, error) {
 		if p.Agent != "" {
 			effective.Agent, effective.AgentVersion = p.Agent, p.AgentVersion
 		}
-		if p.Seat != "" && (!seatProfileName.MatchString(p.Seat) || effective.Agent != "claude" || len(p.ControllerCapabilities) > 0 || p.Qualification) {
-			return nil, fmt.Errorf("profile %s: a seat profile names a seat, runs Claude Code, and has no controller capabilities or qualification fixture", name)
+		if p.Seat != "" && (!seatProfileName.MatchString(p.Seat) || (effective.Agent != "claude" && (effective.Agent != "codex" || effective.AgentVersion != "0.160.0")) || len(p.ControllerCapabilities) > 0 || p.Qualification) {
+			return nil, fmt.Errorf("profile %s: a seat profile names a seat, runs a pinned supported coding agent, and has no controller capabilities or qualification fixture", name)
 		}
 		if (p.Seat != "") != (p.SeatDeclarationSHA256 != "") || (p.Seat != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(p.SeatDeclarationSHA256)) {
 			return nil, fmt.Errorf("profile %s: a seat profile names the sha256 of the declaration it was compiled from, and only a seat profile does", name)

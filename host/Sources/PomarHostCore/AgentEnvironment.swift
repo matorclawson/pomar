@@ -109,8 +109,13 @@ public enum AgentEnvironment {
     /// The agent an environment runs; anything else is refused.
     public static func validAgent(_ o: Options) -> Bool {
         switch o.agent ?? "codex" {
-        case "codex" where o.seat == nil:
-            return o.agentVersion == nil
+        case "codex":
+            guard o.agentVersion == nil || o.agentVersion == "0.160.0" else { return false }
+            if let s = o.seat {
+                return o.agentVersion == "0.160.0" && validSeatName(s)
+                    && (o.controllerCapabilities ?? []).isEmpty && o.qualificationFixture == nil
+            }
+            return true
         case "claude":
             // A dotted numeric version only. Controller capabilities pass
             // through: the guest broker enables them only for an
@@ -202,7 +207,9 @@ public enum AgentEnvironment {
     public static func brokerArguments(_ o: Options) -> [String] {
         var args = ["/pomar/agent-guest", "-environment", o.environment, "-session", o.session, "-incarnation", o.incarnation, "-source-sha", o.sourceSHA,
                     "-controller-capabilities", (o.controllerCapabilities ?? []).joined(separator: ",")]
-        if o.agent == "claude" {
+        if (o.agent ?? "codex") == "codex", let seat = o.seat {
+            args += ["-actor", "codex-seat", "-seat", seat, "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", o.agentVersion ?? ""]
+        } else if o.agent == "claude" {
             if let seat = o.seat {
                 args += ["-actor", "seat", "-seat", seat, "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", o.agentVersion ?? ""]
             } else {

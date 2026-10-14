@@ -148,7 +148,7 @@ func TestASeatComesOnlyFromASeatProfile(t *testing.T) {
 			c.Profiles["seat-zeocreator"] = p
 		},
 		"a top-level declaration": func(c *HostConfig) { c.SeatDeclarationSHA256 = strings.Repeat("d", 64) },
-		"a Codex seat": func(c *HostConfig) {
+		"an unpinned Codex seat": func(c *HostConfig) {
 			p := c.Profiles["seat-zeocreator"]
 			p.Agent, p.AgentVersion = "", ""
 			c.Profiles["seat-zeocreator"] = p
@@ -187,5 +187,23 @@ func TestASeatComesOnlyFromASeatProfile(t *testing.T) {
 	defer h.Close()
 	if cfg, _ := h.profileConfig("plain"); cfg.Seat != "" {
 		t.Fatal("a plain profile carried a seat")
+	}
+}
+
+func TestPinnedCodexSeatRetainsIdentityAndArchive(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := EnvironmentProfile{Base: root + "/base", ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: root + "/source", SourceSHA: strings.Repeat("b", 40), Agent: "codex", AgentVersion: "0.160.0", AgentArchive: root + "/codex.tar.gz", AgentArchiveSHA256: strings.Repeat("c", 64), Seat: "example", SeatDeclarationSHA256: strings.Repeat("d", 64)}
+	p.ImageRef = "example.invalid/image@" + p.ImageDigest
+	h, err := OpenHost(HostConfig{Root: root, MaxLive: 1, CPUs: 1, MemoryBytes: 512 << 20, Profiles: map[string]EnvironmentProfile{"seat-example": p}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	cfg, err := h.profileConfig("seat-example")
+	if err != nil || cfg.Agent != "codex" || cfg.AgentVersion != "0.160.0" || cfg.Seat != p.Seat || cfg.CodexArchiveSHA256 != p.AgentArchiveSHA256 || cfg.SeatDeclarationSHA256 != p.SeatDeclarationSHA256 {
+		t.Fatalf("lost Codex seat binding %+v %v", cfg, err)
 	}
 }
