@@ -107,3 +107,83 @@ func TestInputStatusUnsupportedWithoutAStateChannel(t *testing.T) {
 		t.Fatalf("no state channel: %v %+v", err, st)
 	}
 }
+
+// Layer 7's MEDIUM: an input ID is unique to the send that used it only
+// within ITS session. The dedup record inputStatus reads is keyed by
+// kind+principal+op alone, with no session in the key, so the SAME
+// principal reusing the SAME id against a DIFFERENT session (or just
+// genuinely never having sent it to this one) must still read unknown on
+// the session that never saw it -- not borrow aa's pending/yes answer
+// just because the same id string happened to exist somewhere for this
+// principal.
+func TestInputStatusDoesNotLeakAcrossSessions(t *testing.T) {
+	_, c := serve(t, root(t))
+	reqA := shell("op-cross-a", "aa", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
+	reqA.StateChannel = true
+	var madeA Created
+	if err := c.Do("POST", "/v1/sessions", reqA, &madeA); err != nil {
+		t.Fatalf("create aa: %v", err)
+	}
+	path := strings.TrimSpace(waitScreen(t, c, "aa", ".sock").Lines[0])
+
+	reqB := shell("op-cross-b", "bb", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
+	reqB.StateChannel = true
+	var madeB Created
+	if err := c.Do("POST", "/v1/sessions", reqB, &madeB); err != nil {
+		t.Fatalf("create bb: %v", err)
+	}
+
+	const sharedID = "shared-input-id"
+	if err := c.Do("POST", "/v1/sessions/aa/send", SendRequest{Operation: sharedID, Text: "hi\r"}, nil); err != nil {
+		t.Fatalf("send to aa: %v", err)
+	}
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ad := &fakeAdapter{conn: conn, rd: bufio.NewReader(conn)}
+	ad.report(t, AdapterReport{Accepted: sharedID})
+
+	var onA InputStatusResult
+	for end := time.Now().Add(5 * time.Second); onA.Accepted != "yes" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/aa/input?id="+sharedID, nil, &onA)
+	}
+	if onA.Accepted != "yes" {
+		t.Fatalf("aa should see its own id accepted: %+v", onA)
+	}
+
+	// bb never received this id at all: it must read unknown, not
+	// borrow aa's "yes" (or even "pending") just because the same
+	// principal used the same id string against a different session.
+	var onB InputStatusResult
+	if err := c.Do("GET", "/v1/sessions/bb/input?id="+sharedID, nil, &onB); err != nil {
+		t.Fatal(err)
+	}
+	if onB.Accepted != "unknown" {
+		t.Fatalf("an id never sent to bb leaked another session's acceptance: %+v", onB)
+	}
+}
+
+// Layer 7's HIGH: an ordinary send's maxSendBytes (64 KiB) check used to
+// run unconditionally, before Paste was ever consulted, so a paste's own,
+// far larger bound (maxPasteBytes, 8 MiB) was unreachable -- any paste
+// over 64 KiB was refused as too_large before getting anywhere near its
+// own check. This sends a payload well past maxSendBytes but comfortably
+// under maxPasteBytes, with Paste: true, and confirms it is written, not
+// refused.
+func TestPasteIsNotCappedAtAnOrdinarySendsBound(t *testing.T) {
+	_, c := serve(t, root(t))
+	req := shell("op-paste-cap", "echo-cap", "cat")
+	var made Created
+	if err := c.Do("POST", "/v1/sessions", req, &made); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Comfortably past maxSendBytes (64 KiB), comfortably under
+	// maxPasteBytes (8 MiB).
+	big := strings.Repeat("a", maxSendBytes+(1<<20))
+	var out OpResult
+	if err := c.Do("POST", "/v1/sessions/echo-cap/send", SendRequest{Operation: "paste-cap-1", Text: big, Paste: true}, &out); err != nil || out.Outcome != "written" {
+		t.Fatalf("a paste over maxSendBytes but under maxPasteBytes should be written, not capped at an ordinary send's bound: %v %+v", err, out)
+	}
+}

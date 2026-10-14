@@ -1148,7 +1148,16 @@ func (s *Server) inputStatus(w http.ResponseWriter, r *http.Request) {
 		// acceptance for any input, known or not, so that's the answer
 		// regardless of whether this exact ID was ever sent.
 		out.Accepted = "unsupported"
-	case known && rec != nil:
+	case known && rec != nil && rec.Session == t.ID:
+		// rec is keyed by kind+principal+op alone -- the SAME id, sent by
+		// the SAME principal to a DIFFERENT session (or to an earlier
+		// generation of this same name), is a different rec.Session than
+		// this lookup's t.ID. Without this check, an id sent only to
+		// session aa read as pending/yes on session bb too, as long as
+		// the same principal had used that id anywhere (layer 7's
+		// MEDIUM). An id genuinely unknown to this exact session now
+		// falls through to "unknown", never borrowing another session's
+		// answer.
 		if st, _ := t.Agent(); st.Accepted == id {
 			out.Accepted = "yes"
 		} else {
