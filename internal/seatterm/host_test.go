@@ -752,3 +752,48 @@ func TestTheScreenCutRendersTheLiveScreen(t *testing.T) {
 		t.Fatalf("screen %q", want.Lines)
 	}
 }
+
+// AttachHidden is a viewer in every way that matters for fan-out (it gets
+// output, falls behind and resnapshots the same as any other), but never
+// shows in Viewers, Presence, or the audit journal: sessiond's durable log
+// uses it precisely so it isn't mistaken for a real client.
+func TestAttachHiddenIsInvisibleButStillAViewer(t *testing.T) {
+	h, j := newHost(t)
+	s, _, err := h.Create("op-hidden", "operator", sh("printf hi; sleep 30"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	hc, snap, err := s.AttachHidden("log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Data) != 0 && !strings.Contains(string(snap.Data), "hi") {
+		t.Fatalf("hidden snapshot: %q", snap.Data)
+	}
+	if in := s.Info(); len(in.Viewers) != 0 {
+		t.Fatalf("a hidden client is listed: %+v", in.Viewers)
+	}
+	vc, _, err := s.Attach("viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vc.Detach()
+	if p := vc.Presence(); len(p.Viewers) != 1 || p.Viewers[0] != "viewer" {
+		t.Fatalf("presence lists the hidden client: %+v", p.Viewers)
+	}
+	collect(t, hc, nil, "hi") // it still receives output, the same as any viewer
+	if j.has("attach", "outcome", "ok") {
+		for _, r := range j.recs {
+			if r.Action == "attach" && r.Principal == "log" {
+				t.Fatal("a hidden attach was journaled")
+			}
+		}
+	}
+	hc.Detach()
+	for _, r := range j.recs {
+		if r.Action == "detach" && r.Principal == "log" {
+			t.Fatal("a hidden detach was journaled")
+		}
+	}
+}

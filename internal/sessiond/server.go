@@ -37,6 +37,7 @@ type Server struct {
 	hostname    string // where, for ls and show
 	uid         int
 	user        string
+	logBound    int64 // a session's durable log bound; a test shrinks it on its own instance
 
 	mu        sync.Mutex
 	named     map[string]*seatterm.TermSession // each name's latest generation
@@ -115,7 +116,7 @@ func Open(root string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{root: root, serve: newID(), started: time.Now().UTC(), lock: lock, uid: os.Geteuid(),
+	s := &Server{root: root, serve: newID(), started: time.Now().UTC(), lock: lock, uid: os.Geteuid(), logBound: defaultSessionLogBytes,
 		named: map[string]*seatterm.TermSession{}, reserved: map[string]bool{}, creates: map[string]string{}, ops: map[string]*opResult{},
 		gen: map[string]int{}, gens: map[string]int{}, adapters: map[string]*adapter{}, readyUsed: map[string]uint64{}}
 	s.hostname, _ = os.Hostname()
@@ -395,6 +396,8 @@ func (s *Server) mux() *http.ServeMux {
 			reply(w, http.StatusOK, t.Screen())
 		}
 	})
+	mux.HandleFunc("GET /v1/sessions/{name}/logs", s.logs)
+	mux.HandleFunc("GET /v1/sessions/by-id/{id}/logs", s.logsByID)
 	mux.HandleFunc("POST /v1/sessions/{name}/send", s.send)
 	mux.HandleFunc("POST /v1/sessions/{name}/stop", s.stop)
 	mux.HandleFunc("POST /v1/sessions/{name}/attach", s.attach)
@@ -566,6 +569,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		}
 		s.pruneExitedLocked()
 		s.mu.Unlock()
+		s.logSession(t, req.Operation)
 		if a != nil {
 			a.start(t)
 		}

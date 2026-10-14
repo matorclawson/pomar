@@ -35,7 +35,9 @@ So a console that speaks to one speaks to both.
   service held and never saw end as out of its reach (`unrecovered` in
   `pomar session ls -json`). It never says they exited: a program can outlive
   the service that started it. Surviving a restart isn't provided, and isn't
-  promised.
+  promised. **Its durable log is the one exception:** the bytes already
+  captured stay on disk, and are readable by the session's exact ID, even
+  once a restarted service knows nothing else about it.
 - **The journal is metadata only:** who created, entered, controlled,
   wrote to or stopped which session, and when. It never holds input, screens,
   commands or their arguments.
@@ -63,6 +65,7 @@ pomar session serve [-root DIR]
 - **The root holds:**
   - `sessions.sock`, mode 0600;
   - `journal.jsonl`, appended and synced line by line;
+  - `logs/ID.log`, one durable log per session (below), private, append-only;
   - `serve.lock`.
 
 ## Commands
@@ -76,7 +79,9 @@ Every command takes `-root`. Everything but `attach` prints JSON (`screen` and
 | `pomar session ls [-json]` | Lists every session, and those an earlier service held (`unrecovered`). |
 | `pomar session show NAME` | One session's state (below). |
 | `pomar session screen [-json] NAME` | The current screen as text rows. With `-json`, also the cursor, the title and the output offset. |
+| `pomar session logs [-from N] [-limit N] [-o PATH] NAME` | The session's durable log, paged (below). To stdout, or `-o PATH`. |
 | `pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME [--] TEXT` | Writes TEXT as the program's input (below). `-enter` adds a carriage return. After `--`, TEXT may begin with a dash. |
+| `pomar session paste -id OP [-file PATH] [-take] [-raw] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME` | Sends a file's, or stdin's, whole content as one write (below). |
 | `pomar session attach [-view] [-take] [-title=false] NAME` | Enters the session's terminal (see below). |
 | `pomar session stop -id OP NAME` | Stops the program, and reads back its process group (below). |
 
@@ -103,6 +108,29 @@ Every command takes `-root`. Everything but `attach` prints JSON (`screen` and
 
 Nothing else of the caller's environment reaches it. Its window is your
 terminal's size, or 80x24.
+
+### Logs
+
+A session's output is retained live only in memory (bounded, and only
+reachable by attaching). Its log is durable: every byte the program has
+printed, from the moment the session was created, on disk, whether or not
+anything was ever attached. A restarted service forgets every name, but not
+the logs on disk: `pomar session logs` by name works only for a session this
+service still knows; a log from before a restart is reachable by its exact
+session ID (`ls -json`'s `unrecovered` gives it), over the same JSON API at
+`/v1/sessions/by-id/ID/logs`, not yet a CLI verb of its own.
+
+- **It's raw bytes,** the same ones any attached client would see: never
+  JSON, never re-rendered.
+- **It's paged.** `-limit` bounds one read (1 MiB by default and at most);
+  `-from` is the byte offset to continue from. Past the end of what's
+  retrieved, stderr says so, with the offset to continue from.
+- **It's bounded, per session** (64 MiB). Past the bound, further output
+  isn't logged; this is recorded once, in the journal, metadata only, never
+  inside the log itself.
+- **It's never the audit journal.** The journal stays who did what, when; the
+  log is exactly the program's bytes, with the same "not claimed free of
+  secrets" caveat as a screen read.
 
 ### Sending
 
@@ -137,6 +165,24 @@ while a person is typing at a prompt; that is what tmux's send-keys does too.
 | `input_id` | the send's operation ID, which the adapter is told |
 | `epoch` | the grant epoch after the send |
 | `outcome` | `written`, `accepted` (with `-accept-wait`, once confirmed), `partial` (some bytes reached the program, and nothing is resent) or `uncertain` (the program didn't read in time) |
+
+### Pasting
+
+A paste is a big send, not a separate wire primitive: `pomar session paste`
+reads a whole payload at once (`-file PATH`, or stdin) and writes it as a
+single send, with the same fencing, control-taking, `-when-ready` and reply
+shape as `send`. It invents nothing of its own: a huge paste that the
+program can't keep up with reports `partial`, exactly as a huge `send` would.
+
+- **It's bracketed by default:** wrapped in `ESC[200~` … `ESC[201~`, so a
+  program that supports bracketed paste treats it as one paste, not
+  per-character typing (an editor's auto-indent, say, usually reacts
+  differently to a paste). `-raw` sends the payload as it is.
+- **It's bounded** at 8 MiB; over that, it is refused (exit 2), and nothing
+  is sent.
+- **Fencing is identical to `send`'s:** `-session`/`-epoch` refuse it as
+  stale (exit 7) if the session changed since you read it; a stale paste
+  writes nothing, same as a stale send.
 
 ### Stopping
 

@@ -35,6 +35,9 @@ const (
 	exitUncertain = 10 // a stop could not confirm the leader or its group gone: it may still be running
 )
 
+// maxPasteBytes bounds one paste's payload; past it, nothing is sent.
+const maxPasteBytes = 8 << 20
+
 const sessionUsage = `usage:
   pomar session serve [-root DIR]   run this user's session service (in the foreground)
   pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] NAME -- /ABS/PROGRAM ARGS...
@@ -42,9 +45,13 @@ const sessionUsage = `usage:
   pomar session ls [-json]
   pomar session show NAME           the session's state, as JSON
   pomar session screen [-json] NAME the current screen, as text
+  pomar session logs [-from N] [-limit N] [-o PATH] NAME
+                                    the session's durable log, paged; written to PATH, or stdout
   pomar session send -id OP [-enter] [-take] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME [--] TEXT
                                     -session/-epoch: refused as stale if the session changed since you read it
                                     -when-ready: written once the session's adapter reports it waiting for input
+  pomar session paste -id OP [-file PATH] [-take] [-raw] [-session ID] [-epoch N] [-when-ready [-ready-wait D]] [-accept-wait D] NAME
+                                    sends a file's (or stdin's) whole content as one write, bracketed as a paste unless -raw
   pomar session attach [-view] [-take] [-title=false] NAME
                                     the session's terminal; Ctrl-] detaches, and the program keeps running
   pomar session stop -id OP NAME    the program's leader and process group are read back
@@ -86,6 +93,11 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		rwait  = fs.Duration("ready-wait", 0, "how long -when-ready waits (default 30s, at most 10m)")
 		await  = fs.Duration("accept-wait", 0, "how long to wait, after the write, for the adapter to report the input accepted")
 		title  = fs.Bool("title", true, "show your role and the agent state in the terminal's title while attached")
+		from   = fs.Int64("from", 0, "logs: the byte offset to start from")
+		limit  = fs.Int64("limit", 0, "logs: at most this many bytes (default and max 1 MiB)")
+		out    = fs.String("o", "", "logs: write to this path instead of stdout")
+		file   = fs.String("file", "", "paste: read the payload from this file, instead of stdin")
+		raw    = fs.Bool("raw", false, "paste: send the payload as is, without bracketed-paste markers")
 		envs   multiFlag
 	)
 	fs.Var(&envs, "env", "K=V for the program's environment (repeatable); TERM, HOME, PATH and LANG come from yours unless set")
@@ -207,6 +219,40 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			lines = lines[:len(lines)-1] // the blank rows below the last text
 		}
 		fmt.Fprintln(stdout, strings.Join(lines, "\n"))
+	case "logs":
+		if !need(1, "logs names its session") {
+			return 2
+		}
+		q := url.Values{}
+		if *from > 0 {
+			q.Set("from", fmt.Sprintf("%d", *from))
+		}
+		if *limit > 0 {
+			q.Set("limit", fmt.Sprintf("%d", *limit))
+		}
+		path := "/v1/sessions/" + url.PathEscape(pos[0]) + "/logs"
+		if len(q) > 0 {
+			path += "?" + q.Encode()
+		}
+		chunk, err := c.RawGet(path)
+		if rc := sessionExit(verb, "", err, stderr); rc != 0 {
+			return rc
+		}
+		w := io.Writer(stdout)
+		if *out != "" {
+			f, err := os.Create(*out)
+			if err != nil {
+				fmt.Fprintln(stderr, "pomar session logs:", err)
+				return 1
+			}
+			defer f.Close()
+			w = f
+		}
+		w.Write(chunk.Data)
+		if chunk.Truncated {
+			fmt.Fprintf(stderr, "pomar session logs: %d of %d bytes from offset %d; more follows, -from %d for the rest\n",
+				len(chunk.Data), chunk.Size, chunk.From, chunk.From+int64(len(chunk.Data)))
+		}
 	case "send":
 		if !need(2, "send names its session and its text") || !needOp() {
 			return 2
@@ -214,6 +260,48 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		text := pos[1]
 		if *enter {
 			text += "\r"
+		}
+		req := sessiond.SendRequest{Operation: *op, Text: text, Take: *take, Session: *gen, WhenReady: *ready,
+			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds())}
+		if *epoch >= 0 {
+			e := uint64(*epoch)
+			req.Epoch = &e
+		}
+		var out sessiond.OpResult
+		if rc := call("POST", "/v1/sessions/"+url.PathEscape(pos[0])+"/send", req, &out); rc != 0 {
+			return rc
+		}
+		printJSON(out)
+	case "paste":
+		if !need(1, "paste names its session") || !needOp() {
+			return 2
+		}
+		var src io.Reader = stdin
+		if *file != "" {
+			f, err := os.Open(*file)
+			if err != nil {
+				fmt.Fprintln(stderr, "pomar session paste:", err)
+				return 1
+			}
+			defer f.Close()
+			src = f
+		}
+		payload, err := io.ReadAll(io.LimitReader(src, maxPasteBytes+1))
+		if err != nil {
+			fmt.Fprintln(stderr, "pomar session paste:", err)
+			return 1
+		}
+		if len(payload) > maxPasteBytes {
+			fmt.Fprintf(stderr, "pomar session paste: the payload is over the %d-byte bound; nothing was sent\n", maxPasteBytes)
+			return 2
+		}
+		// Bracketed, unless -raw: a receiving program that supports it treats
+		// this as one paste, not per-character typing. It goes through the
+		// same send as -- a big send, fenced and acknowledged the same way;
+		// paste invents no wire primitive of its own.
+		text := string(payload)
+		if !*raw {
+			text = "\x1b[200~" + text + "\x1b[201~"
 		}
 		req := sessiond.SendRequest{Operation: *op, Text: text, Take: *take, Session: *gen, WhenReady: *ready,
 			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds())}

@@ -104,9 +104,11 @@ pomar session stop -id stop-1 build
 - **Fence a send on what you read.** `show` gives the session's `id` and `epoch`: `send -session ID -epoch N` is refused as stale (exit 7), and writes nothing, if the name has a new generation or control changed since.
 - **A send is raw unless you say `-when-ready`,** and its reply says `"mode": "raw"`. A session made with `-state` gives its adapter a state channel. `-when-ready` then waits for the adapter to report the program waiting for input. Without one, `-when-ready` exits 8 and writes nothing. Its reply tells `queued`, `written` and `accepted` apart: only the adapter can say `accepted`.
 - **`stop` reads back** the leader's reap and whether anything remains in its process group.
+- **`logs` gives a session's durable output** (`pomar session logs NAME`), paged (`-from`, `-limit`), on disk from creation whether or not anything was ever attached. It survives a restart of the service, reachable by the session's exact ID even once its name is forgotten; nothing else here does.
+- **`paste` sends a whole file or stdin as one write** (`pomar session paste -id OP [-file PATH] NAME`), bracketed as a paste (`ESC[200~`…`ESC[201~`) unless `-raw`, through the same fenced send as `send`: it invents nothing of its own.
 - **Exit codes:** 3, no service; 4, no such name; 5, refused as it stands; 6, the program exited; 7, stale; 8, unsupported; 9, not ready in time.
 - **Agent state is only what an adapter reports,** never the screen, and is `unknown` without one. The adapter contract is in docs/sessions.md.
-- **Sessions don't survive** a restart of the service, or a reboot.
+- **Sessions don't survive** a restart of the service, or a reboot; their durable logs do.
 - **A screen can show a secret.** Read it as you would read the terminal.
 
 See [docs/sessions.md](docs/sessions.md), and [docs/sessions-protocol.md](docs/sessions-protocol.md) for the wire protocol.

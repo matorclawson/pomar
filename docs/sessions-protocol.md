@@ -27,6 +27,8 @@ protocol, so a client written to this document speaks to both.
 | `POST /v1/sessions` | a create | 201 a new session, or 200 the one this operation already made |
 | `GET /v1/sessions/NAME` | | a session |
 | `GET /v1/sessions/NAME/screen` | | its screen |
+| `GET /v1/sessions/NAME/logs?from=N&limit=N` | | a log chunk |
+| `GET /v1/sessions/by-id/ID/logs?from=N&limit=N` | | a log chunk, by exact ID, reachable after a restart |
 | `POST /v1/sessions/NAME/send` | a send | an operation result |
 | `POST /v1/sessions/NAME/stop` | a stop | an operation result |
 | `POST /v1/sessions/NAME/attach?view=1&take=1` | | an upgrade to `pomar-terminal/v2` |
@@ -90,6 +92,33 @@ Whether they still run isn't known; they are never reported as exited.
 
 `offset` is the output offset the screen reflects.
 
+### A log chunk
+
+`GET .../logs` answers raw bytes, never JSON, with headers naming the whole
+log's size and this chunk's bounds:
+
+```
+X-Pomar-Log-Size: 12345
+X-Pomar-Log-From: 0
+X-Pomar-Log-Truncated: true
+
+<body: raw bytes, at most 1 MiB>
+```
+
+- **`from`** (query, default 0) is the byte offset to start from.
+- **`limit`** (query, default and max 1 MiB) bounds this read; a longer log
+  is paged, never answered whole in one reply.
+- **`X-Pomar-Log-Truncated`** is `true` when more of the log follows this
+  chunk: read again with `from` at `X-Pomar-Log-From` plus the body's length.
+- **The log is exactly the program's own bytes,** from the session's
+  creation, whether or not anything was ever attached: never JSON-wrapped,
+  never re-rendered, and bounded per session at 64 MiB (past it, further
+  output isn't logged; this closes without ever growing past its bound).
+- **By name,** it answers only for a session this service still knows (as
+  `screen` and `show` do). **By ID,** it answers for any log file on disk,
+  including one from before this service's own restart, since the log
+  survives a restart even though the session itself doesn't.
+
 ### A send
 
 ```json
@@ -107,6 +136,11 @@ Whether they still run isn't known; they are never reported as exited.
   - A session without a state channel is refused as `unsupported`.
 - **`accept_wait_ms`** waits, after the write, for the adapter to report the
   input accepted.
+
+A paste (`pomar session paste`) is this same request, with `text` wrapped in
+bracketed-paste markers (`ESC[200~` … `ESC[201~`) by the client before it's
+sent: the service has no separate paste primitive, and never interprets
+`text` either way.
 
 ### A stop
 

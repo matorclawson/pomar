@@ -646,6 +646,9 @@ func (s *TermSession) Info() SessionInfo {
 		in.Controller = s.controller.Principal
 	}
 	for c := range s.viewers {
+		if c.hidden {
+			continue
+		}
 		in.Viewers = append(in.Viewers, c.Principal)
 	}
 	sort.Strings(in.Viewers)
@@ -723,21 +726,45 @@ func (s *TermSession) Screen() ScreenText {
 // Attach adds a viewing client and returns it with its snapshot. Viewing
 // grants nothing: no input, no resize.
 func (s *TermSession) Attach(principal string) (*Client, Snapshot, error) {
+	return s.attach(principal, false)
+}
+
+// AttachHidden is Attach for the host's own internal plumbing (a durable
+// log, say): the same non-blocking fan-out as any viewer, but uncounted
+// against MaxViewers, never listed in Viewers or Presence, and never
+// journaled. It grants nothing a visible viewer doesn't either.
+func (s *TermSession) AttachHidden(principal string) (*Client, Snapshot, error) {
+	return s.attach(principal, true)
+}
+
+func (s *TermSession) attach(principal string, hidden bool) (*Client, Snapshot, error) {
 	op := newID()
-	if err := s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "intent", Principal: principal, Session: s.ID}); err != nil {
-		return nil, Snapshot{}, ErrAudit
+	if !hidden {
+		if err := s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "intent", Principal: principal, Session: s.ID}); err != nil {
+			return nil, Snapshot{}, ErrAudit
+		}
 	}
 	// The outcome is journaled after the lock is released: a slow journal
 	// never holds up the PTY's reader, a revocation or another client.
 	s.mu.Lock()
-	if len(s.viewers) >= MaxViewers {
-		s.mu.Unlock()
-		s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "refused", Reason: "viewer bound"})
-		return nil, Snapshot{}, ErrTooMany
+	if !hidden {
+		visible := 0
+		for v := range s.viewers {
+			if !v.hidden {
+				visible++
+			}
+		}
+		if visible >= MaxViewers {
+			s.mu.Unlock()
+			s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "refused", Reason: "viewer bound"})
+			return nil, Snapshot{}, ErrTooMany
+		}
 	}
-	c := &Client{Principal: principal, s: s, events: make(chan Event, viewerQueue), signal: make(chan struct{}, 1)}
-	for v := range s.viewers {
-		v.notify(Event{Kind: EventState}) // presence: one more client
+	c := &Client{Principal: principal, s: s, hidden: hidden, events: make(chan Event, viewerQueue), signal: make(chan struct{}, 1)}
+	if !hidden {
+		for v := range s.viewers {
+			v.notify(Event{Kind: EventState}) // presence: one more client
+		}
 	}
 	s.viewers[c] = struct{}{}
 	if s.exited {
@@ -745,7 +772,9 @@ func (s *TermSession) Attach(principal string) (*Client, Snapshot, error) {
 	}
 	snap := s.snapshotLocked()
 	s.mu.Unlock()
-	s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "ok"})
+	if !hidden {
+		s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "ok"})
+	}
 	return c, snap, nil
 }
 
@@ -769,6 +798,7 @@ type Event struct {
 type Client struct {
 	Principal string
 	s         *TermSession
+	hidden    bool // the host's own internal plumbing: never listed, never journaled
 	events    chan Event
 	signal    chan struct{} // gap and state notices, which never queue behind output
 	behind    bool
@@ -1004,6 +1034,9 @@ func (c *Client) Detach() {
 		}
 	}
 	s.mu.Unlock()
+	if c.hidden {
+		return // the host's own internal plumbing: never journaled, like its attach
+	}
 	if held {
 		s.host.record(AuditRecord{Operation: newID(), Action: "release", Phase: "outcome", Principal: c.Principal, Session: s.ID, Outcome: "ok"})
 	}
@@ -1141,6 +1174,9 @@ func (c *Client) Presence() PresenceMsg {
 	defer s.mu.Unlock()
 	p := PresenceMsg{Session: s.ID, Viewers: []string{}, Epoch: s.epoch, You: "viewer"}
 	for v := range s.viewers {
+		if v.hidden {
+			continue
+		}
 		p.Viewers = append(p.Viewers, v.Principal)
 	}
 	sort.Strings(p.Viewers)
