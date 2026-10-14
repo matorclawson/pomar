@@ -3,6 +3,7 @@ package sessiond
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,9 +46,20 @@ type Server struct {
 // gets it back, and nothing is done twice.
 type opResult struct {
 	done    bool
+	fp      string // what the operation was asked to do, so a retry must ask the same thing
 	Session string `json:"session"`
 	Outcome string `json:"outcome"`
 	Detail  string `json:"detail,omitempty"`
+}
+
+// opFingerprint binds an operation's dedupe record to exactly what it was
+// asked to do: its target and its content. Without this, the same ID reused
+// against a different session, or with different text, silently replays
+// the first call's result onto the second target instead of being refused
+// (the Architect's review of #128's stack, H1).
+func opFingerprint(parts ...string) string {
+	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(h[:])
 }
 
 // Bounds on remembered operations and on ended sessions still listed.
@@ -402,9 +415,30 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if created {
+		// The host made a fresh program. s.creates is never pruned to match
+		// the host's own, independently bounded memory of an operation
+		// (internal/seatterm/host.go's byOp), so a retry can reach here
+		// believing it's a retry (the running-name check above was
+		// skipped) when the host's own record of the original operation
+		// has since been evicted and it genuinely started a second one.
+		// Caught here, not before: if the name is already held by a
+		// DIFFERENT running session, this fresh one can never be named
+		// (overwriting s.named would orphan the real holder, running but
+		// unreachable by name), so it's stopped and refused instead,
+		// exactly as a fresh create is refused when the name is taken
+		// (the Architect's review of #128's stack, H2).
+		s.mu.Lock()
+		held := s.named[req.Name]
+		s.mu.Unlock()
+		if held != nil && held.ID != t.ID && held.Info().Running {
+			s.host.Terminate(req.Operation, p, t.ID)
+			refuse(w, http.StatusConflict, KindConflict, "a session named "+req.Name+" is running; stop it, or choose another name")
+			return
+		}
 		s.j.write(Record{AuditRecord: seatterm.AuditRecord{Operation: req.Operation, Action: "name", Phase: "outcome", Principal: p, Session: t.ID, Outcome: "ok"}, Name: req.Name})
 		s.mu.Lock()
 		s.named[req.Name] = t
+		s.creates[key] = req.Name // refreshed, so a later retry keeps trusting the current holder
 		s.pruneExitedLocked()
 		s.mu.Unlock()
 	}
@@ -432,14 +466,22 @@ func (s *Server) pruneExitedLocked() {
 
 // begin claims an operation, or returns what it already did: a retry never
 // acts twice.
-func (s *Server) begin(kind, p, op string) (*opResult, bool) {
+// begin claims an operation under its fingerprint, or returns what it
+// already did: a retry asking the same thing never acts twice. A retry
+// asking something else (a different target, text or flag) is refused as
+// a conflict, exactly as create already refuses a mismatched spec: the ID
+// is never reused against a different operation.
+func (s *Server) begin(kind, p, op, fp string) (*opResult, bool, error) {
 	key := kind + "\x00" + p + "\x00" + op
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if r, ok := s.ops[key]; ok {
-		return r, false
+		if r.fp != fp {
+			return nil, false, errOpConflict
+		}
+		return r, false, nil
 	}
-	r := &opResult{}
+	r := &opResult{fp: fp}
 	s.ops[key] = r
 	s.opOrder = append(s.opOrder, key)
 	for len(s.opOrder) > maxOps {
@@ -449,8 +491,12 @@ func (s *Server) begin(kind, p, op string) (*opResult, bool) {
 		delete(s.ops, s.opOrder[0])
 		s.opOrder = s.opOrder[1:]
 	}
-	return r, true
+	return r, true, nil
 }
+
+// errOpConflict is begin's refusal when an operation ID is reused against a
+// different target, text or flag than its first use.
+var errOpConflict = errors.New("this operation ID already did something else; it can't be reused for a different send or stop")
 
 // drop forgets an operation that did nothing, so a retry decides afresh.
 func (s *Server) drop(r *opResult) {
@@ -497,7 +543,12 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principalOf(r)
-	res, fresh := s.begin("send", p, req.Operation)
+	fp := opFingerprint(r.PathValue("name"), req.Text, strconv.FormatBool(req.Take))
+	res, fresh, err := s.begin("send", p, req.Operation, fp)
+	if err != nil {
+		refuse(w, http.StatusConflict, KindConflict, err.Error())
+		return
+	}
 	if !fresh {
 		s.recorded(w, res)
 		return
@@ -565,7 +616,12 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principalOf(r)
-	res, fresh := s.begin("stop", p, req.Operation)
+	fp := opFingerprint(r.PathValue("name"))
+	res, fresh, err := s.begin("stop", p, req.Operation, fp)
+	if err != nil {
+		refuse(w, http.StatusConflict, KindConflict, err.Error())
+		return
+	}
 	if !fresh {
 		s.recorded(w, res)
 		return
