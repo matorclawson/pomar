@@ -197,10 +197,17 @@ single send, with the same fencing, control-taking, `-when-ready` and reply
 shape as `send`. It invents nothing of its own: a huge paste that the
 program can't keep up with reports `partial`, exactly as a huge `send` would.
 
-- **It's bracketed by default:** wrapped in `ESC[200~` … `ESC[201~`, so a
-  program that supports bracketed paste treats it as one paste, not
-  per-character typing (an editor's auto-indent, say, usually reacts
-  differently to a paste). `-raw` sends the payload as it is.
+- **It's bracketed by default, server-side:** the service itself, not the
+  CLI, refuses any ESC byte (`0x1b`) or C1 CSI introducer (`0x9b`, or its
+  UTF-8 form `0xC2 0x9B`) in the payload, then wraps it in `ESC[200~` …
+  `ESC[201~`, so a program that supports bracketed paste treats it as one
+  paste, not per-character typing (an editor's auto-indent, say, usually
+  reacts differently to a paste) — and so a non-CLI caller can't bypass the
+  refusal by constructing the request itself. **`-raw` sends the payload
+  exactly as given: no scan, no bracketing, and it can inject arbitrary
+  keystrokes or control sequences.** Use it only once you've decided that's
+  safe for this payload; every `-raw` paste is journaled, so a record exists
+  that someone knowingly chose it.
 - **It's bounded** at 8 MiB; over that, it is refused (exit 2), and nothing
   is sent.
 - **Fencing is identical to `send`'s:** `-session`/`-epoch` refuse it as

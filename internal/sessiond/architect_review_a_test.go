@@ -300,3 +300,55 @@ func TestPasteRefusesOverItsOwnBound(t *testing.T) {
 		t.Fatalf("an over-bound paste wasn't refused as too large: %v", err)
 	}
 }
+
+// zeocouncil's correction on cee2326: decodeLimit/sendBodyLimit applied the
+// paste-sized body allowance (maxPasteBytes*8) to EVERY send, not only
+// Paste ones, so a plain send's body could be as large as a paste's before
+// anything about Paste was even consulted. An ordinary send (Paste unset)
+// must still be held to decodeBodyLimit (1 MiB), by the raw body byte
+// count actually read, regardless of how small req.Text ends up being.
+func TestOrdinarySendRefusesABodyOverTheOrdinaryLimit(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-5", "echo5", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	// Paste is left false: an ordinary send whose own JSON body (dominated
+	// by Text) is well past decodeBodyLimit but still under sendBodyLimit,
+	// so the bug let it through as a "paste-sized" body for a plain send.
+	big := strings.Repeat("x", decodeBodyLimit+4096)
+	err := c.Do("POST", "/v1/sessions/echo5/send", SendRequest{Operation: "big-1", Text: big}, nil)
+	if kindOf(err) != KindTooLarge {
+		t.Fatalf("an ordinary send's over-limit body wasn't refused: %v", err)
+	}
+}
+
+// The C1 CSI introducer's UTF-8 encoding (0xC2 0x9B, what a JSON \u009b
+// escape actually produces on the wire) ends bracketed-paste mode exactly
+// as ESC[201~ does on a terminal that honours the 8-bit form directly: the
+// rest of the payload after it would be delivered as typed input, not
+// pasted text. It must be refused exactly like a literal ESC byte.
+//
+// A lone raw 0x9b byte is NOT tested here: it's invalid UTF-8 on its own,
+// and this client's own json.Marshal (encoding/json, Go stdlib) replaces
+// any invalid UTF-8 in a string with U+FFFD before the request ever
+// leaves the process -- confirmed directly (marshaling "\x9b" alone
+// produces the 3-byte U+FFFD, not 0x9b). So a lone 0x9b can never reach
+// the server over this JSON transport; pasteText's raw-byte check for it
+// is defense in depth for a caller that isn't going through encoding/json
+// (or a future non-JSON transport), not something this HTTP-API test can
+// exercise.
+func TestPasteRefusesAC1CSIIntroducer(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-6", "echo6", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	payload := "benign \xc2\x9b INJECTED tail" // U+009B's UTF-8 encoding
+	err := c.Do("POST", "/v1/sessions/echo6/send", SendRequest{Operation: "paste-6", Text: payload, Paste: true}, nil)
+	if kindOf(err) != KindUsage {
+		t.Fatalf("a payload with a C1 CSI introducer (%q) wasn't refused: %v", payload, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if scr := screenOf(t, c, "echo6"); strings.Contains(strings.Join(scr.Lines, "\n"), "benign") {
+		t.Fatalf("the refused C1 payload reached the program anyway: %q", scr.Lines)
+	}
+}

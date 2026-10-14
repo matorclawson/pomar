@@ -182,10 +182,23 @@ X-Pomar-Log-Truncated: true
 - **`accept_wait_ms`** waits, after the write, for the adapter to report the
   input accepted.
 
-A paste (`pomar session paste`) is this same request, with `text` wrapped in
-bracketed-paste markers (`ESC[200~` … `ESC[201~`) by the client before it's
-sent: the service has no separate paste primitive, and never interprets
-`text` either way.
+A paste (`pomar session paste`) is this same request, with `paste: true`:
+the service, not the client, refuses any ESC byte (`0x1b`) or C1 CSI
+introducer (`0x9b`, or its UTF-8 encoding `0xC2 0x9B`) in `text`, then wraps
+it in bracketed-paste markers (`ESC[200~` … `ESC[201~`) itself. This runs
+server-side so a caller hitting this route directly, not through the CLI,
+gets the same refusal: a payload with one of those bytes embedded could
+otherwise end bracketed-paste mode early and have the rest of the payload
+delivered to the program as if typed, not pasted — the #128-stack BLOCKER
+this closes.
+
+- **`raw: true`**, with `paste`, sends `text` exactly as given: no scan, no
+  bracketing. **This can inject arbitrary keystrokes and control
+  sequences** — anything the program's terminal would act on if typed — and
+  is for a caller who has already decided that risk is acceptable for this
+  payload. Every raw paste is journaled (`action: "paste"`, `reason: "raw
+  paste: no ESC scan or bracketing"`), so a record exists that someone
+  knowingly chose it.
 
 ### A stop
 

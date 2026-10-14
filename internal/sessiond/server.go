@@ -1,6 +1,7 @@
 package sessiond
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -398,18 +399,43 @@ const (
 // a line or a short command.
 const maxPasteBytes = 8 << 20
 
+// errPasteEscape is a paste refused for carrying a byte that could end
+// bracketed-paste mode early and have the rest of the payload typed, not
+// pasted.
+var errPasteEscape = errors.New("the payload contains an ESC byte (0x1b) or a C1 CSI introducer (0x9b); a paste is never bracketed around one, since that is exactly how a payload could end bracketed-paste mode early and have the rest typed. Use -raw if you mean to send it exactly as given")
+
 // pasteText applies Paste/Raw to payload: unless raw, it refuses any ESC
-// byte (0x1b) and otherwise wraps it in bracketed-paste markers. The scan
-// runs on the payload exactly as given, before any wrapping of its own, so
-// it can never be fooled by markers already present: an ESC byte anywhere
-// refuses the whole payload, including one that is itself part of an
-// attempted ESC[200~/ESC[201~ sequence.
+// byte (0x1b, the 7-bit CSI introducer) or 0x9b (the 8-bit C1 CSI
+// introducer some terminals honour directly), and otherwise wraps the
+// payload in bracketed-paste markers. The scan is a raw byte scan, not a
+// rune scan: a lone 0x9b is invalid UTF-8 on its own and a rune-based scan
+// (e.g. strings.IndexAny) would silently miss it, decoding it as
+// RuneError instead of matching. It also refuses 0xC2 0x9B, the UTF-8
+// encoding of U+009B, the shape a JSON \u009b escape actually produces on
+// the wire -- confirmed directly that this is the ONLY shape reachable
+// over this transport: encoding/json's Marshal replaces any invalid UTF-8
+// in a Go string, including a lone 0x9b, with U+FFFD before the request
+// ever leaves the client, so the raw-byte check here is defense in depth
+// for a caller that reaches this function some other way (in-process, or
+// a future non-JSON transport), not something the HTTP/JSON client path
+// can actually trigger today. KNOWN GAP: a C1 byte can be spelled other
+// ways a conforming UTF-8 decoder would still accept as U+009B's canonical
+// encoding is just this one, so this is believed complete for straight
+// UTF-8, but an adapter-side encoding quirk upstream of this function is
+// not re-verified here. The scan runs on the payload exactly as given,
+// before any wrapping of its own, so it can never be fooled by markers
+// already present.
 func pasteText(payload string, raw bool) (string, error) {
 	if raw {
 		return payload, nil
 	}
-	if strings.IndexByte(payload, 0x1b) >= 0 {
-		return "", errors.New("the payload contains an ESC byte (0x1b); a paste is never bracketed around one, since that is exactly how a payload could end bracketed-paste mode early and have the rest typed. Use -raw if you mean to send it exactly as given")
+	for i := 0; i < len(payload); i++ {
+		if c := payload[i]; c == 0x1b || c == 0x9b {
+			return "", errPasteEscape
+		}
+	}
+	if strings.Contains(payload, "\xc2\x9b") {
+		return "", errPasteEscape
 	}
 	return "\x1b[200~" + payload + "\x1b[201~", nil
 }
@@ -548,6 +574,36 @@ func decodeLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) boo
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		refuse(w, http.StatusBadRequest, KindUsage, "malformed request: "+err.Error())
+		return false
+	}
+	return true
+}
+
+// decodeSend reads a send's body under sendBodyLimit (the paste-sized
+// allowance), decodes it, and then -- unless the request says Paste -- also
+// holds it to the ordinary decodeBodyLimit by the RAW BYTE COUNT actually
+// read, not by anything the decoded fields claim. A plain send can't get
+// the paste-sized allowance by leaving Paste unset and hoping Text's own
+// length escapes notice: the body itself is bounded before Paste is ever
+// consulted for its effect on Text.
+func decodeSend(w http.ResponseWriter, r *http.Request, v *SendRequest) bool {
+	b, err := io.ReadAll(io.LimitReader(r.Body, sendBodyLimit+1))
+	if err != nil {
+		refuse(w, http.StatusBadRequest, KindUsage, "malformed request: "+err.Error())
+		return false
+	}
+	if int64(len(b)) > sendBodyLimit {
+		refuse(w, http.StatusBadRequest, KindTooLarge, fmt.Sprintf("a send's body is bounded at %d bytes", sendBodyLimit))
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		refuse(w, http.StatusBadRequest, KindUsage, "malformed request: "+err.Error())
+		return false
+	}
+	if !v.Paste && int64(len(b)) > decodeBodyLimit {
+		refuse(w, http.StatusBadRequest, KindTooLarge, fmt.Sprintf("an ordinary send's body is bounded at %d bytes; a paste (Paste: true) gets the larger allowance", decodeBodyLimit))
 		return false
 	}
 	return true
@@ -858,17 +914,26 @@ func awaitAccepted(t *seatterm.TermSession, id string, wait time.Duration) bool 
 // only its adapter can say.
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	var req SendRequest
-	if !decodeLimit(w, r, &req, sendBodyLimit) {
+	if !decodeSend(w, r, &req) {
 		return
 	}
 	if req.Operation == "" || req.Text == "" || req.ReadyWaitMS < 0 || req.AcceptWaitMS < 0 {
 		refuse(w, http.StatusBadRequest, KindUsage, "a send needs an operation ID and its text, and waits of 0 ms or more")
 		return
 	}
+	p := principalOf(r)
 	if req.Paste {
 		if len(req.Text) > maxPasteBytes {
 			refuse(w, http.StatusBadRequest, KindTooLarge, fmt.Sprintf("a paste is bounded at %d bytes; this one is %d; nothing was sent", maxPasteBytes, len(req.Text)))
 			return
+		}
+		if req.Raw {
+			// -raw sends unscanned, unbracketed bytes: a record that
+			// someone knowingly chose that exists regardless of whether
+			// the payload actually held an escape, matching the audit
+			// every other consequential op already gets (create's name,
+			// a terminate, a control grant).
+			s.j.write(Record{AuditRecord: seatterm.AuditRecord{Operation: req.Operation, Action: "paste", Phase: "intent", Principal: p, Session: r.PathValue("name"), Reason: "raw paste: no ESC scan or bracketing"}})
 		}
 		wrapped, err := pasteText(req.Text, req.Raw)
 		if err != nil {
@@ -877,7 +942,6 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Text = wrapped
 	}
-	p := principalOf(r)
 	fp := opFingerprint(r.PathValue("name"), req.Text, strconv.FormatBool(req.Take))
 	res, fresh, err := s.begin("send", p, req.Operation, fp)
 	if err != nil {
