@@ -91,13 +91,17 @@ func listenState(path, root string, j *journal) (*adapter, error) {
 
 // start binds the channel to its session, then serves it: a connection made
 // before, while the program starts, waits in the backlog. It closes when
-// the session's program has exited. Its op journal opens here too, now
-// that the session's ID (its filename) is known; a failure to open it
-// never blocks the session itself, only the begin/finish/status calls an
-// adapter makes, which then answer a plain error.
+// the session's program has exited. Its op journal opens here too, keyed
+// by the session's NAME, not its (random, per-generation) ID: a name is
+// what a caller reconnects to, and a held (acceptance_unknown) operation
+// has to survive the program it was begun against dying and the name
+// being taken up by a freshly re-created session, or the hold is silently
+// forgotten the moment that happens (layer 6's HIGH). A failure to open
+// the journal never blocks the session itself, only the begin/finish/
+// status calls an adapter makes, which then answer a plain error.
 func (a *adapter) start(t *seatterm.TermSession) {
 	a.t = t
-	a.ops, _ = openOpJournal(a.root, t.ID)
+	a.ops, _ = openOpJournal(a.root, t.Name)
 	go a.serve()
 	go func() {
 		<-t.Done()
@@ -109,6 +113,14 @@ func (a *adapter) close() {
 	a.ln.Close()
 	os.Remove(a.path)
 	if a.ops != nil {
+		// The program just exited: nothing will ever call finish for a
+		// still-pending operation now, since only the adapter it ran
+		// could have, and it's gone. Converting here, not only on a
+		// later reopen, is what makes this show up as held immediately,
+		// including for a session that stays live and is simply
+		// re-created under the same name right after (layer 6's HIGH:
+		// "pending never becomes acceptance_unknown").
+		a.ops.convertPending()
 		a.ops.close()
 	}
 	a.mu.Lock()

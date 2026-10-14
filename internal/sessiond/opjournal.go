@@ -2,6 +2,7 @@ package sessiond
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -107,30 +108,72 @@ func openOpJournalBound(root, id string, bound int) (*opJournal, error) {
 		f.Close()
 		return nil, errors.New("a session's operation journal must be a private regular file")
 	}
+	// A crash mid-write leaves a torn last line: bytes with no trailing
+	// newline, from a write that never reached its own Sync. Left in
+	// place, the NEXT append (this process, this open, or a future one)
+	// lands directly after those torn bytes with no newline between them,
+	// so the reader sees one garbled line spanning both the torn fragment
+	// and the next, otherwise-complete record -- which fails to parse and
+	// is skipped whole, silently losing that next record every time the
+	// journal is replayed from then on. A lost begin makes a retry look
+	// like a first attempt: double execution. Truncating any trailing,
+	// newline-less bytes here, before this open's own first append, keeps
+	// the file's on-disk end always a newline boundary, so this can't
+	// recur.
+	data, err := io.ReadAll(io.LimitReader(f, 64<<20))
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	clean := len(data)
+	if clean > 0 && data[clean-1] != '\n' {
+		clean = bytes.LastIndexByte(data, '\n') + 1 // 0 if none: the whole thing was torn
+	}
+	if clean < len(data) {
+		if err := f.Truncate(int64(clean)); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
 	j := &opJournal{f: f, bound: bound, ops: map[string]*opEntry{}}
-	sc := bufio.NewScanner(io.LimitReader(f, 64<<20))
+	sc := bufio.NewScanner(bytes.NewReader(data[:clean]))
 	sc.Buffer(make([]byte, 4096), 1<<20)
 	for sc.Scan() {
 		var r opRecord
 		if json.Unmarshal(sc.Bytes(), &r) != nil || r.ID == "" {
-			continue // a torn last line: nothing to replay from it
+			continue // mid-file corruption, not a torn tail: skip, don't fail closed
 		}
 		if _, ok := j.ops[r.ID]; !ok {
 			j.order = append(j.order, r.ID)
 		}
 		j.ops[r.ID] = &opEntry{digest: r.Digest, disposition: r.Disposition, at: r.At}
 	}
+	if err := j.convertPending(); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return j, nil
+}
+
+// convertPending promotes every still-pending entry to acceptance_unknown,
+// permanently: used both here, on open (a prior service never saw it
+// finish), and when the session's own program exits (adapter.close) --
+// nothing will ever call finish for it after that, since only that
+// program's own adapter could have, and it's gone. Idempotent: an entry
+// already past pending is untouched.
+func (j *opJournal) convertPending() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	for _, id := range j.order {
 		e := j.ops[id]
-		if e.disposition == opPending {
+		if e != nil && e.disposition == opPending {
 			if err := j.appendLocked(id, e.digest, opAcceptanceUnknown); err != nil {
-				f.Close()
-				return nil, err
+				return err
 			}
 			e.disposition = opAcceptanceUnknown
 		}
 	}
-	return j, nil
+	return nil
 }
 
 func (j *opJournal) appendLocked(id, digest, disposition string) error {

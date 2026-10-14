@@ -711,6 +711,15 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			refuse(w, http.StatusConflict, KindConflict, "a session named "+req.Name+" is running; stop it, or choose another name")
 			return
 		}
+		// a.start opens a.ops (the op journal) synchronously, and must
+		// finish before s.adapters publishes a below: a concurrent send
+		// reads s.adapters[t.ID] without s.mu held past the lookup, and a
+		// nil a.ops observed only because start hadn't run yet -- not
+		// because openOpJournal actually failed -- would be a pure
+		// timing race, not a real failure (layer 6's HIGH).
+		if a != nil {
+			a.start(t)
+		}
 		s.j.write(Record{AuditRecord: seatterm.AuditRecord{Operation: req.Operation, Action: "name", Phase: "outcome", Principal: p, Session: t.ID, Outcome: "ok"}, Name: req.Name})
 		s.mu.Lock()
 		if old := s.named[req.Name]; old != nil {
@@ -726,9 +735,6 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		s.pruneExitedLocked()
 		s.mu.Unlock()
 		s.logSession(t, req.Operation)
-		if a != nil {
-			a.start(t)
-		}
 	}
 	code := http.StatusOK
 	if created {
@@ -970,12 +976,33 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	a := s.adapters[t.ID]
 	s.mu.Unlock()
-	if a != nil && !req.AckUnknown {
+	// heldRefusal is the held check, called twice: once here, so the
+	// common case (already held) fails fast before a when-ready send's
+	// long wait even starts, and again immediately before the write
+	// itself (below), since that first call's answer can go stale across
+	// the wait -- an adapter can report a DIFFERENT operation's outcome
+	// as acceptance_unknown at any moment, including during a when-ready
+	// wait of up to 10 minutes, or during the shorter window a plain
+	// send's own Attach/Control can take. Only the second call's answer
+	// is what actually gates the write (layer 6's TOCTOU HIGH).
+	heldRefusal := func() bool {
+		if a == nil || req.AckUnknown {
+			return false
+		}
+		if a.ops == nil {
+			s.drop(res)
+			refuse(w, http.StatusConflict, KindHeld, "this session's operation journal isn't available, so whether an earlier operation's outcome is unknown can't be confirmed. Pass -ack-unknown to send anyway")
+			return true
+		}
 		if held := a.ops.held(); len(held) > 0 {
 			s.drop(res)
 			refuse(w, http.StatusConflict, KindHeld, heldMessage(held))
-			return
+			return true
 		}
+		return false
+	}
+	if heldRefusal() {
+		return
 	}
 	mode := "raw"
 	if req.WhenReady {
@@ -1007,6 +1034,14 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	if _, err := c.Control(req.Take, "send "+req.Operation, req.Epoch); err != nil {
 		s.drop(res)
 		hostError(w, err)
+		return
+	}
+	// The authoritative check: nothing from here down may run if an
+	// operation is held, so this re-checks right before the write that
+	// actually reaches the program, not the stale answer from before
+	// Attach/Control (or, for when-ready, before the whole ready wait).
+	// detach() is already deferred above, and is itself once-only.
+	if heldRefusal() {
 		return
 	}
 	out := opResult{Session: t.ID, Mode: mode, InputID: req.Operation, Accepted: "unsupported"}
