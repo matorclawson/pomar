@@ -36,6 +36,25 @@ import (
 // the named interpreter from its own real path, never the script itself.
 // ExpectedSHA256 on a platform binary will fail at exec, not at the check.
 //
+// A second, confirmed, named limit, checked directly rather than assumed:
+// a copy's own argv[0]/executable path moves, from the real install
+// location to this private directory, and some installs resolve sibling
+// resources relative to that path, not from a fixed location. Checked on
+// this host (2026-10): Claude Code's install directory (Homebrew Cask)
+// holds nothing beside the single ~207 MB binary -- it is fully
+// self-contained, no dylib rpath, nothing to lose by moving. Codex's
+// install (`~/.codex/packages/standalone/current/`) is NOT: its own
+// `codex-package.json` manifest declares `resourcesDir`/`pathDir` as
+// siblings of `bin/`, not of the `codex` binary alone, and that
+// `codex-resources`/`codex-path` tree holds a bundled ripgrep and other
+// helper binaries (voice, zsh) Codex plausibly locates relative to its
+// own installed layout. A copy run from this function's private
+// directory has none of those siblings. This was confirmed by reading
+// the install layout and its manifest, not by running a copied Codex and
+// observing the breakage directly -- whether ripgrep-backed search (or
+// the other bundled features) actually fails from a moved copy is a named
+// gap in this check, not verified end to end.
+//
 // closeAfterStart is always a no-op here: unlike the Linux version, this
 // never hands cmd an inherited descriptor (cmd.Path names a plain path,
 // the private copy, not a /proc/self/fd entry), so there is nothing left
