@@ -335,9 +335,15 @@ func seatStopCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "pomar seat stop: no environment for this seat", err)
 		return 1
 	}
-	if e.Environment.Phase != "running" {
+	switch e.Environment.Phase {
+	case "stopped", "fenced", "retired":
 		fmt.Fprintf(stdout, "%s isn't running (phase %s).\n", id, e.Environment.Phase)
 		return 0
+	case "running":
+		// A running environment must return its original owner operation receipt.
+	default:
+		fmt.Fprintf(stderr, "pomar seat stop: stop not confirmed for %s (phase %q); inspect the existing environment and its original operation before resuming\n", id, e.Environment.Phase)
+		return 1
 	}
 	receipt, err := seatAction(*root, *records, id, "stop", e)
 	json.NewEncoder(stdout).Encode(receipt)

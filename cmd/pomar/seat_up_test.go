@@ -241,6 +241,50 @@ func TestSeatUpCreatesAndStartsOnceAndStopStops(t *testing.T) {
 	}
 }
 
+func TestSeatStopNeverReportsUncertainCustodyAsStopped(t *testing.T) {
+	for _, phase := range []string{"execution_unknown", "revoking", "launching", "created", "future-phase", ""} {
+		t.Run(phase, func(t *testing.T) {
+			root, _, f := lifecycleHost(t)
+			f.mu.Lock()
+			f.envs["seat-zeocreator"] = map[string]any{"phase": phase}
+			f.mu.Unlock()
+			rec := records(t)
+			var out, errb bytes.Buffer
+			code := seatStopCmd([]string{"-root", root, "-records", rec, "zeocreator"}, &out, &errb)
+			if code != 1 || out.Len() != 0 || !strings.Contains(errb.String(), "stop not confirmed") {
+				t.Fatalf("uncertain stop: code %d, stdout %q, stderr %q", code, out.String(), errb.String())
+			}
+			f.mu.Lock()
+			stops := f.stops
+			f.mu.Unlock()
+			files, err := os.ReadDir(rec)
+			if err != nil || len(files) != 0 || stops != 0 {
+				t.Fatalf("uncertain snapshot dispatched or created a retry: %v files=%d stops=%d", err, len(files), stops)
+			}
+		})
+	}
+}
+
+func TestSeatStopRetainsKnownInactiveBehavior(t *testing.T) {
+	for _, phase := range []string{"stopped", "fenced", "retired"} {
+		t.Run(phase, func(t *testing.T) {
+			root, _, f := lifecycleHost(t)
+			f.mu.Lock()
+			f.envs["seat-zeocreator"] = map[string]any{"phase": phase}
+			f.mu.Unlock()
+			var out, errb bytes.Buffer
+			if code := seatStopCmd([]string{"-root", root, "-records", records(t), "zeocreator"}, &out, &errb); code != 0 || !strings.Contains(out.String(), "phase "+phase) || errb.Len() != 0 {
+				t.Fatalf("confirmed inactive stop: code%d %q %q", code, out.String(), errb.String())
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if f.stops != 0 {
+				t.Fatal("confirmed inactive snapshot issued another stop")
+			}
+		})
+	}
+}
+
 func TestSeatProfileCompilesTheDeclaration(t *testing.T) {
 	carryRecords(t)
 	root, store, _ := lifecycleHost(t)
