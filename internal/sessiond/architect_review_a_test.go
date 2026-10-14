@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,5 +236,67 @@ func TestStopReportsCleanlyWhenNothingRemains(t *testing.T) {
 	}
 	if out2.Outcome != "already-exited" || out2.Leader != "reaped" || out2.Group != "gone" {
 		t.Fatalf("already-exited, cleanly: %+v", out2)
+	}
+}
+
+// zeocouncil's and the Architect's BLOCKER on #128's stack: a paste
+// containing an embedded ESC[201~ ended bracketed-paste mode early, so
+// everything after it arrived at the program as TYPED input, not pasted
+// text. The server now refuses any ESC byte in a paste (unless -raw),
+// rather than the client doing its own wrapping the server never checks.
+func TestPasteRefusesAnEmbeddedBracketMarker(t *testing.T) {
+	s, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-1", "echo", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	payload := "benign \x1b[201~ INJECTED-AS-TYPED \x1b[200~ tail"
+	err := c.Do("POST", "/v1/sessions/echo/send", SendRequest{Operation: "paste-1", Text: payload, Paste: true}, nil)
+	if kindOf(err) != KindUsage {
+		t.Fatalf("a payload with an embedded bracket marker wasn't refused: %v", err)
+	}
+	// Nothing was queued or written: the screen never shows any of it, not
+	// even the "benign" prefix before the embedded marker.
+	time.Sleep(100 * time.Millisecond)
+	if scr := screenOf(t, c, "echo"); strings.Contains(strings.Join(scr.Lines, "\n"), "benign") {
+		t.Fatalf("the refused payload reached the program anyway: %q", scr.Lines)
+	}
+	s.Close()
+}
+
+// A payload with no ESC byte is bracketed and delivered normally.
+func TestPasteBracketsAndDeliversACleanPayload(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-2", "echo2", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Do("POST", "/v1/sessions/echo2/send", SendRequest{Operation: "paste-2", Text: "hello paste world", Paste: true}, nil); err != nil {
+		t.Fatalf("a clean payload was refused: %v", err)
+	}
+	waitScreen(t, c, "echo2", "hello paste world")
+}
+
+// -raw skips both the scan and the bracketing: the caller is asking for
+// exactly these bytes, ESC included, and accepts that explicitly.
+func TestPasteRawSendsExactlyWhatWasGiven(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-3", "echo3", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Do("POST", "/v1/sessions/echo3/send", SendRequest{Operation: "paste-3", Text: "raw \x1b[6n ok", Paste: true, Raw: true}, nil); err != nil {
+		t.Fatalf("a raw paste was refused: %v", err)
+	}
+	waitScreen(t, c, "echo3", "ok")
+}
+
+// A paste over its own bound is refused before anything is queued.
+func TestPasteRefusesOverItsOwnBound(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-4", "echo4", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	huge := strings.Repeat("x", maxPasteBytes+1)
+	err := c.Do("POST", "/v1/sessions/echo4/send", SendRequest{Operation: "paste-4", Text: huge, Paste: true}, nil)
+	if kindOf(err) != KindTooLarge {
+		t.Fatalf("an over-bound paste wasn't refused as too large: %v", err)
 	}
 }

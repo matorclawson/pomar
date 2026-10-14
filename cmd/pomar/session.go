@@ -32,6 +32,7 @@ const (
 	exitStale     = 7  // the send named a generation or grant epoch the session no longer has: read it again
 	exitUnsupp    = 8  // the session can't do it as asked: a when-ready send to a session without a state channel
 	exitNotReady  = 9  // a when-ready send's session didn't report itself waiting for input in time: nothing was written
+	exitTooLarge  = 11 // a send or paste is over its own bound: nothing was queued or written
 	exitUncertain = 10 // a stop could not confirm the leader or its group gone: it may still be running
 )
 
@@ -295,16 +296,14 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "pomar session paste: the payload is over the %d-byte bound; nothing was sent\n", maxPasteBytes)
 			return 2
 		}
-		// Bracketed, unless -raw: a receiving program that supports it treats
-		// this as one paste, not per-character typing. It goes through the
-		// same send as -- a big send, fenced and acknowledged the same way;
-		// paste invents no wire primitive of its own.
-		text := string(payload)
-		if !*raw {
-			text = "\x1b[200~" + text + "\x1b[201~"
-		}
-		req := sessiond.SendRequest{Operation: *op, Text: text, Take: *take, Session: *gen, WhenReady: *ready,
-			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds())}
+		// The payload goes to the server exactly as read, never wrapped or
+		// scanned here: the server bounds it on its own (maxPasteBytes, not
+		// an ordinary send's bound) and, unless -raw, refuses any ESC byte
+		// in it before bracketing it, so a caller can't construct a request
+		// that bypasses that by wrapping it first (zeocouncil's and the
+		// Architect's BLOCKER on #128's stack).
+		req := sessiond.SendRequest{Operation: *op, Text: string(payload), Take: *take, Session: *gen, WhenReady: *ready,
+			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds()), Paste: true, Raw: *raw}
 		if *epoch >= 0 {
 			e := uint64(*epoch)
 			req.Epoch = &e
@@ -369,6 +368,8 @@ func sessionExit(verb, op string, err error, stderr io.Writer) int {
 			return exitUnsupp
 		case sessiond.KindNotReady:
 			return exitNotReady
+		case sessiond.KindTooLarge:
+			return exitTooLarge
 		case sessiond.KindUncertain:
 			fmt.Fprintln(stderr, "The program's exit could not be confirmed; it may still be running. Check `pomar session show`.")
 			return exitUncertain

@@ -259,6 +259,10 @@ const (
 	// KindNotReady is a when-ready send whose session's adapter didn't
 	// report it ready for input in time: nothing was written.
 	KindNotReady = "not_ready"
+	// KindTooLarge is a send or paste whose text is over its own bound
+	// (maxSendBytes for an ordinary send, maxPasteBytes for a paste):
+	// nothing was queued or written.
+	KindTooLarge = "too_large"
 )
 
 // APIError is every refusal's body.
@@ -348,6 +352,20 @@ type SendRequest struct {
 	// AcceptWaitMS waits, after the write, for the adapter to report the
 	// input accepted.
 	AcceptWaitMS int `json:"accept_wait_ms,omitempty"`
+	// Paste marks Text as a bulk payload, never a typed line: the server
+	// bounds it separately from an ordinary send (maxPasteBytes, not
+	// maxSendBytes) and, unless Raw, refuses any ESC byte in it before
+	// wrapping it in bracketed-paste markers itself. The client never
+	// wraps or scans; a caller can't construct a request that bypasses
+	// this by doing its own wrapping first (the Architect's and
+	// zeocouncil's BLOCKER on #128's stack: a paste containing an
+	// embedded ESC[201~ ended bracketed-paste mode early, so the rest of
+	// the payload arrived as TYPED input, not pasted text).
+	Paste bool `json:"paste,omitempty"`
+	// Raw, with Paste, sends the payload exactly as given: no ESC scan, no
+	// bracketing. The caller is asking for arbitrary bytes and accepts
+	// that risk explicitly; this is never the default.
+	Raw bool `json:"raw,omitempty"`
 }
 
 // Bounds on a send's waits.
@@ -355,6 +373,27 @@ const (
 	defaultReadyWait = 30 * time.Second
 	maxWait          = 10 * time.Minute
 )
+
+// maxPasteBytes bounds a paste's payload; past it, nothing is sent. Separate
+// from maxSendBytes: a paste is bulk content by nature, an ordinary send is
+// a line or a short command.
+const maxPasteBytes = 8 << 20
+
+// pasteText applies Paste/Raw to payload: unless raw, it refuses any ESC
+// byte (0x1b) and otherwise wraps it in bracketed-paste markers. The scan
+// runs on the payload exactly as given, before any wrapping of its own, so
+// it can never be fooled by markers already present: an ESC byte anywhere
+// refuses the whole payload, including one that is itself part of an
+// attempted ESC[200~/ESC[201~ sequence.
+func pasteText(payload string, raw bool) (string, error) {
+	if raw {
+		return payload, nil
+	}
+	if strings.IndexByte(payload, 0x1b) >= 0 {
+		return "", errors.New("the payload contains an ESC byte (0x1b); a paste is never bracketed around one, since that is exactly how a payload could end bracketed-paste mode early and have the rest typed. Use -raw if you mean to send it exactly as given")
+	}
+	return "\x1b[200~" + payload + "\x1b[201~", nil
+}
 
 // StopRequest is POST /v1/sessions/{name}/stop.
 type StopRequest struct {
@@ -443,8 +482,22 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) *seatterm.TermSe
 	return t
 }
 
+// decodeBodyLimit bounds an ordinary request body: every route but send
+// carries short, fixed-shape JSON, never a bulk payload.
+const decodeBodyLimit = 1 << 20
+
+// sendBodyLimit bounds a send's body: it alone can carry a paste, up to
+// maxPasteBytes, and JSON can inflate that (each control byte becomes a
+// 6-byte \u00XX escape in the worst case), so its own limit must clear that
+// with real headroom, not the ordinary bound every other route gets.
+const sendBodyLimit = maxPasteBytes * 8
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	return decodeLimit(w, r, v, decodeBodyLimit)
+}
+
+func decodeLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	dec := json.NewDecoder(io.LimitReader(r.Body, limit))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		refuse(w, http.StatusBadRequest, KindUsage, "malformed request: "+err.Error())
@@ -747,12 +800,24 @@ func awaitAccepted(t *seatterm.TermSession, id string, wait time.Duration) bool 
 // only its adapter can say.
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	var req SendRequest
-	if !decode(w, r, &req) {
+	if !decodeLimit(w, r, &req, sendBodyLimit) {
 		return
 	}
 	if req.Operation == "" || req.Text == "" || req.ReadyWaitMS < 0 || req.AcceptWaitMS < 0 {
 		refuse(w, http.StatusBadRequest, KindUsage, "a send needs an operation ID and its text, and waits of 0 ms or more")
 		return
+	}
+	if req.Paste {
+		if len(req.Text) > maxPasteBytes {
+			refuse(w, http.StatusBadRequest, KindTooLarge, fmt.Sprintf("a paste is bounded at %d bytes; this one is %d; nothing was sent", maxPasteBytes, len(req.Text)))
+			return
+		}
+		wrapped, err := pasteText(req.Text, req.Raw)
+		if err != nil {
+			refuse(w, http.StatusBadRequest, KindUsage, err.Error())
+			return
+		}
+		req.Text = wrapped
 	}
 	p := principalOf(r)
 	fp := opFingerprint(r.PathValue("name"), req.Text, strconv.FormatBool(req.Take))
