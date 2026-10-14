@@ -271,6 +271,13 @@ const (
 	KindHeld = "held"
 )
 
+// maxSendBytes bounds one send's text. send carries a line, a wake, or a
+// short command, never bulk content (paste exists for that, bounded far
+// higher at 8 MiB client-side): 64 KiB is generous for anything a line
+// of input legitimately needs, while still catching an accidental bulk
+// send before it reaches a program expecting a line.
+const maxSendBytes = 64 << 10
+
 // APIError is every refusal's body.
 type APIError struct {
 	Error string `json:"error"`
@@ -504,6 +511,7 @@ func (s *Server) mux() *http.ServeMux {
 	mux.HandleFunc("GET /v1/sessions/{name}/logs", s.logs)
 	mux.HandleFunc("GET /v1/sessions/by-id/{id}/logs", s.logsByID)
 	mux.HandleFunc("POST /v1/sessions/{name}/send", s.send)
+	mux.HandleFunc("GET /v1/sessions/{name}/input", s.inputStatus)
 	mux.HandleFunc("POST /v1/sessions/{name}/stop", s.stop)
 	mux.HandleFunc("POST /v1/sessions/{name}/attach", s.attach)
 	return mux
@@ -929,6 +937,11 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	}
 	p := principalOf(r)
 	if req.Paste {
+		// Layer 7's HIGH: this used to be an unconditional maxSendBytes
+		// check that ran before Paste was ever consulted, so a paste's
+		// own, far larger bound (maxPasteBytes) was unreachable -- any
+		// paste over 64 KiB (an ordinary send's bound, not a paste's) was
+		// refused before getting anywhere near its own check below.
 		if len(req.Text) > maxPasteBytes {
 			refuse(w, http.StatusBadRequest, KindTooLarge, fmt.Sprintf("a paste is bounded at %d bytes; this one is %d; nothing was sent", maxPasteBytes, len(req.Text)))
 			return
@@ -947,6 +960,9 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Text = wrapped
+	} else if len(req.Text) > maxSendBytes {
+		refuse(w, http.StatusBadRequest, KindTooLarge, fmt.Sprintf("the text is %d bytes, over the %d-byte bound; nothing was sent (use paste for bulk content)", len(req.Text), maxSendBytes))
+		return
 	}
 	fp := opFingerprint(r.PathValue("name"), req.Text, strconv.FormatBool(req.Take))
 	res, fresh, err := s.begin("send", p, req.Operation, fp)
@@ -1090,6 +1106,56 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	reply(w, http.StatusOK, s.settle(res, out))
+}
+
+// InputStatusResult is a read of one send's current acceptance, live, as
+// distinct from a retried send's frozen reply (whatever "accepted" the
+// original write settled on). It never re-sends anything and never blocks.
+type InputStatusResult struct {
+	InputID  string `json:"input_id"`
+	Accepted string `json:"accepted"` // yes, pending, unsupported or unknown
+}
+
+// inputStatus answers "has this input been accepted yet" with the
+// session's current adapter state, read fresh at call time. This is
+// deliberately a second, independent read from send's own reply: a send
+// retried with the same ID keeps returning what it settled on when it
+// ran (operation disposition, the dedup record), while this always
+// reflects what the adapter says right now (input acceptance). The two
+// are different questions about two different things, and are kept that
+// way on purpose: begin/finish/status (see opjournal.go) tracks whether
+// an agent's own tool-call operation committed; this tracks whether a
+// terminal program confirmed receiving one particular write.
+func (s *Server) inputStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		refuse(w, http.StatusBadRequest, KindUsage, "input needs ?id=, the input ID a send used")
+		return
+	}
+	t := s.lookup(w, r)
+	if t == nil {
+		return
+	}
+	p := principalOf(r)
+	s.mu.Lock()
+	rec, known := s.ops["send\x00"+p+"\x00"+id]
+	a := s.adapters[t.ID]
+	s.mu.Unlock()
+	out := InputStatusResult{InputID: id, Accepted: "unknown"}
+	switch {
+	case a == nil:
+		// No state channel at all: this session can never report
+		// acceptance for any input, known or not, so that's the answer
+		// regardless of whether this exact ID was ever sent.
+		out.Accepted = "unsupported"
+	case known && rec != nil:
+		if st, _ := t.Agent(); st.Accepted == id {
+			out.Accepted = "yes"
+		} else {
+			out.Accepted = "pending"
+		}
+	}
+	reply(w, http.StatusOK, out)
 }
 
 // stop ends a session's program, with the authority of the service's own

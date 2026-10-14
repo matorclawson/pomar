@@ -30,6 +30,7 @@ protocol, so a client written to this document speaks to both.
 | `GET /v1/sessions/NAME/logs?from=N&limit=N` | | a log chunk |
 | `GET /v1/sessions/by-id/ID/logs?from=N&limit=N` | | a log chunk, by exact ID, reachable after a restart |
 | `POST /v1/sessions/NAME/send` | a send | an operation result |
+| `GET /v1/sessions/NAME/input?id=INPUT_ID` | | that input's live acceptance, read fresh (never a send's own frozen reply) |
 | `POST /v1/sessions/NAME/stop` | a stop | an operation result |
 | `POST /v1/sessions/NAME/attach?view=1&take=1` | | an upgrade to `pomar-terminal/v2` |
 
