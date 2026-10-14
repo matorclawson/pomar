@@ -153,3 +153,146 @@ func TestTheAttachStatusTitleIsPrintableOnly(t *testing.T) {
 		t.Fatal("a title was written twice")
 	}
 }
+
+// pomar session logs gives a session's durable output, paged, and it's
+// readable even for a session that has already exited.
+func TestSessionLogsAreDurableAndPaged(t *testing.T) {
+	dir, _ := os.MkdirTemp("/tmp", "psc")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	root := filepath.Join(dir, "r")
+	s, err := sessiond.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); s.Serve(ctx, func() { close(ready) }) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	var out, errb bytes.Buffer
+	if rc := run([]string{"session", "new", "-root", root, "-id", "op-1", "work", "--", "/bin/sh", "-c", "printf '0123456789'"}, &out, &errb); rc != 0 {
+		t.Fatalf("new: %d %s", rc, errb.String())
+	}
+	var logged string
+	for i := 0; i < 200 && !strings.Contains(logged, "0123456789"); i++ {
+		out.Reset()
+		run([]string{"session", "logs", "-root", root, "work"}, &out, &errb)
+		logged = out.String()
+	}
+	if !strings.Contains(logged, "0123456789") {
+		t.Fatalf("the full log: %q", logged)
+	}
+	out.Reset()
+	if rc := run([]string{"session", "logs", "-root", root, "-from", "0", "-limit", "5", "work"}, &out, &errb); rc != 0 || out.Len() != 5 {
+		t.Fatalf("a 5-byte page: %d %q", rc, out.String())
+	}
+	tmp := filepath.Join(dir, "out.log")
+	if rc := run([]string{"session", "logs", "-root", root, "-o", tmp, "work"}, &out, &errb); rc != 0 {
+		t.Fatalf("logs -o: %d %s", rc, errb.String())
+	}
+	b, err := os.ReadFile(tmp)
+	if err != nil || !strings.Contains(string(b), "0123456789") {
+		t.Fatalf("logs -o %q: %v", tmp, err)
+	}
+	if rc := run([]string{"session", "logs", "-root", root, "none"}, &out, &errb); rc != exitNotFound {
+		t.Fatalf("logs of an unknown name: %d", rc)
+	}
+}
+
+// pomar session paste sends a whole file (or stdin) as one write, bracketed
+// as a paste unless -raw, through the same fenced send as a plain send.
+func TestSessionPasteBracketsAndFences(t *testing.T) {
+	dir, _ := os.MkdirTemp("/tmp", "psc")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	root := filepath.Join(dir, "r")
+	s, err := sessiond.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); s.Serve(ctx, func() { close(ready) }) }()
+	<-ready
+	defer func() { cancel(); <-done }()
+
+	var out, errb bytes.Buffer
+	// cat -v makes control bytes visible as text, so the screen shows
+	// whether the markers arrived.
+	if rc := run([]string{"session", "new", "-root", root, "-id", "op-1", "-cols", "80", "-rows", "6", "work", "--", "/bin/cat", "-v"}, &out, &errb); rc != 0 {
+		t.Fatalf("new: %d %s", rc, errb.String())
+	}
+
+	// From a file.
+	payload := filepath.Join(dir, "p.txt")
+	if err := os.WriteFile(payload, []byte("line one\nline two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	pr, pw, _ := os.Pipe()
+	pw.Close()
+	if rc := sessionCmd([]string{"paste", "-root", root, "-id", "paste-1", "-file", payload, "work"}, pr, &out, &errb); rc != 0 {
+		t.Fatalf("paste -file: %d %s", rc, errb.String())
+	}
+	var res sessiond.OpResult
+	if json.Unmarshal(out.Bytes(), &res) != nil || !res.Written {
+		t.Fatalf("paste printed %s", out.String())
+	}
+	var screen string
+	for i := 0; i < 200 && !strings.Contains(screen, "line two"); i++ {
+		out.Reset()
+		run([]string{"session", "screen", "-root", root, "work"}, &out, &errb)
+		screen = out.String()
+	}
+	if !strings.Contains(screen, "^[[200~line one") || !strings.Contains(screen, "line two^[[201~") {
+		t.Fatalf("no bracketed-paste markers around the file's content: %q", screen)
+	}
+
+	// From stdin, -raw: no markers.
+	pr2, pw2, _ := os.Pipe()
+	pw2.Write([]byte("rawtext"))
+	pw2.Close()
+	out.Reset()
+	if rc := sessionCmd([]string{"paste", "-root", root, "-id", "paste-2", "-raw", "work"}, pr2, &out, &errb); rc != 0 {
+		t.Fatalf("paste -raw from stdin: %d %s", rc, errb.String())
+	}
+	screen = ""
+	for i := 0; i < 200 && !strings.Contains(screen, "rawtext"); i++ {
+		out.Reset()
+		run([]string{"session", "screen", "-root", root, "work"}, &out, &errb)
+		screen = out.String()
+	}
+	if strings.Contains(screen, "[200~rawtext") {
+		t.Fatal("-raw still bracketed the payload")
+	}
+	if !strings.Contains(screen, "rawtext") {
+		t.Fatalf("the raw stdin payload never arrived: %q", screen)
+	}
+
+	// A stale epoch refuses a paste exactly like it refuses a send: nothing sent.
+	pr3, pw3, _ := os.Pipe()
+	pw3.Write([]byte("should-not-land"))
+	pw3.Close()
+	out.Reset()
+	if rc := sessionCmd([]string{"paste", "-root", root, "-id", "paste-3", "-epoch", "999", "work"}, pr3, &out, &errb); rc != exitStale {
+		t.Fatalf("a stale epoch: %d %s", rc, errb.String())
+	}
+	out.Reset()
+	run([]string{"session", "screen", "-root", root, "work"}, &out, &errb)
+	if strings.Contains(out.String(), "should-not-land") {
+		t.Fatal("a stale paste still wrote its payload")
+	}
+
+	// Over the bound: refused, nothing sent.
+	big := filepath.Join(dir, "big.txt")
+	if err := os.WriteFile(big, make([]byte, maxPasteBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pr4, pw4, _ := os.Pipe()
+	pw4.Close()
+	if rc := sessionCmd([]string{"paste", "-root", root, "-id", "paste-4", "-file", big, "work"}, pr4, &out, &errb); rc != 2 {
+		t.Fatalf("over the paste bound: %d %s", rc, errb.String())
+	}
+}

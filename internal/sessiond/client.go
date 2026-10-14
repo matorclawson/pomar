@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,6 +100,50 @@ func (c *Client) Do(method, path string, body, out any) error {
 
 // ErrNoReply is a request whose reply never came: its effect is unknown.
 var ErrNoReply = errors.New("the session service didn't reply; the request's effect is unknown")
+
+// LogChunk is one bounded read of a session's durable log.
+type LogChunk struct {
+	Data      []byte
+	Size      int64 // the log's whole size, as of this read
+	From      int64 // this chunk's offset into the log
+	Truncated bool  // more of the log follows this chunk
+}
+
+// RawGet sends a GET and returns its raw body, never JSON-decoded, for a
+// log's bytes.
+func (c *Client) RawGet(path string) (LogChunk, error) {
+	if _, err := os.Lstat(filepath.Join(c.Root, SocketName)); err != nil {
+		return LogChunk{}, ErrNoService
+	}
+	req, err := http.NewRequest("GET", "http://sessions"+path, nil)
+	if err != nil {
+		return LogChunk{}, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if strings.Contains(err.Error(), "connection failed") || strings.Contains(err.Error(), "custody") || strings.Contains(err.Error(), "refused") {
+			return LogChunk{}, fmt.Errorf("%w: %v", ErrNoService, err)
+		}
+		return LogChunk{}, fmt.Errorf("%w: %v", ErrNoReply, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxLogChunk+4<<10))
+	if err != nil {
+		return LogChunk{}, fmt.Errorf("%w: %v", ErrNoReply, err)
+	}
+	if resp.StatusCode >= 300 {
+		r := &Refusal{Status: resp.StatusCode}
+		if json.Unmarshal(b, &r.APIError) != nil || r.Kind == "" {
+			r.Kind, r.APIError.Error = KindInternal, resp.Status
+		}
+		return LogChunk{}, r
+	}
+	chunk := LogChunk{Data: b}
+	chunk.Size, _ = strconv.ParseInt(resp.Header.Get("X-Pomar-Log-Size"), 10, 64)
+	chunk.From, _ = strconv.ParseInt(resp.Header.Get("X-Pomar-Log-From"), 10, 64)
+	chunk.Truncated, _ = strconv.ParseBool(resp.Header.Get("X-Pomar-Log-Truncated"))
+	return chunk, nil
+}
 
 // OpResult is a send's or stop's reply.
 type OpResult = opResult
