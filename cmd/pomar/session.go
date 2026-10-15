@@ -552,7 +552,16 @@ func sessionAttach(c *sessiond.Client, name string, view, take, title bool, stdi
 	h.Presence = st2.presence
 	h.State = st2.state
 	h.Control = st2.control
-	detached, err := sessiond.PumpWith(st, stdin, stdout, cols, rows, resizes, h)
+	var in io.Reader = stdin
+	if !view {
+		// An attached operator must never stay locked out by whoever took
+		// control: this key asks for it back without a detach/reattach
+		// round trip. A client that asked to only view never gets it.
+		req := make(chan seatterm.ControlMsg, 1)
+		in = &takeKeyReader{r: stdin, req: req}
+		h.Requests = req
+	}
+	detached, err := sessiond.PumpWith(st, in, stdout, cols, rows, resizes, h)
 	if tty {
 		fmt.Fprint(stdout, "\x1b[0m\x1b[?25h\r\n")
 	}
@@ -567,6 +576,43 @@ func sessionAttach(c *sessiond.Client, name string, view, take, title bool, stdi
 		fmt.Fprintf(stderr, "Detached from %s; it keeps running.\r\n", name)
 	}
 	return 0
+}
+
+// takeControlKey asks for control, from whoever holds it, without
+// detaching: Ctrl-^, never sent to the program.
+const takeControlKey = 0x1e
+
+// takeKeyReader strips takeControlKey out of an attached operator's input
+// and turns each one into a control request on req, so taking control back
+// never needs a detach and a reattach with -take. Everything else passes
+// through unchanged. req is sent to non-blocking: a key held or repeated
+// while a request is already queued asks for nothing more.
+type takeKeyReader struct {
+	r   io.Reader
+	req chan<- seatterm.ControlMsg
+}
+
+func (t *takeKeyReader) Read(p []byte) (int, error) {
+	for {
+		n, err := t.r.Read(p)
+		out := 0
+		for i := 0; i < n; i++ {
+			if p[i] == takeControlKey {
+				select {
+				case t.req <- seatterm.ControlMsg{Op: "take"}:
+				default:
+				}
+				continue
+			}
+			p[out] = p[i]
+			out++
+		}
+		if out > 0 || err != nil {
+			return out, err
+		}
+		// The whole read was take-key presses: read again rather than
+		// report a zero-byte, nil-error read.
+	}
 }
 
 // attachStatus is an attached client's live status line. Its hooks run on

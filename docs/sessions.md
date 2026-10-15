@@ -412,6 +412,11 @@ pomar session attach -take NAME    # take control from whoever has it
   each session's screen (termstate), not a replay of its history.
 - **Ctrl-] detaches,** and is never sent to the program. A dropped connection
   is a detach too. Detaching never stops the program.
+- **Ctrl-^ asks for control, even if another client — automation included —
+  holds it,** and is never sent to the program. You never need to detach and
+  reattach with `-take` just to get control back; an attached operator who
+  isn't viewing only is never locked out. It does nothing if you attached
+  `-view`.
 - **As controller,** your window size becomes the session's, and each resize
   follows.
 - **As viewer,** nothing you type is sent.

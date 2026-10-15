@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/seatterm"
 	"github.com/zeroemployeeorg/pomar/internal/sessiond"
@@ -151,6 +153,80 @@ func TestTheAttachStatusTitleIsPrintableOnly(t *testing.T) {
 	a.flush(&b)
 	if b.Len() != 0 {
 		t.Fatal("a title was written twice")
+	}
+}
+
+// Ctrl-^ asks for control back without a detach: an attached operator must
+// never be locked out by whoever took it (council M4).
+func TestTakeKeyReaderAsksForControlAndNeverForwardsTheKey(t *testing.T) {
+	req := make(chan seatterm.ControlMsg, 1)
+	r := &takeKeyReader{r: strings.NewReader("ab\x1ecd"), req: req}
+	buf := make([]byte, 16)
+	n, err := r.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got := string(buf[:n]); got != "abcd" {
+		t.Fatalf("the take key reached the program: got %q", got)
+	}
+	select {
+	case m := <-req:
+		if m.Op != "take" {
+			t.Fatalf("op = %q, want take", m.Op)
+		}
+	default:
+		t.Fatal("the take key asked for nothing")
+	}
+}
+
+// A read that is only take-key presses asks for control and waits for real
+// data instead, rather than the zero-byte, nil-error read Go discourages.
+func TestTakeKeyReaderKeepsReadingPastAnAllKeyRead(t *testing.T) {
+	req := make(chan seatterm.ControlMsg, 4)
+	pr, pw := io.Pipe()
+	r := &takeKeyReader{r: pr, req: req}
+	done := make(chan struct{})
+	buf := make([]byte, 16)
+	var n int
+	var err error
+	go func() {
+		n, err = r.Read(buf)
+		close(done)
+	}()
+	pw.Write([]byte{0x1e, 0x1e})
+	select {
+	case <-done:
+		t.Fatal("Read returned on an all-take-key chunk instead of reading on")
+	case <-time.After(50 * time.Millisecond):
+	}
+	pw.Write([]byte("hi"))
+	<-done
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(buf[:n]) != "hi" {
+		t.Fatalf("got %q, want %q", buf[:n], "hi")
+	}
+	if len(req) != 2 {
+		t.Fatalf("asked for control %d times, want 2", len(req))
+	}
+}
+
+// A single key press never floods the request channel: repeats while one
+// is already queued ask for nothing more, so a held key can't back up.
+func TestTakeKeyReaderNeverBlocksOnARepeatedKey(t *testing.T) {
+	req := make(chan seatterm.ControlMsg, 1)
+	r := &takeKeyReader{r: strings.NewReader(strings.Repeat("\x1e", 4096)), req: req}
+	buf := make([]byte, 8192)
+	done := make(chan struct{})
+	go func() {
+		r.Read(buf) // must return (on EOF), never block on the full channel
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read blocked sending on a full request channel")
 	}
 }
 
