@@ -148,7 +148,7 @@ func TestASeatComesOnlyFromASeatProfile(t *testing.T) {
 			c.Profiles["seat-zeocreator"] = p
 		},
 		"a top-level declaration": func(c *HostConfig) { c.SeatDeclarationSHA256 = strings.Repeat("d", 64) },
-		"a Codex seat": func(c *HostConfig) {
+		"an unpinned Codex seat": func(c *HostConfig) {
 			p := c.Profiles["seat-zeocreator"]
 			p.Agent, p.AgentVersion = "", ""
 			c.Profiles["seat-zeocreator"] = p
@@ -187,5 +187,74 @@ func TestASeatComesOnlyFromASeatProfile(t *testing.T) {
 	defer h.Close()
 	if cfg, _ := h.profileConfig("plain"); cfg.Seat != "" {
 		t.Fatal("a plain profile carried a seat")
+	}
+}
+
+func TestPinnedCodexSeatRetainsIdentityAndArchive(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := EnvironmentProfile{Base: root + "/base", ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: root + "/source", SourceSHA: strings.Repeat("b", 40), Agent: "codex", AgentVersion: "0.160.0", SeatLaunch: func() *SeatLaunch {
+		n := true
+		return &SeatLaunch{Sandbox: "workspace-write", Approvals: "on-request", NetworkAccess: &n, Model: "fixture-model", Effort: "high", CWD: "/work"}
+	}(), AgentArchive: root + "/codex.tar.gz", AgentArchiveSHA256: strings.Repeat("c", 64), Seat: "example", SeatDeclarationSHA256: strings.Repeat("d", 64)}
+	p.ImageRef = "example.invalid/image@" + p.ImageDigest
+	h, err := OpenHost(HostConfig{Root: root, MaxLive: 1, CPUs: 1, MemoryBytes: 512 << 20, Profiles: map[string]EnvironmentProfile{"seat-example": p}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	cfg, err := h.profileConfig("seat-example")
+	if err != nil || cfg.Agent != "codex" || cfg.AgentVersion != "0.160.0" || cfg.Seat != p.Seat || cfg.CodexArchiveSHA256 != p.AgentArchiveSHA256 || cfg.SeatDeclarationSHA256 != p.SeatDeclarationSHA256 {
+		t.Fatalf("lost Codex seat binding %+v %v", cfg, err)
+	}
+}
+
+func TestInheritedCodexSeatRefusesMissingAndInvalidLaunch(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		for _, launch := range []*SeatLaunch{nil, {Sandbox: "workspace-write"}} {
+			root := t.TempDir()
+			os.Chmod(root, 0700)
+			p := EnvironmentProfile{Base: root + "/base", ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: root + "/source", SourceSHA: strings.Repeat("b", 40), Seat: "example", SeatDeclarationSHA256: strings.Repeat("c", 64), SeatLaunch: launch}
+			if explicit {
+				p.Agent = "codex"
+				p.AgentVersion = "0.160.0"
+				p.AgentArchive = root + "/codex.tar.gz"
+				p.AgentArchiveSHA256 = strings.Repeat("d", 64)
+			}
+			p.ImageRef = "example.invalid/image@" + p.ImageDigest
+			cfg := HostConfig{Root: root, Agent: "codex", MaxLive: 1, CPUs: 1, MemoryBytes: 512 << 20, Profiles: map[string]EnvironmentProfile{"seat-example": p}}
+			h, err := OpenHost(cfg)
+			if err == nil {
+				h.Close()
+				t.Fatal("missing launch accepted")
+			}
+			// Assert this exact gate, not an incidental version/archive refusal.
+			want := "profile seat-example: " + launch.Validate().Error()
+			if err.Error() != want {
+				t.Fatalf("launch gate not reached: got %v want %s", err, want)
+			}
+		}
+	}
+}
+func TestStartRefusesChangedDeclarationAndPolicyBeforeIncarnation(t *testing.T) {
+	n := true
+	l := &SeatLaunch{Sandbox: "workspace-write", Approvals: "never", NetworkAccess: &n, Model: "fixture-model", Effort: "high", CWD: "/work"}
+	p := EnvironmentProfile{SourceSHA: strings.Repeat("a", 40), SeatDeclarationSHA256: strings.Repeat("b", 64), SeatLaunch: l}
+	h := &Host{config: HostConfig{MaxLive: 2, Profiles: map[string]EnvironmentProfile{"seat-example": p}}, envs: map[string]*Environment{}}
+	for _, change := range []string{"declaration", "policy"} {
+		spec := HostConfig{SourceSHA: p.SourceSHA, SeatDeclarationSHA256: p.SeatDeclarationSHA256, SeatLaunch: l}
+		if change == "declaration" {
+			spec.SeatDeclarationSHA256 = strings.Repeat("c", 64)
+		} else {
+			other := *l
+			other.Model = "different"
+			spec.SeatLaunch = &other
+		}
+		e := &Environment{Spec: VMSpec{HostConfig: spec, Profile: "seat-example", Incarnation: "original"}, Phase: "stopped"}
+		if err := h.start(e); err == nil || e.Spec.Incarnation != "original" || e.Phase != "stopped" {
+			t.Fatal("changed profile dispatched", change, err)
+		}
 	}
 }

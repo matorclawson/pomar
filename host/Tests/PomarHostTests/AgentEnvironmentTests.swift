@@ -149,7 +149,16 @@ import Foundation
     #expect(AgentEnvironment.valid(o))
     let codex = AgentEnvironment.brokerArguments(agentOptions())
     #expect(AgentEnvironment.brokerArguments(o) == codex + ["-actor", "seat", "-seat", "zeocreator", "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", "2.1.280"])
-    var codexSeat = agentOptions(); codexSeat.seat = "zeocreator"
+    var codexSeat = agentOptions(); codexSeat.agent = "codex"; codexSeat.seat = "zeocreator"
+    #expect(!AgentEnvironment.valid(codexSeat))
+    codexSeat.agentVersion = "0.160.0"
+    codexSeat.seatLaunch = .init(sandbox:"workspace-write",approvals:"on-request",network_access:true,model:"fixture-model",effort:"high",cwd:"/work")
+    #expect(AgentEnvironment.valid(codexSeat))
+    #expect(Array(AgentEnvironment.brokerArguments(codexSeat).prefix(codex.count+8)) == codex + ["-actor", "codex-seat", "-seat", "zeocreator", "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", "0.160.0"])
+    #expect(AgentEnvironment.brokerArguments(codexSeat).contains("-codex-launch"))
+    codexSeat.controllerCapabilities = ["inbox"]
+    #expect(!AgentEnvironment.valid(codexSeat))
+    codexSeat.controllerCapabilities = []; codexSeat.agentVersion = "0.170.0"
     #expect(!AgentEnvironment.valid(codexSeat))
     for bad in ["", "Zeocreator", "1seat", "zeo creator", "zeo/../x", String(repeating: "a", count: 64)] {
         var b = o; b.seat = bad
@@ -157,4 +166,15 @@ import Foundation
     }
     var withController = o; withController.controllerCapabilities = ["inbox"]
     #expect(!AgentEnvironment.valid(withController))
+}
+
+@Test func codexSeatRefusesMissingAndInconsistentLaunchAtOwnerGate() {
+    var o = agentOptions(); o.agent = "codex"; o.agentVersion = "0.160.0"; o.seat = "example"
+    #expect(!AgentEnvironment.valid(o))
+    o.seatLaunch = .init(sandbox:"read-only",approvals:"never",network_access:true,model:"fixture-model",effort:"high",cwd:"/work")
+    #expect(!AgentEnvironment.valid(o))
+    o.seatLaunch?.sandbox = "workspace-write"; o.seatLaunch?.effort = "max"
+    #expect(!AgentEnvironment.valid(o))
+    o.seat = nil; o.seatLaunch = nil
+    #expect(!AgentEnvironment.valid(o))
 }

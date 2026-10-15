@@ -19,6 +19,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 )
 
 // Schema names this format.
@@ -32,17 +34,18 @@ const Limit = 64 << 10
 const NotEstablished = "NOT_ESTABLISHED"
 
 type Declaration struct {
-	Schema    string     `json:"schema"`
-	Seat      string     `json:"seat"`
-	Project   string     `json:"project"`
-	Sources   []Source   `json:"sources"`
-	Class     string     `json:"class"`
-	Resources Resources  `json:"resources"`
-	Network   Network    `json:"network"`
-	Provider  Provider   `json:"provider"`
-	Resume    Resume     `json:"resume"`
-	Identity  Identity   `json:"identity"`
-	HostOnly  []HostOnly `json:"host_only"`
+	Launch    *agentenv.SeatLaunch `json:"launch,omitempty"`
+	Schema    string               `json:"schema"`
+	Seat      string               `json:"seat"`
+	Project   string               `json:"project"`
+	Sources   []Source             `json:"sources"`
+	Class     string               `json:"class"`
+	Resources Resources            `json:"resources"`
+	Network   Network              `json:"network"`
+	Provider  Provider             `json:"provider"`
+	Resume    Resume               `json:"resume"`
+	Identity  Identity             `json:"identity"`
+	HostOnly  []HostOnly           `json:"host_only"`
 }
 
 // Source is one repository the seat's workspace is built from, at a full
@@ -163,6 +166,13 @@ func (d Declaration) Validate() error {
 		return err
 	}
 	p := d.Provider
+	if p.Agent == "codex" {
+		if err := d.Launch.Validate(); err != nil {
+			return err
+		}
+	} else if d.Launch != nil {
+		return errors.New("Codex launch settings belong to a Codex declaration")
+	}
 	if (p.Agent != "claude" && p.Agent != "codex") || !version.MatchString(p.Version) {
 		return errors.New("provider is claude or codex, at a pinned numeric version")
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 	"net"
 	"net/http"
 	"os"
@@ -434,5 +435,21 @@ func TestSeatUpTakesThisHostsLocationFromItsConfiguration(t *testing.T) {
 				t.Fatalf("%d creates and %d starts on a refusal", f.creates, f.starts)
 			}
 		})
+	}
+}
+
+func TestSeatStalenessComparesActualLaunchPolicy(t *testing.T) {
+	n := true
+	l := &agentenv.SeatLaunch{Sandbox: "workspace-write", Approvals: "never", NetworkAccess: &n, Model: "fixture-model", Effort: "high", CWD: "/work"}
+	p := agentenv.EnvironmentProfile{SeatLaunch: l}
+	spec := environmentSpec{SeatLaunch: l}
+	if got := staleness(spec, p); len(got) != 0 {
+		t.Fatal(got)
+	}
+	changed := *l
+	changed.Approvals = "on-request"
+	spec.SeatLaunch = &changed
+	if got := staleness(spec, p); len(got) != 1 || !strings.Contains(got[0], "seatLaunch") {
+		t.Fatal("hand-edited policy accepted", got)
 	}
 }

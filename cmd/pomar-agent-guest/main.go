@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -19,12 +20,19 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 	"github.com/zeroemployeeorg/pomar/internal/claudeactor"
+	"github.com/zeroemployeeorg/pomar/internal/codexseat"
 )
 
 func main() {
 	run := run
+	if len(os.Args) > 2 && os.Args[1] == "codex-seat-exec" && os.Args[2] == "--" {
+		run = func() error { return codexseat.ExecPinned(os.Args[3:]) }
+	}
 	if len(os.Args) > 1 && os.Args[1] == "seat-supervisor" {
 		run = runSeatSupervisor
+	}
+	if len(os.Args) > 1 && os.Args[1] == "codex-seat-supervisor" {
+		run = runCodexSeatSupervisor
 	}
 	if len(os.Args) > 1 && os.Args[1] == "claude-mcp" {
 		run = runClaudeMCP
@@ -92,12 +100,14 @@ func run() error {
 	workspace := flag.String("workspace", "/work", "isolated workspace")
 	sourceSHA := flag.String("source-sha", "", "initial source commit")
 	capabilities := flag.String("controller-capabilities", "", "owner-configured comma-separated controller capability names")
+	codexLaunch := flag.String("codex-launch", "", "declared Codex seat launch JSON")
+	codexVersion := flag.String("codex-version", "", "the pinned Codex seat version")
 	actorKind := flag.String("actor", "codex", "the coding agent: codex (app-server), claude (Claude Code, stream-json) or seat (an interactive Claude Code seat)")
 	seat := flag.String("seat", "", "with -actor seat: the seat's name")
 	claude := flag.String("claude", "/opt/pomar-claude/bin/claude", "pinned Claude Code binary, with -actor claude")
 	claudeVersion := flag.String("claude-version", "", "the pinned Claude Code version, reported in the userAgent, with -actor claude")
 	flag.Parse()
-	if *actorKind != "codex" && *actorKind != "claude" && *actorKind != "seat" {
+	if *actorKind != "codex" && *actorKind != "claude" && *actorKind != "seat" && *actorKind != "codex-seat" {
 		return fmt.Errorf("unknown -actor %q", *actorKind)
 	}
 	if os.Getuid() != 0 {
@@ -110,6 +120,16 @@ func run() error {
 	defer store.Close()
 	if err = store.BindSource(*sourceSHA); err != nil {
 		return err
+	}
+	if *actorKind == "codex-seat" {
+		if *capabilities != "" {
+			return errors.New("a Codex TUI seat does not accept controller capabilities")
+		}
+		launch, err := parseCodexLaunch(*codexLaunch)
+		if err != nil {
+			return err
+		}
+		return runCodexSeat(store, *seat, *codex, *codexVersion, *workspace, *socket, launch)
 	}
 	if *actorKind == "seat" {
 		self, err := os.Executable()
