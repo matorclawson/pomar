@@ -65,3 +65,15 @@ qualification remain explicit release milestones. Production adoption follows
 its existing reviewed owner procedure, with drain, preserved old binaries/data,
 unchanged key/custody checks and real readbacks. User-tool installation is not
 that procedure.
+
+## Unreleased: Codex terminal custody fix-forward
+
+The source candidate separates the tmux parser (guest UID1001) from the root
+launch broker and the coding actor (UID1000), pins the parser executable,
+anchors metadata reads and refuses startup without kernel TIOCSTI protection.
+Only a Codex seat provisions that dedicated guest terminal identity; collisions
+are refused. Existing Claude seats and non-seat app-server launches keep their
+current setup. Login test fixtures now reap their own incomplete fake processes.
+These source changes are not a signed release or an installed/native-qualified
+Codex seat. Both source reviews and the guest security/lifecycle acceptance in
+[codex-seats.md](codex-seats.md) remain required before adoption.

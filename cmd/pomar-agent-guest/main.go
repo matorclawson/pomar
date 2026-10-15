@@ -31,8 +31,11 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "seat-supervisor" {
 		run = runSeatSupervisor
 	}
-	if len(os.Args) > 1 && os.Args[1] == "codex-seat-supervisor" {
-		run = runCodexSeatSupervisor
+	if len(os.Args) > 1 && os.Args[1] == "codex-seat-console" {
+		run = runCodexSeatConsole
+	}
+	if len(os.Args) > 2 && os.Args[1] == "codex-custodian-exec" && os.Args[2] == "--" {
+		run = func() error { return codexseat.ExecCustodian(os.Args[3:]) }
 	}
 	if len(os.Args) > 1 && os.Args[1] == "claude-mcp" {
 		run = runClaudeMCP

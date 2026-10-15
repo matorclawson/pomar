@@ -32,3 +32,12 @@ func openPTY() (*os.File, string, error) {
 	}
 	return master, fmt.Sprintf("/dev/pts/%d", n), nil
 }
+
+// FlushInput discards pending terminal input before returning to an idle console.
+func FlushInput(f *os.File) error {
+	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), 0x540b, 0) // TCFLSH, TCIFLUSH
+	if err != 0 {
+		return err
+	}
+	return nil
+}

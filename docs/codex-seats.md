@@ -21,7 +21,8 @@ credentials must be obtained in this guest, never copied from another seat.
 The terminal route does not infer authentication from a credential file.
 
 First TUI startup durably records an intent and the pre-existing rollout file
-set. Only one new CLI-root `session_meta` in the guest's exclusive Codex home
+set. The root reader anchors the home with `os.OpenRoot` for walking and opening
+metadata; symlinks cannot redirect reads outside that root. Only one new CLI-root `session_meta` in the guest's exclusive Codex home
 can bind its conversation: the supervisor reads the first metadata line only,
 excluding prior sessions and subagent roots. It never chooses the newest
 thread or parses private transcript contents. The bound ID is resumed
@@ -38,13 +39,34 @@ for any UID1000 process (real, effective, saved or filesystem UID). A surviving
 server holds the operation even after supervisor loss; missing/unreadable process
 entries fail closed. Nothing kills a process to clear that hold.
 
-The dedicated tmux server/socket and configuration are root-owned and private.
-It uses only the fixed supervisor, no user configuration, command/key bindings,
-usable default shell or environment update. Terminal access remains an owner
-capability. The native actor uses only the declared guest environment; the root
-terminal uses a separate fixed environment. This privileged terminal separation,
-Linux process observation and attempted UID1000 interference still require
-native qualification before use.
+The terminal parser runs as dedicated UID/GID1001, neither root nor the coding
+UID1000. Its socket is private to that custodian under
+`/run/pomar-codex-terminal`; its fixed config and launch socket live under
+root-owned `/run/pomar-codex-owner` (root:1001, 0750). The custodian can connect
+to the root:1001 0660 socket but cannot replace its path, edit the config or
+read the root-private fence and startup records. Linux peer credentials bind
+both sides. The broker accepts only a fixed start/resume request, with no
+caller-selected executable, arguments, identity or launch settings.
+
+The pinned parser is Debian bookworm tmux 3.3a-3, whose package digest is in
+the image pins and whose ARM64 executable digest is checked before every
+custodian exec. The [Debian security tracker](https://security-tracker.debian.org/tracker/CVE-2020-27347)
+marks this release fixed for CVE-2020-27347; this is not a claim that the
+parser has no vulnerabilities. Status, renaming, titles, clipboard and
+passthrough are disabled, as are user config, bindings, environment updates
+and the default shell. A parser compromise would have the terminal
+custodian's authority, including control of terminal input, but not root
+fence ownership. Terminal access remains an owner capability.
+
+Codex has its own controlling PTY/session; the idle console uses another.
+Root copies raw bytes without interpreting terminal escapes. Before launch,
+the guest must positively report `dev.tty.legacy_tiocsti=0`; an unavailable
+or enabled setting holds startup instead of weakening the boundary. The
+console flushes pending terminal input before accepting an idle command.
+Both custodian and coding-user exec trampolines set and read back Linux
+`no_new_privs`; the latter also checks actual real/effective UID/GID and
+supplementary groups are exactly 1000/[1000]. These are source safeguards;
+actual guest TIOCSTI and setuid-helper refusal still need native qualification.
 
 The selected executable and helper directories must stay custodian-owned and
 not group/other writable. The first executable is hashed and executed through

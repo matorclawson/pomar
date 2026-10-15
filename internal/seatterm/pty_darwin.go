@@ -33,3 +33,12 @@ func openPTY() (*os.File, string, error) {
 	}
 	return master, string(name[:bytes.IndexByte(name[:], 0)]), nil
 }
+
+func FlushInput(f *os.File) error {
+	flags := int32(1) // FREAD: flush the tty input queue only
+	_, _, err := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCFLUSH, uintptr(unsafe.Pointer(&flags)))
+	if err != 0 {
+		return err
+	}
+	return nil
+}
