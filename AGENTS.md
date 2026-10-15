@@ -1,5 +1,8 @@
 # Pomar for agents
 
+Changing Pomar? Read the [contributors charter](CONTRIBUTING.md) first: propose
+to the owner, build on your seat's fork branch and retain the exact gate evidence.
+
 This is for any program that drives Pomar: a coding agent, a script, a CI
 caller. Every command below prints JSON (except `logs`, which prints the
 job's own output) and has fixed exit codes. `pomar help -json` lists them all.
