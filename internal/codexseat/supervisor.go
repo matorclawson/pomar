@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/zeroemployeeorg/pomar/internal/seatterm"
 )
 
 const Version = "0.160.0"
@@ -139,11 +141,41 @@ func (s Supervisor) readSnapshot(owner uint32) (record, []byte, os.FileInfo, err
 	return r, data, fi, nil
 }
 
-func (s Supervisor) rollouts() ([]string, error) {
-	root := filepath.Join(s.Home, "sessions")
+func (s Supervisor) openHome() (*os.Root, error) {
+	before, e := os.Lstat(s.Home)
+	if e != nil || !before.IsDir() {
+		return nil, ErrHeld
+	}
+	root, e := os.OpenRoot(s.Home)
+	if e != nil {
+		return nil, e
+	}
+	f, e := root.Open(".")
+	if e != nil {
+		root.Close()
+		return nil, e
+	}
+	info, e := f.Stat()
+	f.Close()
+	expected := uint32(1000)
+	if os.Geteuid() != 0 {
+		expected = uint32(os.Getuid())
+	} // fixture only; Start is root-only
+	if e != nil || !os.SameFile(before, info) || info.Mode().Perm()&0077 != 0 {
+		root.Close()
+		return nil, ErrHeld
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != expected {
+		root.Close()
+		return nil, ErrHeld
+	}
+	return root, nil
+}
+func (s Supervisor) rolloutPaths(root *os.Root) ([]string, error) {
 	var paths []string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if errors.Is(err, os.ErrNotExist) && path == root {
+	err := fs.WalkDir(root.FS(), "sessions", func(path string, d fs.DirEntry, err error) error {
+		if errors.Is(err, os.ErrNotExist) && path == "sessions" {
 			return nil
 		}
 		if err != nil {
@@ -153,7 +185,7 @@ func (s Supervisor) rollouts() ([]string, error) {
 			return ErrHeld
 		}
 		if !d.IsDir() && strings.HasSuffix(path, ".jsonl") {
-			paths = append(paths, path)
+			paths = append(paths, filepath.Join(s.Home, path))
 			if len(paths) > 4096 {
 				return ErrHeld
 			}
@@ -162,12 +194,25 @@ func (s Supervisor) rollouts() ([]string, error) {
 	})
 	return paths, err
 }
+func (s Supervisor) rollouts() ([]string, error) {
+	root, e := s.openHome()
+	if e != nil {
+		return nil, e
+	}
+	defer root.Close()
+	return s.rolloutPaths(root)
+}
 
 // bind finds one new CLI-root session in this exclusively owned guest home,
 // using its first metadata line only. Missing/multiple identities are held.
 // It never reads auth files, prompts, later transcript lines, or subagent turns.
 func (s Supervisor) bind(r record) (record, error) {
-	paths, err := s.rollouts()
+	root, err := s.openHome()
+	if err != nil {
+		return r, err
+	}
+	defer root.Close()
+	paths, err := s.rolloutPaths(root)
 	if err != nil {
 		return r, err
 	}
@@ -180,7 +225,7 @@ func (s Supervisor) bind(r record) (record, error) {
 		if before[path] {
 			continue
 		}
-		f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		f, err := root.OpenFile(strings.TrimPrefix(path, s.Home+string(filepath.Separator)), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			return r, ErrHeld
 		}
@@ -271,12 +316,59 @@ func (s Supervisor) launchNative(r record, lock, f *os.File) (runningActor, erro
 	if err := immutableExecutable(self); err != nil {
 		return nil, err
 	}
-	cmd := s.nativeCommand(self, r, f)
-	if err = cmd.Start(); err != nil {
+	master, slave, err := seatterm.ActorPTY(200, 50)
+	if err != nil {
 		return nil, err
 	}
-	return cmd, nil
+	cmd := s.nativeCommand(self, r, f)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	if err = cmd.Start(); err != nil {
+		master.Close()
+		slave.Close()
+		return nil, err
+	}
+	slave.Close()
+	outputDone := make(chan struct{})
+	go func() {
+		defer close(outputDone)
+		buf := make([]byte, 16384)
+		discard := false
+		for {
+			n, e := master.Read(buf)
+			if n > 0 && !discard {
+				if timed, ok := s.Out.(interface{ SetWriteDeadline(time.Time) error }); ok {
+					timed.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				}
+				if _, e := s.Out.Write(buf[:n]); e != nil {
+					discard = true
+				}
+			}
+			if e != nil {
+				return
+			}
+		}
+	}()
+	go func() { io.Copy(master, s.In) }()
+	return &terminalActor{cmd: cmd, master: master, outputDone: outputDone}, nil
 }
+
+type terminalActor struct {
+	cmd        *exec.Cmd
+	master     *os.File
+	outputDone <-chan struct{}
+}
+
+func (p *terminalActor) Wait() error {
+	err := p.cmd.Wait()
+	// Drain final actor output, bounded even when an orphan retains the slave.
+	// Process-table fencing, not a blocked reader, decides whether a later
+	// start may proceed. Never kill descendants to complete terminal teardown.
+	p.master.SetReadDeadline(time.Now().Add(time.Second))
+	<-p.outputDone
+	p.master.Close()
+	return err
+}
+
 func (s Supervisor) nativeCommand(self string, r record, f *os.File) *exec.Cmd {
 	args := append([]string{"codex-seat-exec", "--", s.Binary}, s.Args(r.Thread)...)
 	cmd := exec.Command(self, args...)
@@ -284,7 +376,7 @@ func (s Supervisor) nativeCommand(self string, r record, f *os.File) *exec.Cmd {
 	cmd.Dir = s.Workspace
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = s.In, s.Out, s.Out
 	cmd.ExtraFiles = []*os.File{f} // no actor fence descriptor
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{1000}}}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Credential: &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{1000}}}
 	return cmd
 }
 
@@ -296,6 +388,9 @@ func (s Supervisor) Start() error {
 		return err
 	}
 	if err := immutableParents(filepath.Join(s.StateDir, "actor.lock")); err != nil {
+		return err
+	}
+	if err := checkTTYPolicy(); err != nil {
 		return err
 	}
 	return s.startChecked(s.openNative, s.launchNative, func() error { return noCodingProcesses("/proc", 1000) })
@@ -416,6 +511,9 @@ func immutableParents(binary string) error {
 // ExecPinned is the unprivileged guest trampoline. Its only inherited extra
 // descriptor is the pinned executable, closed at native exec. No fence is passed.
 func ExecPinned(argv []string) error {
+	if err := hardenActor(); err != nil {
+		return err
+	}
 	if len(argv) < 1 || !filepath.IsAbs(argv[0]) {
 		return errors.New("missing pinned native argv")
 	}

@@ -185,7 +185,7 @@ public enum AgentEnvironment {
 
     /// Source is installed once. Restarts retain Git changes, Codex home and
     /// the root-owned broker journal. No host directory is mounted.
-    public static func setupCommand(sourceSHA: String, agent: String = "codex", fixtureSHA256: String? = nil) -> [String] {
+    public static func setupCommand(sourceSHA: String, agent: String = "codex", fixtureSHA256: String? = nil, codexSeat: Bool = false) -> [String] {
         // Codex: /opt/pomar-codex and CODEX_HOME. Claude Code: /opt/pomar-claude
         // and CLAUDE_CONFIG_DIR, and a stale bridge socket from a previous
         // boot removed (the broker refuses to replace one).
@@ -210,8 +210,16 @@ public enum AgentEnvironment {
             : "mkdir -p /opt/pomar-codex /pomar/job/.codex; chmod 700 /pomar/job/.codex; "
                 + "tar -xzf /pomar/codex-package.tar.gz -C /opt/pomar-codex; "
                 + "chmod -R go-w /opt/pomar-codex; chown -R 1000:1000 /pomar/job"
+        // tmux needs a passwd lookup for its dedicated numeric identity. This
+        // is guest-only setup; collisions are refused, never repurposed.
+        let custodian = codexSeat && !claude
+            ? "if getent passwd 1001 >/dev/null; then test \"$(getent passwd 1001)\" = 'pomar-terminal:x:1001:1001:Pomar terminal:/run/pomar-codex-terminal:/bin/false'; "
+                + "else ! getent passwd pomar-terminal >/dev/null && printf '%s\\n' 'pomar-terminal:x:1001:1001:Pomar terminal:/run/pomar-codex-terminal:/bin/false' >> /etc/passwd; fi; "
+                + "if getent group 1001 >/dev/null; then test \"$(getent group 1001)\" = 'pomar-terminal:x:1001:'; "
+                + "else ! getent group pomar-terminal >/dev/null && printf '%s\\n' 'pomar-terminal:x:1001:' >> /etc/group; fi; "
+            : ""
         let script =
-            "set -eu; " + Helper.registerJobUser + "; "
+            "set -eu; " + Helper.registerJobUser + "; " + custodian
             + "mkdir -p /pomar/job /var/lib/pomar-agent /run/pomar; "
             + "mkdir -p /etc/profile.d; printf '%s\\n' 'export PATH=" + path + ":/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' > /etc/profile.d/pomar-agent.sh; chmod 644 /etc/profile.d/pomar-agent.sh; "
             + "chmod 700 /var/lib/pomar-agent /run/pomar; rm -f /run/pomar/agent.sock; "
@@ -327,7 +335,7 @@ public enum AgentEnvironment {
                 try await container.copyIn(from: URL(fileURLWithPath: staged), to: URL(fileURLWithPath: "/pomar/qualification-fixture"), mode: 0o600)
             }
             let setup = try await container.exec("agent-setup") { config in
-                config.arguments = setupCommand(sourceSHA: o.sourceSHA, agent: o.agent ?? "codex", fixtureSHA256: o.qualificationFixture?.sha256); config.stdout = out; config.stderr = out
+                config.arguments = setupCommand(sourceSHA: o.sourceSHA, agent: o.agent ?? "codex", fixtureSHA256: o.qualificationFixture?.sha256, codexSeat: o.seat != nil); config.stdout = out; config.stderr = out
             }
             try await setup.start(); let result = try await setup.wait(); try await setup.delete()
             guard result.exitCode == 0 else { throw CocoaError(.fileReadCorruptFile) }
