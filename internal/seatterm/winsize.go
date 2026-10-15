@@ -14,6 +14,21 @@ func setSize(f *os.File, cols, rows uint16) error {
 	return nil
 }
 
+// foregroundPgrp asks the kernel which process group the PTY master's own
+// slave side currently has, so a stop can confirm a process group is
+// genuinely still this session's before signalling it: a pid the OS has
+// since reused for an unrelated group (each session is setsid'd, so its
+// pgid is its own leader's pid) must never be signalled on this session's
+// say-so. A closed or otherwise unreadable master (this session's own PTY,
+// already torn down) refuses rather than guesses, same as any other error.
+func foregroundPgrp(f *os.File) (int, error) {
+	var pgrp int32
+	if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCGPGRP, uintptr(unsafe.Pointer(&pgrp))); e != 0 {
+		return 0, e
+	}
+	return int(pgrp), nil
+}
+
 // resize sets the window size through a brief reopen of the terminal side.
 // The parent never keeps that side open: if it did, the controlling side
 // would never see the end of the terminal's last process.

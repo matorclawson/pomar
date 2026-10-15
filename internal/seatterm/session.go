@@ -22,6 +22,12 @@ type Command struct {
 	Dir  string
 	UID  int // -1 keeps the caller's
 	GID  int
+	// ExpectedSHA256, if set, pins the exact binary a session's program
+	// must be: the file at Path is opened, hashed and checked once, before
+	// launch, and the launch refuses on any mismatch. See
+	// checkExpectedSHA256's platform files for exactly what window this
+	// does and doesn't close.
+	ExpectedSHA256 string
 }
 
 // Attach runs the command on a new pseudo-terminal sized cols x rows, and

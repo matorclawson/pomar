@@ -1,0 +1,354 @@
+package sessiond
+
+import (
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+)
+
+// zeocouncil/the Architect's review of the #128 stack, part A.
+
+// H1: an operation ID's dedupe record must be bound to what it was asked to
+// do. Reusing the same ID against a different session (or with different
+// text, or a different take) must be refused, never silently replay the
+// first call's result onto the second target.
+func TestSendRefusesAnOperationIDReusedAgainstADifferentSession(t *testing.T) {
+	r := root(t)
+	_, c := serve(t, r)
+	var a, b Created
+	if err := c.Do("POST", "/v1/sessions", shell("op-a", "a", "cat"), &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Do("POST", "/v1/sessions", shell("op-b", "b", "cat"), &b); err != nil {
+		t.Fatal(err)
+	}
+	var out1 opResult
+	if err := c.Do("POST", "/v1/sessions/a/send", SendRequest{Operation: "X", Text: "to-a\n"}, &out1); err != nil {
+		t.Fatalf("send to a: %v", err)
+	}
+	if out1.Outcome != "written" {
+		t.Fatalf("send to a: outcome %q", out1.Outcome)
+	}
+	var out2 opResult
+	err := c.Do("POST", "/v1/sessions/b/send", SendRequest{Operation: "X", Text: "to-b\n"}, &out2)
+	if kindOf(err) != KindConflict {
+		t.Fatalf("send to b with the same ID: err=%v out=%+v, want a conflict", err, out2)
+	}
+	// b never received anything: a's own echo is the only thing on its screen.
+	time.Sleep(200 * time.Millisecond)
+	scr := screenOf(t, c, "b")
+	for _, l := range scr.Lines {
+		if l != "" {
+			t.Fatalf("session b received input meant for a: %q", scr.Lines)
+		}
+	}
+}
+
+// H1, stop's half: the same operation ID stopping two different sessions.
+func TestStopRefusesAnOperationIDReusedAgainstADifferentSession(t *testing.T) {
+	r := root(t)
+	_, c := serve(t, r)
+	var a, b Created
+	if err := c.Do("POST", "/v1/sessions", shell("op-a", "a", "sleep 30"), &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Do("POST", "/v1/sessions", shell("op-b", "b", "sleep 30"), &b); err != nil {
+		t.Fatal(err)
+	}
+	var out1 opResult
+	if err := c.Do("POST", "/v1/sessions/a/stop", StopRequest{Operation: "X"}, &out1); err != nil {
+		t.Fatalf("stop a: %v", err)
+	}
+	if out1.Outcome != "stopped" {
+		t.Fatalf("stop a: outcome %q", out1.Outcome)
+	}
+	var out2 opResult
+	err := c.Do("POST", "/v1/sessions/b/stop", StopRequest{Operation: "X"}, &out2)
+	if kindOf(err) != KindConflict {
+		t.Fatalf("stop b with the same ID: err=%v out=%+v, want a conflict", err, out2)
+	}
+	var l Listing
+	if err := c.Do("GET", "/v1/sessions", nil, &l); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range l.Sessions {
+		if s.Name == "b" && !s.Running {
+			t.Fatal("session b was stopped by an operation ID that was never its own")
+		}
+	}
+}
+
+// The TEST GAP the Architect found by mutation: forcing take=true in send
+// left the shipped suite green. A send without -take must be refused while
+// someone else controls the session, exactly like an attach is.
+func TestSendRefusesWithoutTakeWhileAnotherClientControls(t *testing.T) {
+	r := root(t)
+	_, c := serve(t, r)
+	var created Created
+	if err := c.Do("POST", "/v1/sessions", shell("op-1", "a", "cat"), &created); err != nil {
+		t.Fatal(err)
+	}
+	// A separate client attaches and takes control, driving the real v2
+	// frame protocol (a bare Attach() alone never completes the resize
+	// handshake the server waits on before it calls Control).
+	st, err := c.Attach("a", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	in, inW := io.Pipe()
+	defer inW.Close()
+	go Pump(st, in, io.Discard, 60, 8, nil, nil)
+	var info seatterm.SessionInfo
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if c.Do("GET", "/v1/sessions/a", nil, &info); info.Controller != "" {
+			break
+		}
+	}
+	if info.Controller == "" {
+		t.Fatal("the attach never took control")
+	}
+	var out opResult
+	err = c.Do("POST", "/v1/sessions/a/send", SendRequest{Operation: "op-2", Text: "hello\n"}, &out)
+	if err == nil {
+		t.Fatalf("a send without -take was not refused while another client controls: %+v", out)
+	}
+}
+
+// H2: a create retried after the host's own memory of the operation has
+// been pruned (internal/seatterm/host.go's byOp, bounded at 256) must never
+// start a second program. 257 short-lived creates evict the host's record
+// of the first one; a retry of that first operation must then refuse,
+// never orphan whatever currently holds the name.
+func TestCreateRefusesARetryAfterTheHostHasPrunedItsOwnRecord(t *testing.T) {
+	if os.Getenv("POMAR_SLOW_TESTS") == "" {
+		t.Skip("set POMAR_SLOW_TESTS=1: this test drives 257 sequential creates")
+	}
+	r := root(t)
+	_, c := serve(t, r)
+	first := CreateRequest{Operation: "op-0", Name: "foo", Path: "/bin/sh", Args: []string{"-c", "true"}, Cols: 20, Rows: 5}
+	var firstCreated Created
+	if err := c.Do("POST", "/v1/sessions", first, &firstCreated); err != nil {
+		t.Fatal(err)
+	}
+	waitExited := func(name string) {
+		for end := time.Now().Add(15 * time.Second); time.Now().Before(end); time.Sleep(2 * time.Millisecond) {
+			var info seatterm.SessionInfo
+			if c.Do("GET", "/v1/sessions/"+name, nil, &info) == nil && !info.Running {
+				return
+			}
+		}
+		t.Fatalf("%s never exited", name)
+	}
+	waitExited("foo")
+	// 256 more distinct, immediately-exiting creates: the host's own byOp
+	// remembers at most 256 creations, so op-0's record is evicted once
+	// this many later ones have been made. Each waits for its own exit
+	// before the next starts, so the live bound (8) is never at issue.
+	for i := 1; i <= 256; i++ {
+		name := "n" + strconv.Itoa(i)
+		req := CreateRequest{Operation: "op-" + strconv.Itoa(i), Name: name, Path: "/bin/sh", Args: []string{"-c", "true"}, Cols: 20, Rows: 5}
+		var out Created
+		if err := c.Do("POST", "/v1/sessions", req, &out); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		waitExited(name)
+	}
+	// A legitimate second session takes the name "foo" after the first one
+	// has exited: this is not the retry below, a different operation.
+	second := CreateRequest{Operation: "op-foo-2", Name: "foo", Path: "/bin/sh", Args: []string{"-c", "sleep 30"}, Cols: 20, Rows: 5}
+	var secondCreated Created
+	if err := c.Do("POST", "/v1/sessions", second, &secondCreated); err != nil {
+		t.Fatalf("the legitimate second create of foo: %v", err)
+	}
+	if !secondCreated.Created || secondCreated.ID == firstCreated.ID {
+		t.Fatalf("the second foo didn't get its own session: %+v", secondCreated)
+	}
+	// Now retry op-0, the FIRST operation, whose record the host has
+	// pruned. sessiond's own (unpruned) memory still says op-0 created
+	// "foo", but "foo" now belongs to someone else, running. This must
+	// refuse, and must never orphan the real holder.
+	var retry Created
+	err := c.Do("POST", "/v1/sessions", first, &retry)
+	if kindOf(err) != KindConflict {
+		t.Fatalf("retrying op-0 after the host pruned it: err=%v out=%+v, want a conflict", err, retry)
+	}
+	var l Listing
+	if err := c.Do("GET", "/v1/sessions", nil, &l); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, s := range l.Sessions {
+		if s.Name == "foo" {
+			n++
+			if s.ID != secondCreated.ID || !s.Running {
+				t.Fatalf("foo's real holder was replaced or orphaned: %+v", s)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("foo has %d entries, want exactly 1 (no orphaned second program)", n)
+	}
+}
+
+// H3: a stop whose leader was reaped and whose group is confirmed gone
+// still reports a clean 200/stopped; the fix only changes what happens
+// when the host can't confirm that (internal/seatterm/host.go:303-308),
+// which needs a group member that survives a SIGKILL to reproduce and
+// isn't practical to force deterministically in a fast test. Checked
+// instead by reading the fix itself: stop's two success paths
+// (server.go's "exited" closure and its own final reply) both now gate on
+// rep.Leader=="reaped" && rep.Group=="gone" before reporting 200/stopped,
+// the exact two citations the review named.
+func TestStopReportsCleanlyWhenNothingRemains(t *testing.T) {
+	r := root(t)
+	_, c := serve(t, r)
+	var created Created
+	if err := c.Do("POST", "/v1/sessions", shell("op-1", "a", "sleep 30"), &created); err != nil {
+		t.Fatal(err)
+	}
+	var out opResult
+	if err := c.Do("POST", "/v1/sessions/a/stop", StopRequest{Operation: "op-2"}, &out); err != nil {
+		t.Fatalf("a plain stop: %v", err)
+	}
+	if out.Outcome != "stopped" || out.Leader != "reaped" || out.Group != "gone" {
+		t.Fatalf("a clean stop: %+v", out)
+	}
+	// Already exited, cleanly: the "already-exited" path reports the same
+	// clean shape, not uncertain.
+	if err := c.Do("POST", "/v1/sessions", shell("op-3", "b", "true"), &created); err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		var info seatterm.SessionInfo
+		if c.Do("GET", "/v1/sessions/b", nil, &info) == nil && !info.Running {
+			break
+		}
+	}
+	var out2 opResult
+	if err := c.Do("POST", "/v1/sessions/b/stop", StopRequest{Operation: "op-4"}, &out2); err != nil {
+		t.Fatalf("stop on an already-exited session: %v", err)
+	}
+	if out2.Outcome != "already-exited" || out2.Leader != "reaped" || out2.Group != "gone" {
+		t.Fatalf("already-exited, cleanly: %+v", out2)
+	}
+}
+
+// zeocouncil's and the Architect's BLOCKER on #128's stack: a paste
+// containing an embedded ESC[201~ ended bracketed-paste mode early, so
+// everything after it arrived at the program as TYPED input, not pasted
+// text. The server now refuses any ESC byte in a paste (unless -raw),
+// rather than the client doing its own wrapping the server never checks.
+func TestPasteRefusesAnEmbeddedBracketMarker(t *testing.T) {
+	s, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-1", "echo", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	payload := "benign \x1b[201~ INJECTED-AS-TYPED \x1b[200~ tail"
+	err := c.Do("POST", "/v1/sessions/echo/send", SendRequest{Operation: "paste-1", Text: payload, Paste: true}, nil)
+	if kindOf(err) != KindUsage {
+		t.Fatalf("a payload with an embedded bracket marker wasn't refused: %v", err)
+	}
+	// Nothing was queued or written: the screen never shows any of it, not
+	// even the "benign" prefix before the embedded marker.
+	time.Sleep(100 * time.Millisecond)
+	if scr := screenOf(t, c, "echo"); strings.Contains(strings.Join(scr.Lines, "\n"), "benign") {
+		t.Fatalf("the refused payload reached the program anyway: %q", scr.Lines)
+	}
+	s.Close()
+}
+
+// A payload with no ESC byte is bracketed and delivered normally.
+func TestPasteBracketsAndDeliversACleanPayload(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-2", "echo2", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Do("POST", "/v1/sessions/echo2/send", SendRequest{Operation: "paste-2", Text: "hello paste world", Paste: true}, nil); err != nil {
+		t.Fatalf("a clean payload was refused: %v", err)
+	}
+	waitScreen(t, c, "echo2", "hello paste world")
+}
+
+// -raw skips both the scan and the bracketing: the caller is asking for
+// exactly these bytes, ESC included, and accepts that explicitly.
+func TestPasteRawSendsExactlyWhatWasGiven(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-3", "echo3", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Do("POST", "/v1/sessions/echo3/send", SendRequest{Operation: "paste-3", Text: "raw \x1b[6n ok", Paste: true, Raw: true}, nil); err != nil {
+		t.Fatalf("a raw paste was refused: %v", err)
+	}
+	waitScreen(t, c, "echo3", "ok")
+}
+
+// A paste over its own bound is refused before anything is queued.
+func TestPasteRefusesOverItsOwnBound(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-4", "echo4", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	huge := strings.Repeat("x", maxPasteBytes+1)
+	err := c.Do("POST", "/v1/sessions/echo4/send", SendRequest{Operation: "paste-4", Text: huge, Paste: true}, nil)
+	if kindOf(err) != KindTooLarge {
+		t.Fatalf("an over-bound paste wasn't refused as too large: %v", err)
+	}
+}
+
+// zeocouncil's correction on cee2326: decodeLimit/sendBodyLimit applied the
+// paste-sized body allowance (maxPasteBytes*8) to EVERY send, not only
+// Paste ones, so a plain send's body could be as large as a paste's before
+// anything about Paste was even consulted. An ordinary send (Paste unset)
+// must still be held to decodeBodyLimit (1 MiB), by the raw body byte
+// count actually read, regardless of how small req.Text ends up being.
+func TestOrdinarySendRefusesABodyOverTheOrdinaryLimit(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-5", "echo5", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	// Paste is left false: an ordinary send whose own JSON body (dominated
+	// by Text) is well past decodeBodyLimit but still under sendBodyLimit,
+	// so the bug let it through as a "paste-sized" body for a plain send.
+	big := strings.Repeat("x", decodeBodyLimit+4096)
+	err := c.Do("POST", "/v1/sessions/echo5/send", SendRequest{Operation: "big-1", Text: big}, nil)
+	if kindOf(err) != KindTooLarge {
+		t.Fatalf("an ordinary send's over-limit body wasn't refused: %v", err)
+	}
+}
+
+// The C1 CSI introducer's UTF-8 encoding (0xC2 0x9B, what a JSON \u009b
+// escape actually produces on the wire) ends bracketed-paste mode exactly
+// as ESC[201~ does on a terminal that honours the 8-bit form directly: the
+// rest of the payload after it would be delivered as typed input, not
+// pasted text. It must be refused exactly like a literal ESC byte.
+//
+// A lone raw 0x9b byte is NOT tested here: it's invalid UTF-8 on its own,
+// and this client's own json.Marshal (encoding/json, Go stdlib) replaces
+// any invalid UTF-8 in a string with U+FFFD before the request ever
+// leaves the process -- confirmed directly (marshaling "\x9b" alone
+// produces the 3-byte U+FFFD, not 0x9b). So a lone 0x9b can never reach
+// the server over this JSON transport; pasteText's raw-byte check for it
+// is defense in depth for a caller that isn't going through encoding/json
+// (or a future non-JSON transport), not something this HTTP-API test can
+// exercise.
+func TestPasteRefusesAC1CSIIntroducer(t *testing.T) {
+	_, c := serve(t, root(t))
+	if err := c.Do("POST", "/v1/sessions", shell("op-paste-6", "echo6", "cat"), nil); err != nil {
+		t.Fatal(err)
+	}
+	payload := "benign \xc2\x9b INJECTED tail" // U+009B's UTF-8 encoding
+	err := c.Do("POST", "/v1/sessions/echo6/send", SendRequest{Operation: "paste-6", Text: payload, Paste: true}, nil)
+	if kindOf(err) != KindUsage {
+		t.Fatalf("a payload with a C1 CSI introducer (%q) wasn't refused: %v", payload, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if scr := screenOf(t, c, "echo6"); strings.Contains(strings.Join(scr.Lines, "\n"), "benign") {
+		t.Fatalf("the refused C1 payload reached the program anyway: %q", scr.Lines)
+	}
+}

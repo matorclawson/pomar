@@ -217,6 +217,18 @@ func (t *Terminal) Row(y int) string {
 	return rowText(t.grid()[y])
 }
 
+// HistoryText renders History as text, oldest first, the same way Row
+// renders the active screen: readable without attaching, matching what an
+// attached client would have scrolled past.
+func (t *Terminal) HistoryText() []string {
+	h := t.History()
+	out := make([]string, len(h))
+	for i, line := range h {
+		out[i] = rowText(line.Cells)
+	}
+	return out
+}
+
 func rowText(r []Cell) string {
 	var b []byte
 	end := 0
@@ -478,4 +490,27 @@ func mend(row []Cell) {
 			}
 		}
 	}
+}
+
+// Held reports how many of the bytes fed so far the model holds unapplied:
+// a sequence or character still incomplete. A snapshot followed by those
+// bytes, then by everything fed after, renders the same screen. ok is false
+// when that can't be said: inside an over-long string, which is forwarded as
+// it comes and never held, or when a control inside a held sequence has
+// already acted.
+func (t *Terminal) Held() (n int, ok bool) {
+	p := &t.p
+	switch p.state {
+	case ground:
+		return len(p.utf8), true
+	case passString, passStringEsc:
+		return 0, false
+	case escape, escInter, csiEntry:
+		for _, c := range p.seq[1:] {
+			if c < 0x20 {
+				return len(p.seq), false
+			}
+		}
+	}
+	return len(p.seq), true
 }

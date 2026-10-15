@@ -480,3 +480,31 @@ func FuzzFeedNeverPanics(f *testing.F) {
 		}
 	})
 }
+
+// Held counts exactly the bytes a cut must resend: a snapshot, then the
+// held bytes, then the rest, renders the whole stream's screen.
+func TestHeldBytesCompleteACut(t *testing.T) {
+	stream := []byte("one\r\n\x1b[1;31mred\x1b[0m two \xe2\x82\xac\x1b]0;title\x07end")
+	for cut := 0; cut <= len(stream); cut++ {
+		whole := New(20, 4, 10)
+		whole.Feed(stream)
+		a := New(20, 4, 10)
+		a.Feed(stream[:cut])
+		held, ok := a.Held()
+		if !ok {
+			t.Fatalf("cut %d: not exact", cut)
+		}
+		b := New(20, 4, 10)
+		b.Feed(a.Snapshot())
+		b.Feed(stream[cut-held : cut])
+		b.Feed(stream[cut:])
+		for y := 0; y < 4; y++ {
+			if b.Row(y) != whole.Row(y) {
+				t.Fatalf("cut %d (held %d), row %d: %q, want %q", cut, held, y, b.Row(y), whole.Row(y))
+			}
+		}
+		if b.Title() != whole.Title() {
+			t.Fatalf("cut %d: title %q", cut, b.Title())
+		}
+	}
+}

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/zeroemployeeorg/pomar/internal/termstate"
 )
 
 // journal is an in-memory audit that can be made to fail.
@@ -163,10 +165,10 @@ func TestOnlyTheControllerReachesThePTY(t *testing.T) {
 	}
 	ctl, snap, _ := s.Attach("operator")
 	defer ctl.Detach()
-	if _, err := ctl.Control(false, "test"); err != nil {
+	if _, err := ctl.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := viewer.Control(false, "test"); err != ErrControlled {
+	if _, err := viewer.Control(false, "test", nil); err != ErrControlled {
 		t.Fatalf("a second controller was granted: %v", err)
 	}
 	if err := ctl.Input([]byte("hello\n")); err != nil {
@@ -197,7 +199,7 @@ func TestATakeoverFencesTheOldControllersQueuedInput(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	a, snap, _ := s.Attach("seat")
 	defer a.Detach()
-	if _, err := a.Control(false, "test"); err != nil {
+	if _, err := a.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	filler := bytes.Repeat([]byte("."), MaxData)
@@ -212,7 +214,7 @@ func TestATakeoverFencesTheOldControllersQueuedInput(t *testing.T) {
 	b, _, _ := s.Attach("operator")
 	defer b.Detach()
 	start := time.Now()
-	if _, err := b.Control(true, "operator takeover"); err != nil {
+	if _, err := b.Control(true, "operator takeover", nil); err != nil {
 		t.Fatalf("takeover: %v", err)
 	}
 	if time.Since(start) > defaultFenceBound+time.Second {
@@ -243,7 +245,7 @@ func TestNoGrantWithoutItsJournalButRevocationAlways(t *testing.T) {
 	}
 	defer s.cmd.Process.Kill()
 	c, _, _ := s.Attach("operator")
-	if _, err := c.Control(false, "test"); err != nil {
+	if _, err := c.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	j.mu.Lock()
@@ -257,7 +259,7 @@ func TestNoGrantWithoutItsJournalButRevocationAlways(t *testing.T) {
 	if s.Info().Controller != "" {
 		t.Fatal("release was held up by the journal")
 	}
-	if _, err := c.Control(false, "test"); err != ErrAudit {
+	if _, err := c.Control(false, "test", nil); err != ErrAudit {
 		t.Fatalf("a grant without its journal: %v", err)
 	}
 	c.Detach()
@@ -318,7 +320,7 @@ func TestAnExitedSessionGrantsNothing(t *testing.T) {
 		t.Fatalf("state %+v", in)
 	}
 	c, _, _ := s.Attach("operator")
-	if _, err := c.Control(false, "test"); err != ErrSessionExited {
+	if _, err := c.Control(false, "test", nil); err != ErrSessionExited {
 		t.Fatalf("control of an exited session: %v", err)
 	}
 	if !j.has("exit", "outcome", "ok") {
@@ -337,11 +339,11 @@ func TestADetachedClientControlsNothing(t *testing.T) {
 	}
 	defer s.cmd.Process.Kill()
 	c, _, _ := s.Attach("operator")
-	if _, err := c.Control(false, "test"); err != nil {
+	if _, err := c.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	c.Detach()
-	if _, err := c.Control(false, "again"); err == nil {
+	if _, err := c.Control(false, "again", nil); err == nil {
 		t.Fatal("a detached client regained control")
 	}
 	if c.Input([]byte("x")) != ErrNotController || c.Resize(90, 30) != ErrNotController {
@@ -369,7 +371,7 @@ func TestDetachRacingControlNeverLeavesADetachedController(t *testing.T) {
 		}
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go func() { defer wg.Done(); c.Control(false, "race") }()
+		go func() { defer wg.Done(); c.Control(false, "race", nil) }()
 		go func() { defer wg.Done(); c.Detach() }()
 		wg.Wait()
 		if in := s.Info(); in.Controller == principal {
@@ -392,7 +394,7 @@ func TestWriteOutcomesAreCounted(t *testing.T) {
 	defer s.cmd.Process.Kill()
 	c, snap, _ := s.Attach("operator")
 	defer c.Detach()
-	if _, err := c.Control(false, "test"); err != nil {
+	if _, err := c.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
 	c.Input([]byte("one\n"))
@@ -419,7 +421,7 @@ func TestATakeoverCutsAWriteToAProgramThatNeverReads(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	a, _, _ := s.Attach("seat")
 	defer a.Detach()
-	a.Control(false, "test")
+	a.Control(false, "test", nil)
 	for i := 0; i < 4; i++ {
 		a.Input(bytes.Repeat([]byte("."), MaxData))
 	}
@@ -434,7 +436,7 @@ func TestATakeoverCutsAWriteToAProgramThatNeverReads(t *testing.T) {
 	b, _, _ := s.Attach("operator")
 	defer b.Detach()
 	start := time.Now()
-	epoch, err := b.Control(true, "takeover")
+	epoch, err := b.Control(true, "takeover", nil)
 	if err != nil {
 		t.Fatalf("takeover: %v", err)
 	}
@@ -464,7 +466,7 @@ func TestATakeoverThatCantConfirmTheFenceGrantsNothing(t *testing.T) {
 	defer s.cmd.Process.Kill()
 	a, _, _ := s.Attach("seat")
 	defer a.Detach()
-	a.Control(false, "test")
+	a.Control(false, "test", nil)
 	a.Input([]byte("x"))
 	for d := time.Now().Add(5 * time.Second); time.Now().Before(d); time.Sleep(10 * time.Millisecond) {
 		s.mu.Lock()
@@ -476,7 +478,7 @@ func TestATakeoverThatCantConfirmTheFenceGrantsNothing(t *testing.T) {
 	}
 	b, _, _ := s.Attach("operator")
 	defer b.Detach()
-	if _, err := b.Control(true, "takeover"); err != ErrFenceUncertain {
+	if _, err := b.Control(true, "takeover", nil); err != ErrFenceUncertain {
 		t.Fatalf("an unconfirmed fence: %v", err)
 	}
 	if in := s.Info(); in.Controller != "" {
@@ -609,7 +611,7 @@ func TestASlowJournalHoldsNothingUp(t *testing.T) {
 	c, _, _ := s.Attach("operator")
 	defer c.Detach()
 	delay.Store(true)
-	go c.Control(false, "slow")
+	go c.Control(false, "slow", nil)
 	time.Sleep(700 * time.Millisecond) // past the intent's record, inside the outcome's
 	start := time.Now()
 	s.Info()
@@ -710,5 +712,88 @@ func TestAStragglerThatIgnoresHUPDoesntKeepTheSessionAlive(t *testing.T) {
 	}
 	if !j.has("exit", "outcome", "ok") {
 		t.Fatal("the exit wasn't journaled")
+	}
+}
+
+// An attach's screen cut, fed to a terminal and followed by the output from
+// its offset, renders the session's own screen, without its history.
+func TestTheScreenCutRendersTheLiveScreen(t *testing.T) {
+	h, _ := newHost(t)
+	s, _, err := h.Create("op-20", "operator", sh(`i=0; while [ $i -lt 60 ]; do printf 'line %d\n' $i; i=$((i+1)); done; printf '\033[2;5H\033[1mbold\033[0m'; read l; printf 'after:%s' "$l"; sleep 30`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	c, _, _ := s.Attach("operator")
+	collect(t, c, nil, "bold")
+	c.Detach()
+	v, snap, _ := s.Attach("viewer")
+	defer v.Detach()
+	if !snap.ScreenExact || snap.ScreenFormat != termstate.SnapshotVersion {
+		t.Fatalf("cut %+v", snap)
+	}
+	op, _, _ := s.Attach("operator")
+	defer op.Detach()
+	if _, err := op.Control(false, "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	op.Input([]byte("go\n"))
+	live := collect(t, v, nil, "after:go")
+	model := termstate.New(int(snap.Cols), int(snap.Rows), 0)
+	model.Feed(snap.Screen)
+	model.Feed(live)
+	want := s.Screen()
+	for y, line := range want.Lines {
+		if model.Row(y) != line {
+			t.Fatalf("row %d: %q, want %q", y, model.Row(y), line)
+		}
+	}
+	if !strings.Contains(strings.Join(want.Lines, "\n"), "after:go") || strings.Contains(strings.Join(want.Lines, "\n"), "line 0\n") {
+		t.Fatalf("screen %q", want.Lines)
+	}
+}
+
+// AttachHidden is a viewer in every way that matters for fan-out (it gets
+// output, falls behind and resnapshots the same as any other), but never
+// shows in Viewers, Presence, or the audit journal: sessiond's durable log
+// uses it precisely so it isn't mistaken for a real client.
+func TestAttachHiddenIsInvisibleButStillAViewer(t *testing.T) {
+	h, j := newHost(t)
+	s, _, err := h.Create("op-hidden", "operator", sh("printf hi; sleep 30"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.cmd.Process.Kill()
+	hc, snap, err := s.AttachHidden("log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Data) != 0 && !strings.Contains(string(snap.Data), "hi") {
+		t.Fatalf("hidden snapshot: %q", snap.Data)
+	}
+	if in := s.Info(); len(in.Viewers) != 0 {
+		t.Fatalf("a hidden client is listed: %+v", in.Viewers)
+	}
+	vc, _, err := s.Attach("viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vc.Detach()
+	if p := vc.Presence(); len(p.Viewers) != 1 || p.Viewers[0] != "viewer" {
+		t.Fatalf("presence lists the hidden client: %+v", p.Viewers)
+	}
+	collect(t, hc, nil, "hi") // it still receives output, the same as any viewer
+	if j.has("attach", "outcome", "ok") {
+		for _, r := range j.recs {
+			if r.Action == "attach" && r.Principal == "log" {
+				t.Fatal("a hidden attach was journaled")
+			}
+		}
+	}
+	hc.Detach()
+	for _, r := range j.recs {
+		if r.Action == "detach" && r.Principal == "log" {
+			t.Fatal("a hidden detach was journaled")
+		}
 	}
 }

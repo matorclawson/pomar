@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/zeroemployeeorg/pomar/internal/termstate"
 )
 
 // SessionHost holds a seat's terminal sessions in its guest, in place of a
@@ -47,7 +49,9 @@ const (
 	RetainBytes = 1 << 20 // a session's retained output
 	viewerQueue = 256     // output chunks queued for one client
 	inputQueue  = 64      // input and resize writes queued for the PTY
-
+	// HistoryLines bounds the lines a session's screen model keeps above
+	// its screen.
+	HistoryLines = 2000
 )
 
 // defaultFenceBound bounds how long a take waits for the old controller's
@@ -66,6 +70,7 @@ var (
 	ErrOperationConflict  = errors.New("this operation ID already created a session with a different spec")
 	ErrTerminateUncertain = errors.New("the program could not be confirmed stopped")
 	ErrCreating           = errors.New("this operation is still creating its session; ask again")
+	ErrEpochStale         = errors.New("control has changed since the epoch you expected; read it again")
 )
 
 // AuditRecord is the metadata the host journals for every grant, revocation
@@ -230,29 +235,55 @@ func (h *SessionHost) forget(id string) {
 	h.mu.Unlock()
 }
 
-// Terminate stops a session's program: a hangup to its process group, then
-// a kill if it is still running after the grace period. Viewing or
-// controlling a session grants no terminate: the caller authorises it. It
-// returns once the program's leader is reaped, or ErrTerminateUncertain. It
-// waits on the reap itself, so a slow journal never makes it uncertain, and
-// it never signals a group whose leader is reaped, as that pid may be reused.
-// Since LOW 3, startSession's own reaper also kills the group immediately
-// behind every reap, whatever the cause: Terminate's own grace-then-kill is
-// mostly redundant with that now, but its HUP still asks first, before
-// either side reaches for SIGKILL.
+// Terminate stops a session's program, as Stop does, and reports only
+// whether its leader was confirmed reaped.
 func (h *SessionHost) Terminate(operation, principal, id string) error {
+	_, err := h.Stop(operation, principal, id)
+	return err
+}
+
+// StopReport is what a stop read back: the program's leader, and the rest
+// of its process group.
+type StopReport struct {
+	Leader      string `json:"leader"`       // reaped, or running (the stop is uncertain)
+	Group       string `json:"group"`        // gone, or remaining: a process in the leader's group outlived the stop
+	GroupKilled bool   `json:"group_killed"` // a group member outlived the hangup and was killed
+}
+
+// Stop stops a session's program: a hangup to its process group, then a
+// kill if the leader still runs after the grace period. Viewing or
+// controlling a session grants no stop: the caller authorises it. It waits
+// on the leader's reap itself, so a slow journal never makes it uncertain,
+// and it signals the group only while the group is known to exist: a leader
+// reaped with its group empty leaves a pid that may be reused. Once the
+// leader is reaped, startSession's own goroutine has already killed any
+// member that outlived it (so pump sees EIO and the session is noticed to
+// have ended even without a Stop: zeocouncil's review of #126, LOW 3); Stop
+// only reads back whether that found one to kill, then confirms the group
+// is actually gone. A process that left the group (its own setsid or
+// setpgid) is outside what this reads.
+func (h *SessionHost) Stop(operation, principal, id string) (StopReport, error) {
 	s, ok := h.Session(id)
 	if !ok {
-		return errors.New("no live session with that ID")
+		return StopReport{}, errors.New("no live session with that ID")
 	}
 	if err := h.record(AuditRecord{Operation: operation, Action: "terminate", Phase: "intent", Principal: principal, Session: id}); err != nil {
-		return ErrAudit
+		return StopReport{}, ErrAudit
 	}
-	outcome, err := "ok", error(nil)
+	rep, err := StopReport{Leader: "reaped", Group: "gone"}, error(nil)
 	pgid := s.cmd.Process.Pid
 	signal := func(sig syscall.Signal) {
 		select {
-		case <-s.reaped: // the leader's pid is free: never signal it
+		case <-s.reaped:
+			// The leader's pid is free for reuse. groupExists alone only
+			// asks "does any group with this id exist", which a reused pid
+			// answers yes to for someone else's unrelated session (the
+			// Architect's review of #128's stack, M1): confirm the group
+			// this PTY's own slave side currently has is still exactly
+			// this one before ever signalling it.
+			if pg, err := foregroundPgrp(s.master); err == nil && pg == pgid {
+				syscall.Kill(-pgid, sig)
+			}
 		default:
 			syscall.Kill(-pgid, sig)
 		}
@@ -265,12 +296,51 @@ func (h *SessionHost) Terminate(operation, principal, id string) error {
 		select {
 		case <-s.reaped:
 		case <-time.After(h.fenceBound):
-			outcome, err = "uncertain", ErrTerminateUncertain
+			rep.Leader, err = "running", ErrTerminateUncertain
 		}
 	}
-	h.record(AuditRecord{Operation: operation, Action: "terminate", Phase: "outcome", Principal: principal, Session: id, Outcome: outcome})
-	return err
+	if err == nil {
+		// s.groupSurvived was set, once, before s.reaped closed above: a
+		// stop's own grace-and-kill would almost always arrive after
+		// startSession's goroutine already did it, and so would almost
+		// always under-report; this reads the one place that saw the
+		// truth in time.
+		rep.GroupKilled = s.groupSurvived
+		if !s.groupGone(h.fenceBound) {
+			rep.Group = "remaining"
+		}
+	}
+	outcome := "ok"
+	if err != nil || rep.Group != "gone" {
+		outcome = "uncertain"
+	}
+	h.record(AuditRecord{Operation: operation, Action: "terminate", Phase: "outcome", Principal: principal, Session: id, Outcome: outcome,
+		Reason: fmt.Sprintf("leader %s, group %s", rep.Leader, rep.Group)})
+	return rep, err
 }
+
+// groupExists reports whether any process is in the process group pgid. A
+// member this user can't signal still counts.
+func groupExists(pgid int) bool {
+	err := syscall.Kill(-pgid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// groupGone waits, up to bound, for the session's process group to empty.
+func (s *TermSession) groupGone(bound time.Duration) bool {
+	for end := time.Now().Add(bound); ; time.Sleep(20 * time.Millisecond) {
+		if !groupExists(s.cmd.Process.Pid) {
+			return true
+		}
+		if !time.Now().Before(end) {
+			return false
+		}
+	}
+}
+
+// GroupRemains reports whether a process in the session's process group is
+// still there: after the leader exits, a member that ignored the hangup.
+func (s *TermSession) GroupRemains() bool { return groupExists(s.cmd.Process.Pid) }
 
 // Session returns a session by its ID.
 func (h *SessionHost) Session(id string) (*TermSession, bool) {
@@ -282,17 +352,20 @@ func (h *SessionHost) Session(id string) (*TermSession, bool) {
 
 // SessionInfo is a session as listed.
 type SessionInfo struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Kind       string   `json:"kind"`
-	Running    bool     `json:"running"`
-	ExitCode   *int     `json:"exit_code,omitempty"`
-	LastOutput string   `json:"last_output,omitempty"`
-	Cols       uint16   `json:"cols"`
-	Rows       uint16   `json:"rows"`
-	Controller string   `json:"controller,omitempty"`
-	Epoch      uint64   `json:"epoch"`
-	Viewers    []string `json:"viewers"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Kind       string     `json:"kind"`
+	Running    bool       `json:"running"`
+	ExitCode   *int       `json:"exit_code,omitempty"`
+	LastOutput string     `json:"last_output,omitempty"`
+	Cols       uint16     `json:"cols"`
+	Rows       uint16     `json:"rows"`
+	Controller string     `json:"controller,omitempty"`
+	Epoch      uint64     `json:"epoch"`
+	Viewers    []string   `json:"viewers"`
+	Program    string     `json:"program"`       // the program's path
+	Dir        string     `json:"dir,omitempty"` // its working directory
+	Agent      AgentState `json:"agent"`         // adapter-reported; unknown without one
 }
 
 // List returns every session, ordered by name then ID.
@@ -319,6 +392,7 @@ func (h *SessionHost) List() []SessionInfo {
 // TermSession is one program on a PTY the host owns.
 type TermSession struct {
 	ID, Name, Kind string
+	Program, Dir   string // the program's path and working directory: metadata, never its arguments or environment
 	host           *SessionHost
 	master         *os.File
 	tty            string
@@ -327,10 +401,12 @@ type TermSession struct {
 	done           chan struct{} // closed once the program has exited and its output is drained
 	reaped         chan struct{} // closed once the program's leader is reaped: its pid is free from then on
 	waitErr        error         // the leader's wait, set before reaped closes
+	groupSurvived  bool          // a group member outlived the leader and was killed for it; set before reaped closes
 
 	mu         sync.Mutex
-	fence      *sync.Cond // signalled when an in-flight write ends
-	log        ring       // retained output, the bytes [base, end)
+	fence      *sync.Cond          // signalled when an in-flight write ends
+	log        ring                // retained output, the bytes [base, end)
+	term       *termstate.Terminal // the screen the output so far renders
 	base, end  uint64
 	exited     bool
 	exitCode   int
@@ -339,7 +415,9 @@ type TermSession struct {
 	viewers    map[*Client]struct{}
 	controller *Client
 	epoch      uint64
-	inflight   uint64 // the epoch of the write now at the PTY, or 0
+	inflight   uint64        // the epoch of the write now at the PTY, or 0
+	agent      AgentState    // what the session's adapter last reported
+	agentCh    chan struct{} // closed at the next report
 }
 
 type pendingWrite struct {
@@ -374,7 +452,16 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	if c.UID >= 0 && c.GID >= 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(c.UID), Gid: uint32(c.GID)}
 	}
+	closeAfterStart, err := checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256)
+	if err != nil {
+		slave.Close()
+		master.Close()
+		return nil, err
+	}
 	err = cmd.Start()
+	if closeAfterStart != nil {
+		closeAfterStart() // the child has its own copy now; the parent's would otherwise leak one fd per launch
+	}
 	slave.Close()
 	if err != nil {
 		master.Close()
@@ -382,7 +469,9 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	}
 	s := &TermSession{ID: id, Name: spec.Name, Kind: spec.Kind, host: h, master: master, tty: tty, cmd: cmd,
 		writes: make(chan pendingWrite, inputQueue), done: make(chan struct{}), reaped: make(chan struct{}),
-		cols: spec.Cols, rows: spec.Rows, viewers: map[*Client]struct{}{}}
+		cols: spec.Cols, rows: spec.Rows, viewers: map[*Client]struct{}{},
+		term:    termstate.New(int(spec.Cols), int(spec.Rows), HistoryLines),
+		Program: c.Path, Dir: c.Dir, agent: AgentState{State: "unknown"}, agentCh: make(chan struct{})}
 	s.fence = sync.NewCond(&s.mu)
 	// The leader is reaped as soon as it exits, not once its output is
 	// drained: a background child holding the terminal open never delays it.
@@ -397,6 +486,12 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	// review of #126, LOW 3).
 	go func() {
 		s.waitErr = cmd.Wait()
+		// Whether anything was actually there to kill is recorded here,
+		// once, before reaped closes: the only truthful place to ask, since
+		// this kill is what a stop's own after-the-fact check would race
+		// against and nearly always lose (the group is already gone by the
+		// time Stop gets to look).
+		s.groupSurvived = groupExists(cmd.Process.Pid)
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		close(s.reaped)
 	}()
@@ -452,6 +547,12 @@ func (s *TermSession) output(b []byte) {
 	s.base += uint64(s.log.write(b))
 	s.end += uint64(len(b))
 	s.lastOutput = s.host.now()
+	// The model only watches: what it forwards and the answers it would give
+	// are dropped, so the PTY and every client get exactly the program's
+	// bytes, as before. A controller's own terminal answers the program's
+	// queries, as it does without a session host.
+	s.term.Feed(b)
+	s.term.Replies()
 	for c := range s.viewers {
 		if c.behind {
 			continue
@@ -498,6 +599,7 @@ func (s *TermSession) writer() {
 			s.mu.Lock()
 			if err == nil { // only an applied size changes the recorded one, and is announced
 				s.cols, s.rows = w.cols, w.rows
+				s.term.Resize(int(w.cols), int(w.rows))
 				for c := range s.viewers {
 					c.notify(Event{Kind: EventState})
 				}
@@ -540,7 +642,8 @@ func (c *Client) Outcomes() Outcomes {
 func (s *TermSession) Info() SessionInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	in := SessionInfo{ID: s.ID, Name: s.Name, Kind: s.Kind, Running: !s.exited, Cols: s.cols, Rows: s.rows, Epoch: s.epoch, Viewers: []string{}}
+	in := SessionInfo{ID: s.ID, Name: s.Name, Kind: s.Kind, Running: !s.exited, Cols: s.cols, Rows: s.rows, Epoch: s.epoch, Viewers: []string{},
+		Program: s.Program, Dir: s.Dir, Agent: s.agent}
 	if s.exited {
 		code := s.exitCode
 		in.ExitCode = &code
@@ -552,6 +655,9 @@ func (s *TermSession) Info() SessionInfo {
 		in.Controller = s.controller.Principal
 	}
 	for c := range s.viewers {
+		if c.hidden {
+			continue
+		}
 		in.Viewers = append(in.Viewers, c.Principal)
 	}
 	sort.Strings(in.Viewers)
@@ -575,36 +681,131 @@ type Snapshot struct {
 	Rows       uint16 `json:"rows"`
 	Data       []byte `json:"-"`
 	Generation string `json:"session"`
+	// Screen is the same cut as the screen model renders it (termstate's
+	// ANSI snapshot, then any bytes it holds incomplete): fed to a terminal
+	// of Cols by Rows, then followed by the output from To, it shows the
+	// program's screen, without replaying its history. ScreenExact is false
+	// when the model can't say the cut is clean; a client says so.
+	Screen        []byte `json:"-"`
+	ScreenFormat  string `json:"screen_format"`
+	ScreenExact   bool   `json:"screen_exact"`
+	ScreenLimited bool   `json:"screen_limited"` // something on the screen is outside what the model reconstructs: see termstate.Limits
 }
 
 func (s *TermSession) snapshotLocked() Snapshot {
+	retained := s.log.bytes()
+	screen := s.term.Snapshot()
+	held, ok := s.term.Held()
+	if held > len(retained) {
+		held, ok = 0, false
+	}
+	screen = append(screen, retained[len(retained)-held:]...)
 	return Snapshot{Kind: "replay", From: s.base, To: s.end, Complete: s.base == 0, Cols: s.cols, Rows: s.rows,
-		Data: s.log.bytes(), Generation: s.ID}
+		Data: retained, Generation: s.ID,
+		Screen: screen, ScreenFormat: termstate.SnapshotVersion, ScreenExact: ok, ScreenLimited: !s.term.Exact()}
+}
+
+// ScreenText is a session's current screen as text, for programs that read
+// it rather than render it.
+type ScreenText struct {
+	Cols    int      `json:"cols"`
+	Rows    int      `json:"rows"`
+	Cursor  [2]int   `json:"cursor"` // column and row, from 0
+	Title   string   `json:"title,omitempty"`
+	Alt     bool     `json:"alternate_screen"`
+	Lines   []string `json:"lines"`  // each row, trailing blanks trimmed
+	Offset  uint64   `json:"offset"` // the output offset the screen reflects
+	Running bool     `json:"running"`
+}
+
+// Screen returns the session's current screen as text.
+func (s *TermSession) Screen() ScreenText {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cols, rows := s.term.Size()
+	x, y := s.term.Cursor()
+	out := ScreenText{Cols: cols, Rows: rows, Cursor: [2]int{x, y}, Title: s.term.Title(), Alt: s.term.AltScreen(),
+		Lines: make([]string, rows), Offset: s.end, Running: !s.exited}
+	for i := range out.Lines {
+		out.Lines[i] = s.term.Row(i)
+	}
+	return out
+}
+
+// ScrollbackText is the lines scrolled off a session's screen, readable
+// without attaching, up to HistoryLines, oldest first.
+type ScrollbackText struct {
+	Lines []string `json:"lines"`
+	// Truncated is true when the session's own history (bounded at
+	// HistoryLines) holds more than Lines returns: lines was asked for
+	// fewer than the history kept.
+	Truncated bool `json:"truncated"`
+}
+
+// Scrollback returns up to lines of a session's history, the most recent
+// ones, oldest first; lines <= 0 or over HistoryLines returns all of it.
+func (s *TermSession) Scrollback(lines int) ScrollbackText {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all := s.term.HistoryText()
+	if lines <= 0 || lines >= len(all) {
+		return ScrollbackText{Lines: all}
+	}
+	return ScrollbackText{Lines: all[len(all)-lines:], Truncated: true}
 }
 
 // Attach adds a viewing client and returns it with its snapshot. Viewing
 // grants nothing: no input, no resize.
 func (s *TermSession) Attach(principal string) (*Client, Snapshot, error) {
+	return s.attach(principal, false)
+}
+
+// AttachHidden is Attach for the host's own internal plumbing (a durable
+// log, say): the same non-blocking fan-out as any viewer, but uncounted
+// against MaxViewers, never listed in Viewers or Presence, and never
+// journaled. It grants nothing a visible viewer doesn't either.
+func (s *TermSession) AttachHidden(principal string) (*Client, Snapshot, error) {
+	return s.attach(principal, true)
+}
+
+func (s *TermSession) attach(principal string, hidden bool) (*Client, Snapshot, error) {
 	op := newID()
-	if err := s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "intent", Principal: principal, Session: s.ID}); err != nil {
-		return nil, Snapshot{}, ErrAudit
+	if !hidden {
+		if err := s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "intent", Principal: principal, Session: s.ID}); err != nil {
+			return nil, Snapshot{}, ErrAudit
+		}
 	}
 	// The outcome is journaled after the lock is released: a slow journal
 	// never holds up the PTY's reader, a revocation or another client.
 	s.mu.Lock()
-	if len(s.viewers) >= MaxViewers {
-		s.mu.Unlock()
-		s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "refused", Reason: "viewer bound"})
-		return nil, Snapshot{}, ErrTooMany
+	if !hidden {
+		visible := 0
+		for v := range s.viewers {
+			if !v.hidden {
+				visible++
+			}
+		}
+		if visible >= MaxViewers {
+			s.mu.Unlock()
+			s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "refused", Reason: "viewer bound"})
+			return nil, Snapshot{}, ErrTooMany
+		}
 	}
-	c := &Client{Principal: principal, s: s, events: make(chan Event, viewerQueue), signal: make(chan struct{}, 1)}
+	c := &Client{Principal: principal, s: s, hidden: hidden, events: make(chan Event, viewerQueue), signal: make(chan struct{}, 1)}
+	if !hidden {
+		for v := range s.viewers {
+			v.notify(Event{Kind: EventState}) // presence: one more client
+		}
+	}
 	s.viewers[c] = struct{}{}
 	if s.exited {
 		c.closeEventsLocked() // nothing will come from a program that has exited
 	}
 	snap := s.snapshotLocked()
 	s.mu.Unlock()
-	s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "ok"})
+	if !hidden {
+		s.host.record(AuditRecord{Operation: op, Action: "attach", Phase: "outcome", Principal: principal, Session: s.ID, Outcome: "ok"})
+	}
 	return c, snap, nil
 }
 
@@ -628,6 +829,7 @@ type Event struct {
 type Client struct {
 	Principal string
 	s         *TermSession
+	hidden    bool // the host's own internal plumbing: never listed, never journaled
 	events    chan Event
 	signal    chan struct{} // gap and state notices, which never queue behind output
 	behind    bool
@@ -685,8 +887,12 @@ drain:
 // grant's intent is journaled before anything changes, and its outcome after
 // the session's lock is released. A write the take cuts short may already
 // have been partly delivered: Outcomes counts it as partial, and nothing of
-// it is resent.
-func (c *Client) Control(take bool, reason string) (uint64, error) {
+// it is resent. expectEpoch, if given, is compared against the session's
+// current epoch under its own lock, not as a separate check beforehand: a
+// caller that read the epoch, then called Control, must be refused if
+// control changed in between, not only if it had already changed before the
+// read (the Architect's review of #128's stack, M5).
+func (c *Client) Control(take bool, reason string, expectEpoch *uint64) (uint64, error) {
 	s := c.s
 	action := "grant"
 	if take {
@@ -697,13 +903,13 @@ func (c *Client) Control(take bool, reason string) (uint64, error) {
 	if err := s.host.record(AuditRecord{Operation: op, Action: action, Phase: "intent", Principal: c.Principal, Session: s.ID, Reason: reason}); err != nil {
 		return 0, ErrAudit
 	}
-	epoch, result, why, err := c.control(take)
+	epoch, result, why, err := c.control(take, expectEpoch)
 	// journaled after the lock is released, as for Attach
 	s.host.record(AuditRecord{Operation: op, Action: action, Phase: "outcome", Principal: c.Principal, Session: s.ID, Epoch: epoch, Outcome: result, Reason: why})
 	return epoch, err
 }
 
-func (c *Client) control(take bool) (uint64, string, string, error) {
+func (c *Client) control(take bool, expectEpoch *uint64) (uint64, string, string, error) {
 	s := c.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -712,6 +918,8 @@ func (c *Client) control(take bool) (uint64, string, string, error) {
 		return 0, "refused", "detached", ErrNotController
 	case s.exited:
 		return 0, "refused", "exited", ErrSessionExited
+	case expectEpoch != nil && s.epoch != *expectEpoch:
+		return 0, "refused", "stale epoch", ErrEpochStale
 	case s.controller == c:
 		return s.epoch, "ok", "already controls", nil
 	case s.controller != nil && !take:
@@ -852,8 +1060,14 @@ func (c *Client) Detach() {
 		c.gone = true
 		delete(s.viewers, c)
 		c.closeEventsLocked()
+		for v := range s.viewers {
+			v.notify(Event{Kind: EventState}) // presence: one client fewer
+		}
 	}
 	s.mu.Unlock()
+	if c.hidden {
+		return // the host's own internal plumbing: never journaled, like its attach
+	}
 	if held {
 		s.host.record(AuditRecord{Operation: newID(), Action: "release", Phase: "outcome", Principal: c.Principal, Session: s.ID, Outcome: "ok"})
 	}
@@ -919,4 +1133,89 @@ func (c *Client) closeEventsLocked() {
 		c.closed = true
 		close(c.events)
 	}
+}
+
+// Controls reports whether this client holds the session's control now.
+// Every client of one principal shares its name, so only this says which
+// of them it is.
+func (c *Client) Controls() bool {
+	c.s.mu.Lock()
+	defer c.s.mu.Unlock()
+	return c.s.controller == c && c.epoch == c.s.epoch
+}
+
+// Session returns the session the client views.
+func (c *Client) Session() *TermSession { return c.s }
+
+// AgentState is what a session's adapter last reported about the program
+// the session runs: whether it is working, waiting for input, or waiting on
+// a permission prompt, and the last input it confirmed it accepted. It is
+// only ever reported by an adapter, never read off the screen, and is
+// unknown until one reports.
+type AgentState struct {
+	State    string `json:"state"` // unknown, running, waiting-input, permission or idle
+	Detail   string `json:"detail,omitempty"`
+	Seen     string `json:"seen,omitempty"` // when the adapter reported it
+	Seq      uint64 `json:"seq"`            // counts reports: 0 until the first
+	StateSeq uint64 `json:"state_seq"`      // the report that set State: a report of only an acceptance leaves it
+	Accepted string `json:"accepted_input,omitempty"`
+}
+
+// AgentStates are the states an adapter may report.
+var AgentStates = map[string]bool{"running": true, "waiting-input": true, "permission": true, "idle": true}
+
+// ReportAgent records an adapter's report and tells every client. An empty
+// state keeps the last one, so an adapter may report only an acceptance.
+func (s *TermSession) ReportAgent(state, detail, accepted string) error {
+	if state != "" && !AgentStates[state] {
+		return fmt.Errorf("unknown agent state %q", state)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state != "" {
+		s.agent.State, s.agent.StateSeq = state, s.agent.Seq+1
+	}
+	if accepted != "" {
+		s.agent.Accepted = boundReason(accepted)
+	}
+	s.agent.Detail = boundReason(detail)
+	s.agent.Seq++
+	s.agent.Seen = s.host.now().UTC().Format(time.RFC3339Nano)
+	close(s.agentCh)
+	s.agentCh = make(chan struct{})
+	for c := range s.viewers {
+		c.notify(Event{Kind: EventState})
+	}
+	return nil
+}
+
+// Agent returns the agent state last reported, and a channel closed at the
+// next report.
+func (s *TermSession) Agent() (AgentState, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.agent, s.agentCh
+}
+
+// Presence is the session's clients and controller as this client sees
+// them, for its Presence frame.
+func (c *Client) Presence() PresenceMsg {
+	s := c.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := PresenceMsg{Session: s.ID, Viewers: []string{}, Epoch: s.epoch, You: "viewer"}
+	for v := range s.viewers {
+		if v.hidden {
+			continue
+		}
+		p.Viewers = append(p.Viewers, v.Principal)
+	}
+	sort.Strings(p.Viewers)
+	if s.controller != nil {
+		p.Controller = s.controller.Principal
+	}
+	if s.controller == c && c.epoch == s.epoch {
+		p.You = "controller"
+	}
+	return p
 }
