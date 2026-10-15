@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -153,7 +154,13 @@ func (c *Client) Log(id string, pub []byte) ([]byte, string, bool, error) {
 	if doc.Log == nil {
 		return nil, "", false, fmt.Errorf("manager: the result of %s records no output log", id)
 	}
-	resp, err := c.http.Get("http://manager/v1/attempts/" + id + "/log")
+	ctx, cancel := context.WithTimeout(context.Background(), BulkCallBound)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://manager/v1/attempts/"+id+"/log", nil)
+	if err != nil {
+		return nil, "", false, err
+	}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("manager not reachable: %w", err)
 	}

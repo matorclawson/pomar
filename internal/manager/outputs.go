@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -180,9 +181,16 @@ func (m *Manager) outputRoutes(mux *http.ServeMux) {
 const OutputSHA256Header = "X-Pomar-Sha256"
 
 // Output fetches a recorded output into w and checks it against the sha256
-// the manager recorded for it, which it returns.
+// the manager recorded for it, which it returns. Bounded by BulkCallBound,
+// not CallBound: an output can be as large as MaxOutputsBytes.
 func (c *Client) Output(id, name string, w io.Writer) (string, error) {
-	resp, err := c.http.Get("http://manager/v1/attempts/" + id + "/outputs/" + name)
+	ctx, cancel := context.WithTimeout(context.Background(), BulkCallBound)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://manager/v1/attempts/"+id+"/outputs/"+name, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("manager not reachable: %w", err)
 	}

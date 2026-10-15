@@ -304,25 +304,53 @@ func NewSocketClient(sock string) *Client {
 	}}}
 }
 
-// Do sends a request and decodes a JSON reply into out (if non-nil).
+// CallBound bounds every control call Do makes, reply included, so a
+// manager that accepts a connection and never answers can't hold a caller
+// forever.
+const CallBound = 60 * time.Second
+
+// BulkCallBound bounds a call that streams a whole log or output (up to
+// MaxOutputsBytes or maxLogRead), too generous a transfer for CallBound: a
+// manager that stops answering mid-stream still can't hold the caller
+// forever, just for longer than an ordinary control call gets.
+const BulkCallBound = 10 * time.Minute
+
+// ErrNoReply is a request that may have reached the manager, whose reply
+// never came: its effect is unknown. A caller looks the effect up by the
+// request's own ID, and never sends a fresh one in its place.
+var ErrNoReply = errors.New("the manager didn't reply; the request's effect is unknown")
+
+// Do sends a request, bounded by CallBound, and decodes a JSON reply into
+// out (if non-nil).
 func (c *Client) Do(method, path string, body, out any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), CallBound)
+	defer cancel()
+	return c.DoContext(ctx, method, path, body, out)
+}
+
+// DoContext is Do bounded by ctx instead.
+func (c *Client) DoContext(ctx context.Context, method, path string, body, out any) error {
 	var req *http.Request
 	var err error
 	if body != nil {
 		b, _ := json.Marshal(body)
-		req, err = http.NewRequest(method, "http://manager"+path, bytes.NewReader(b))
+		req, err = http.NewRequestWithContext(ctx, method, "http://manager"+path, bytes.NewReader(b))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
 	} else {
-		req, err = http.NewRequest(method, "http://manager"+path, nil)
+		req, err = http.NewRequestWithContext(ctx, method, "http://manager"+path, nil)
 	}
 	if err != nil {
 		return err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("manager not reachable: %w", err)
+		var op *net.OpError
+		if errors.As(err, &op) && op.Op == "dial" {
+			return fmt.Errorf("manager not reachable: %w", err) // nothing was sent
+		}
+		return fmt.Errorf("%w: %w", ErrNoReply, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
@@ -337,9 +365,27 @@ func (c *Client) Do(method, path string, body, out any) error {
 }
 
 // raw GETs path and returns the reply's bytes unchanged, for documents whose
-// exact bytes matter.
+// exact bytes matter. Bounded by CallBound: every caller today fetches a
+// small, already-bounded document (a result or pins record), not a bulk
+// transfer; rawBulk is for those.
 func (c *Client) raw(path string) ([]byte, error) {
-	resp, err := c.http.Get("http://manager" + path)
+	return c.rawBound(path, CallBound)
+}
+
+// rawBulk is raw, bounded by BulkCallBound instead, for a call that streams
+// a whole log or output.
+func (c *Client) rawBulk(path string) ([]byte, error) {
+	return c.rawBound(path, BulkCallBound)
+}
+
+func (c *Client) rawBound(path string, bound time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://manager"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("manager not reachable: %w", err)
 	}

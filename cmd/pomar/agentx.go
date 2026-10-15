@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -28,25 +30,37 @@ const (
 const noManager = "no manager selected: set POMAR_SOCKET to the control socket your host owner gave you, or pass -socket PATH (the owner on their own host may pass -root DIR). Pomar never guesses one; `pomar doctor` checks the one you name."
 
 // waitFor polls an attempt until it ends, or until timeout (0: no limit).
-// It never stops the attempt.
+// It never stops the attempt. The timeout bounds the polls themselves: a
+// manager that stops answering mid-poll can't hold the wait past it, and
+// the wait then reports the last state it saw.
 func waitFor(c *manager.Client, id string, timeout time.Duration) (manager.Entry, bool, error) {
-	var deadline time.Time
+	ctx, cancel := context.Background(), context.CancelFunc(func() {})
 	if timeout > 0 {
-		deadline = time.Now().Add(timeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
 	}
+	defer cancel()
 	interval := 250 * time.Millisecond
+	var last manager.Entry
 	for {
+		poll, done := context.WithTimeout(ctx, manager.CallBound)
 		var e manager.Entry
-		if err := c.Do("GET", "/v1/attempts/"+id, nil, &e); err != nil {
-			return e, false, err
+		err := c.DoContext(poll, "GET", "/v1/attempts/"+id, nil, &e)
+		done()
+		if ctx.Err() != nil {
+			return last, false, nil // the wait's own limit passed
+		}
+		if err != nil {
+			return last, false, err
 		}
 		if e.Terminal() {
 			return e, true, nil
 		}
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			return e, false, nil
+		last = e
+		select {
+		case <-ctx.Done():
+			return last, false, nil
+		case <-time.After(interval):
 		}
-		time.Sleep(interval)
 		if interval < 2*time.Second {
 			interval *= 2
 		}
@@ -128,7 +142,7 @@ func helpCatalogue() map[string]any {
 			{"logs", "An ended job's output, checked against its result", "pomar logs -id ID [-public-key KEY] [-o PATH]", "the log's bytes", []string{"refused, with what to do, while the job is still running"}},
 			{"attempt result", "The signed result document", "pomar attempt result -id ID", "JSON, exactly as signed", []string{"verify it with the owner's independently retained public key"}},
 			{"attempt stop", "Stop a running job", "pomar attempt stop -id ID", "JSON", nil},
-			{"seats", "List declared development seats", "pomar seats [-root DIR]", "JSON (a numbered menu on a terminal)", nil},
+			{"seats", "List declared development seats", "pomar seats [-root DIR] [-json] [-menu]", "a table, or JSON with -json", []string{"never prompts unless -menu is given, which needs a terminal"}},
 			{"version", "Client version and source commit", "pomar version", "text", nil},
 		},
 		"exit_codes": map[string]string{
@@ -154,4 +168,23 @@ func helpJSON(stdout io.Writer) int {
 	b, _ := json.MarshalIndent(helpCatalogue(), "", "  ")
 	fmt.Fprintln(stdout, string(b))
 	return 0
+}
+
+// unknownAdmission explains a start whose reply never came: the job may have
+// been admitted, so it is looked up by its own ID, and a fresh ID is never
+// started in its place.
+func unknownAdmission(err error, id string, stderr io.Writer) bool {
+	if !errors.Is(err, manager.ErrNoReply) {
+		return false
+	}
+	fmt.Fprintf(stderr, "pomar run: %v\n%s may have been admitted. Look it up with `pomar attempt get -id %s` (or `pomar wait -id %s`); don't start it again under a new ID.\n", err, id, id, id)
+	return true
+}
+
+// lastSeen names the state a wait last saw, or says it saw none.
+func lastSeen(e manager.Entry) string {
+	if e.State == "" {
+		return "unanswered (the manager gave no state in time)"
+	}
+	return string(e.State)
 }
