@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -100,6 +101,62 @@ func TestHealthLegacyIdleFitIsNeverCurrentRoom(t *testing.T) {
 	if r.Admission.Status != "UNKNOWN" || len(r.Classes) != 0 || r.ResultKey.Status != "UNPINNED" {
 		t.Fatal(r)
 	}
+	if r.Coverage != "LEGACY_CURRENT_CLAIMS_UNAVAILABLE" {
+		t.Fatal(r.Coverage)
+	}
+}
+
+func TestHealthV1NestedKeysAreStable(t *testing.T) {
+	key, id := healthKeyFixture()
+	s := healthServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/signing-key" {
+			w.Write([]byte(key))
+			return
+		}
+		w.Write([]byte(healthCapacityFixture))
+	})
+	var out, errs bytes.Buffer
+	if rc := run([]string{"health", "-json", "-socket", s, "-expected-key-id", id}, &out, &errs); rc != 0 {
+		t.Fatalf("rc%d %s", rc, errs.String())
+	}
+	var report map[string]any
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	keys := func(v any, expected string) {
+		t.Helper()
+		obj, ok := v.(map[string]any)
+		if !ok {
+			t.Fatalf("expected object, got %T", v)
+		}
+		actual := []string{}
+		for k := range obj {
+			actual = append(actual, k)
+		}
+		sort.Strings(actual)
+		want := strings.Fields(expected)
+		sort.Strings(want)
+		if strings.Join(actual, " ") != strings.Join(want, " ") {
+			t.Fatalf("keys %v, want %v", actual, want)
+		}
+	}
+	keys(report, "schema observed_at evidence_kind status socket client_version client_source manager result_key_binding result_key_id admission configured_host_budget disk known_live_attempts capacity_coverage caller_visible_classes unknown next_steps")
+	for _, name := range []string{"manager", "result_key_binding", "admission"} {
+		keys(report[name], "status detail")
+	}
+	keys(report["configured_host_budget"], "cpu_slots memory_bytes")
+	keys(report["disk"], "used avail device shared")
+	classes, ok := report["caller_visible_classes"].([]any)
+	if !ok || len(classes) != 1 {
+		t.Fatal(report)
+	}
+	keys(classes[0], "name fits_current failures")
+	class := classes[0].(map[string]any)
+	failures, ok := class["failures"].([]any)
+	if !ok || len(failures) != 1 {
+		t.Fatal(class)
+	}
+	keys(failures[0], "resource reason unit demand available deficit")
 }
 
 func TestHealthDrainAndWrongKeyDoNotAuthorizeWork(t *testing.T) {
@@ -126,7 +183,7 @@ func TestHealthBoundsAndDeniedResponsesAreExplicit(t *testing.T) {
 	for _, tc := range []struct {
 		code         int
 		body, status string
-	}{{403, `{"error":"PRIVATE_DETAIL"}`, "HTTP_403"}, {200, `{}`, "INVALID_REPLY"}, {200, strings.Repeat(" ", (1<<20)+1), "INVALID_REPLY"}, {302, ``, "HTTP_302"}} {
+	}{{403, `{"error":"PRIVATE_DETAIL"}`, "HTTP_403"}, {200, `{}`, "INVALID_REPLY"}, {200, healthCapacityFixture + strings.Repeat(" ", (1<<20)+1), "INVALID_REPLY"}, {302, ``, "HTTP_302"}} {
 		t.Run(tc.status, func(t *testing.T) {
 			s := healthServer(t, func(w http.ResponseWriter, r *http.Request) {
 				if tc.code == 302 {
