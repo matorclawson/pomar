@@ -19,7 +19,7 @@ const Schema = "pomar.release/v1"
 
 var versionPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var Files = []string{"bin/pomar", "bin/pomar-host", "bin/pomar-shim-linux-arm64", "bin/pomar-agent-owner", "bin/pomar-ci-caller", "LICENSE", "README.md", "CONTRIBUTING.md", "docs/install.md", "docs/operations.md", "docs/releases.md", "docs/normal-clients.md", "docs/manager-classes.md", "docs/agent-environments.md"}
+var Files = []string{"bin/pomar", "bin/pomar-host", "bin/pomar-shim-linux-arm64", "bin/pomar-agent-owner", "bin/pomar-ci-caller", "LICENSE", "README.md", "CONTRIBUTING.md", "AGENTS.md", "docs/install.md", "docs/operations.md", "docs/releases.md", "docs/normal-clients.md", "docs/manager-classes.md", "docs/agent-environments.md", "docs/health-and-diagnostics.md", "docs/attempt-progress.md", "docs/job-failure-diagnostics.md", "docs/service-upgrade.md", "docs/sessions.md", "docs/sessions-protocol.md"}
 
 type File struct {
 	SHA256 string `json:"sha256"`

@@ -17,10 +17,30 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/manager"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
+
+// These public schema types belong to health/v1, not the manager's evolving
+// internal types. Preserve their JSON keys independently of provider changes.
+type healthBudget struct {
+	CPUSlots    int   `json:"cpu_slots"`
+	MemoryBytes int64 `json:"memory_bytes"`
+	Budget      bool  `json:"budget,omitempty"`
+}
+type healthDisk struct {
+	Used   int64  `json:"used"`
+	Avail  int64  `json:"avail"`
+	Device string `json:"device"`
+	Shared bool   `json:"shared"`
+}
+type healthFailure struct {
+	Resource  string `json:"resource"`
+	Reason    string `json:"reason"`
+	Unit      string `json:"unit"`
+	Demand    int64  `json:"demand"`
+	Available int64  `json:"available"`
+	Deficit   int64  `json:"deficit"`
+}
 
 type healthCheck struct {
 	Status string `json:"status"`
@@ -28,30 +48,30 @@ type healthCheck struct {
 }
 
 type healthClass struct {
-	Name     string             `json:"name"`
-	Fits     *int               `json:"fits_current"`
-	Failures []capacity.Failure `json:"failures"`
+	Name     string          `json:"name"`
+	Fits     *int            `json:"fits_current"`
+	Failures []healthFailure `json:"failures"`
 }
 
 type healthReport struct {
-	Schema        string         `json:"schema"`
-	ObservedAt    time.Time      `json:"observed_at"`
-	Evidence      string         `json:"evidence_kind"`
-	Status        string         `json:"status"`
-	Socket        string         `json:"socket"`
-	ClientVersion string         `json:"client_version"`
-	ClientSource  string         `json:"client_source"`
-	Manager       healthCheck    `json:"manager"`
-	ResultKey     healthCheck    `json:"result_key_binding"`
-	KeyID         string         `json:"result_key_id,omitempty"`
-	Admission     healthCheck    `json:"admission"`
-	Host          *capacity.Host `json:"configured_host_budget"`
-	Space         *venue.Space   `json:"disk"`
-	Live          *int           `json:"known_live_attempts"`
-	Coverage      string         `json:"capacity_coverage"`
-	Classes       []healthClass  `json:"caller_visible_classes"`
-	Unknown       []string       `json:"unknown"`
-	Next          []string       `json:"next_steps"`
+	Schema        string        `json:"schema"`
+	ObservedAt    time.Time     `json:"observed_at"`
+	Evidence      string        `json:"evidence_kind"`
+	Status        string        `json:"status"`
+	Socket        string        `json:"socket"`
+	ClientVersion string        `json:"client_version"`
+	ClientSource  string        `json:"client_source"`
+	Manager       healthCheck   `json:"manager"`
+	ResultKey     healthCheck   `json:"result_key_binding"`
+	KeyID         string        `json:"result_key_id,omitempty"`
+	Admission     healthCheck   `json:"admission"`
+	Host          *healthBudget `json:"configured_host_budget"`
+	Space         *healthDisk   `json:"disk"`
+	Live          *int          `json:"known_live_attempts"`
+	Coverage      string        `json:"capacity_coverage"`
+	Classes       []healthClass `json:"caller_visible_classes"`
+	Unknown       []string      `json:"unknown"`
+	Next          []string      `json:"next_steps"`
 }
 
 // A single deadline covers both reads. No discovery, redirect, mutation, or
@@ -105,16 +125,16 @@ func healthCmd(args []string, stdout, stderr io.Writer) int {
 		defer tr.CloseIdleConnections()
 		client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		var raw struct {
-			Host     *capacity.Host `json:"host"`
-			Space    *venue.Space   `json:"space"`
-			Live     *int           `json:"live"`
-			Draining *bool          `json:"draining"`
-			Coverage string         `json:"coverage"`
+			Host     *healthBudget `json:"host"`
+			Space    *healthDisk   `json:"space"`
+			Live     *int          `json:"live"`
+			Draining *bool         `json:"draining"`
+			Coverage string        `json:"coverage"`
 			Current  []struct {
 				Name       string `json:"name"`
 				Allocation *struct {
-					Fits     *int               `json:"fits_current"`
-					Failures []capacity.Failure `json:"failures"`
+					Fits     *int            `json:"fits_current"`
+					Failures []healthFailure `json:"failures"`
 				} `json:"allocation"`
 			} `json:"current"`
 		}
@@ -127,6 +147,9 @@ func healthCmd(args []string, stdout, stderr io.Writer) int {
 				rc = 0
 				r.Manager = healthCheck{"RESPONSIVE", "Authorized capacity API answered; guest execution is not tested."}
 				r.Host, r.Space, r.Live, r.Coverage = raw.Host, raw.Space, raw.Live, raw.Coverage
+				if r.Coverage == "" {
+					r.Coverage = "LEGACY_CURRENT_CLAIMS_UNAVAILABLE"
+				}
 				validCurrent := len(raw.Current) > 0 && raw.Coverage != ""
 				fits := false
 				seen := map[string]bool{}
@@ -141,7 +164,7 @@ func healthCmd(args []string, stdout, stderr io.Writer) int {
 					}
 					failures := row.Allocation.Failures
 					if failures == nil {
-						failures = []capacity.Failure{}
+						failures = []healthFailure{}
 					}
 					r.Classes = append(r.Classes, healthClass{row.Name, row.Allocation.Fits, failures})
 				}
