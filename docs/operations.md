@@ -58,6 +58,12 @@ installed policy; see [normal clients](normal-clients.md).
 
 ## Development seats
 
+`seat stop` returns success for a confirmed `stopped`, `fenced` or `retired`
+snapshot, or a completed owner stop operation. An uncertain, revoking, launching,
+unstarted or unrecognized snapshot returns exit 1 with its phase. Inspect that
+environment and its original operation before resuming; an uncertain stop does
+not authorize a replacement or repeated side effects.
+
 ```sh
 pomar seats -root YOUR_PRIVATE_HOST_ROOT
 pomar seat status -root YOUR_PRIVATE_HOST_ROOT YOUR_SEAT
