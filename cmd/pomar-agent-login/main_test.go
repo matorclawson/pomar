@@ -66,12 +66,13 @@ func hostGated(t *testing.T, gate string) (root string, config string, calls str
 	broker := agentenv.NewBroker(store, dir)
 	calls = filepath.Join(dir, "calls")
 	env := []string{"PATH=/usr/bin:/bin", "CRED=" + filepath.Join(config, ".credentials.json"), "CALLS=" + calls, "GATE=" + gate}
+	startFixture := fixtureExecutor(t, script, dir, env)
 	actor := claudeactor.New(claudeactor.Config{
 		Version:       "2.1.280",
-		Start:         claudeactor.Exec{Binary: script, Dir: dir, Env: env, UID: -1, GID: -1}.Start,
+		Start:         startFixture,
 		Authenticated: claudeactor.CredentialPresent(config),
 		Login: func() (claudeactor.Process, error) {
-			return claudeactor.Exec{Binary: script, Dir: dir, Env: env, UID: -1, GID: -1}.Start(nil)
+			return startFixture(nil)
 		},
 	}, broker.Observe)
 	if err := broker.Initialize(t.Context(), actor); err != nil {

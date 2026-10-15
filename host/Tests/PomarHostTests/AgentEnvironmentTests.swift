@@ -178,3 +178,13 @@ import Foundation
     o.seat = nil; o.seatLaunch = nil
     #expect(!AgentEnvironment.valid(o))
 }
+
+@Test func onlyCodexSeatRegistersDedicatedTerminalIdentity() {
+    let sha = String(repeating: "b", count: 40)
+    let seat = AgentEnvironment.setupCommand(sourceSHA: sha, codexSeat: true)[2]
+    #expect(seat.contains("test \"$(getent passwd 1001)\" = 'pomar-terminal:x:1001:1001:Pomar terminal:/run/pomar-codex-terminal:/bin/false'"))
+    #expect(seat.contains("! getent passwd pomar-terminal >/dev/null"))
+    #expect(seat.contains("test \"$(getent group 1001)\" = 'pomar-terminal:x:1001:'"))
+    #expect(!AgentEnvironment.setupCommand(sourceSHA: sha)[2].contains("pomar-terminal"))
+    #expect(!AgentEnvironment.setupCommand(sourceSHA: sha, agent: "claude", codexSeat: true)[2].contains("pomar-terminal"))
+}
