@@ -452,7 +452,7 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	if c.UID >= 0 && c.GID >= 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(c.UID), Gid: uint32(c.GID)}
 	}
-	closeAfterStart, err := checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256)
+	closeAfterStart, err := checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256, c.PreservesInstallPath)
 	if err != nil {
 		slave.Close()
 		master.Close()

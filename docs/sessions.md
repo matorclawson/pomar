@@ -135,14 +135,19 @@ lives. A declared profile must never name a platform binary as
 `-expected-sha256`'s target; it will fail at exec, not at the check. This
 never affects what the feature exists to pin — Pomar's own binaries, Claude
 Code, Codex — none of which are platform binaries. A further, separately
-named macOS limit: the copy runs from a different path than the real
-install, which breaks any resource a program locates relative to its own
-installed location rather than a fixed path. Claude Code's install is a
-single, self-contained binary with nothing beside it — unaffected. Codex's
-own package manifest declares its resources (a bundled ripgrep, among
-others) as siblings of its install directory, not of the binary alone, so
-a moved copy may not find them; this is confirmed from Codex's install
-layout, not from running a moved copy and observing the failure directly.
+named limit, on both platforms: the pinned launch runs by a different path
+than the real install (a copy, on macOS; `/proc/self/fd/N` against the
+same inode, on Linux), which could break any resource a program locates
+relative to its own installed location rather than a fixed path. Claude
+Code's install is a single, self-contained binary with nothing beside
+it — unaffected. Codex's own package manifest declares its resources (a
+bundled ripgrep, among others) as siblings of its install directory, not
+of the binary alone, confirmed from Codex's install layout. Rather than
+leave that as a silent risk, `-preserves-install-path` (a declared
+capability, not a name match on any particular program) refuses
+`-expected-sha256` outright for such a program instead of relocating it:
+the two are mutually exclusive, deliberately, until a stronger mechanism
+on one or both platforms closes the gap properly.
 
 ### Logs
 
