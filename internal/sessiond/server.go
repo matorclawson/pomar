@@ -332,6 +332,11 @@ type CreateRequest struct {
 	// is opened for exec (seatterm.Command.ExpectedSHA256's own doc notes
 	// exactly what window this does and doesn't close, by platform).
 	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+	// PreservesInstallPath declares Path resolves some of its own
+	// resources relative to its installed location: see
+	// seatterm.Command.PreservesInstallPath. Combined with ExpectedSHA256,
+	// the launch refuses rather than run a relocated copy.
+	PreservesInstallPath bool `json:"preserves_install_path,omitempty"`
 }
 
 // SessionView is a session as ls and show give it: the session host's
@@ -645,7 +650,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		env = append(env, StateEnv+"="+statePath)
 	}
 	spec := seatterm.SessionSpec{Name: req.Name, Kind: req.Kind, Cols: req.Cols, Rows: req.Rows,
-		Command: seatterm.Command{Path: req.Path, Args: req.Args, Env: env, Dir: req.Dir, UID: -1, GID: -1, ExpectedSHA256: req.ExpectedSHA256}}
+		Command: seatterm.Command{Path: req.Path, Args: req.Args, Env: env, Dir: req.Dir, UID: -1, GID: -1, ExpectedSHA256: req.ExpectedSHA256, PreservesInstallPath: req.PreservesInstallPath}}
 	key := p + "\x00" + req.Operation
 	s.mu.Lock()
 	name, retry := s.creates[key]
