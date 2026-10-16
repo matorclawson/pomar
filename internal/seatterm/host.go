@@ -1197,6 +1197,27 @@ func (s *TermSession) Agent() (AgentState, <-chan struct{}) {
 	return s.agent, s.agentCh
 }
 
+// ResetAgentUnknown takes the agent state back to unknown: a disconnected
+// adapter's last report is no longer anyone's word for the program's
+// current state (council P2: a stale "waiting-input" must not keep
+// looking ready once whatever reported it is gone, and a stale
+// "running"/"permission" must not keep looking busy either). Unlike
+// ReportAgent, this never goes through AgentStates — unknown isn't a
+// state an adapter reports, only the one nobody has reported since.
+func (s *TermSession) ResetAgentUnknown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agent.State == "unknown" {
+		return // already unknown: no report to make, no clients to wake
+	}
+	s.agent = AgentState{State: "unknown", Seq: s.agent.Seq + 1, StateSeq: s.agent.Seq + 1, Seen: s.host.now().UTC().Format(time.RFC3339Nano)}
+	close(s.agentCh)
+	s.agentCh = make(chan struct{})
+	for c := range s.viewers {
+		c.notify(Event{Kind: EventState})
+	}
+}
+
 // Presence is the session's clients and controller as this client sees
 // them, for its Presence frame.
 func (c *Client) Presence() PresenceMsg {

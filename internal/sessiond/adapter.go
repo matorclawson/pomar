@@ -151,6 +151,26 @@ func (a *adapter) serve() {
 	}
 }
 
+// disconnected takes the agent state back to unknown when c's own read
+// loop ends and nothing has already taken its place (council P2: a
+// disconnected adapter's last report is no longer anyone's word for the
+// program's current state). A connection superseded by a newer one
+// (serve's own Close, above) must NOT do this: by the time its read
+// loop notices and gets here, a.conn already names the new connection,
+// which may already have reported something of its own; only a
+// connection that is still a.conn when its own loop ends counts as a
+// genuine disconnect, not a handover.
+func (a *adapter) disconnected(c net.Conn) {
+	a.mu.Lock()
+	if a.conn != c {
+		a.mu.Unlock()
+		return
+	}
+	a.conn = nil
+	a.mu.Unlock()
+	a.t.ResetAgentUnknown()
+}
+
 // opRequest is an adapter's begin, finish or status call, on the same
 // socket and line protocol as AdapterReport, distinguished by carrying
 // "op". Everything else on the channel is a plain state report.
@@ -168,6 +188,7 @@ var opIDWord = regexp.MustCompile(`^[\x21-\x7e]{1,128}$`) // one printable-ASCII
 // connection.
 func (a *adapter) read(c net.Conn) {
 	defer c.Close()
+	defer a.disconnected(c)
 	sc := bufio.NewScanner(c)
 	sc.Buffer(make([]byte, 0, 512), maxStateLine)
 	for sc.Scan() {
