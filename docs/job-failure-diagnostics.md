@@ -26,8 +26,9 @@ implement HTTP trace hooks.
 Content-Length are already on the wire before the body is copied, so a
 write that fails partway can't change what the client was already told,
 and the relay has no way to revise it. `send_short` records an observed
-local copy error or size mismatch, with the real byte count, whenever one
-of those happens on this host's own write. It narrows the gap, not closes
+local copy error or size mismatch, with the real byte count and (when the
+expected size was known) `want`, whenever one of those happens on this
+host's own write. It narrows the gap, not closes
 it: a ResponseWriter copy that reports success is this process's own
 write to its local connection, not an acknowledgment from the relay,
 tunnel or guest that the bytes actually arrived and were used, and a
