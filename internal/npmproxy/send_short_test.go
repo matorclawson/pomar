@@ -1,6 +1,10 @@
 package npmproxy
 
 import (
+	"bytes"
+	"crypto/sha512"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -46,8 +50,7 @@ func (w *failAfterWriter) Write(p []byte) (int, error) {
 
 type recordedEvent struct {
 	Event, Reason string
-	Bytes         int64
-	Want          *int64
+	Bytes, Want   *int64
 }
 
 // A send that falls short of the file's full length — whether io.Copy
@@ -73,7 +76,7 @@ func TestSendFileReportsSendShortOnAWriteFailure(t *testing.T) {
 
 	w := &failAfterWriter{allow: 100}
 	var events []recordedEvent
-	writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+	writeEvent := func(event, cache string, status int, bytes, want *int64, reason string) {
 		events = append(events, recordedEvent{event, reason, bytes, want})
 	}
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -102,8 +105,8 @@ func TestSendFileReportsSendShortOnAWriteFailure(t *testing.T) {
 	if short == nil {
 		t.Fatalf("a short write must report send_short, not go unnoticed: events=%+v", events)
 	}
-	if short.Bytes != 100 {
-		t.Fatalf("send_short's bytes = %d, want 100 (not the file's full 10000, and not 0)", short.Bytes)
+	if short.Bytes == nil || *short.Bytes != 100 {
+		t.Fatalf("send_short's bytes = %v, want 100 (not the file's full 10000, and not nil)", short.Bytes)
 	}
 	if short.Want == nil || *short.Want != 10000 {
 		t.Fatalf("send_short should name the size it fell short of: got %v, want 10000", short.Want)
@@ -153,7 +156,7 @@ func TestSendFileReportsSendShortOnANilErrorShortCount(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	var events []recordedEvent
-	writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+	writeEvent := func(event, cache string, status int, bytes, want *int64, reason string) {
 		events = append(events, recordedEvent{event, reason, bytes, want})
 	}
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -171,8 +174,8 @@ func TestSendFileReportsSendShortOnANilErrorShortCount(t *testing.T) {
 	if short == nil {
 		t.Fatal("a clean-EOF short copy must still report send_short, not go unnoticed just because io.Copy returned no error")
 	}
-	if short.Bytes != 40 {
-		t.Fatalf("send_short bytes = %d, want 40", short.Bytes)
+	if short.Bytes == nil || *short.Bytes != 40 {
+		t.Fatalf("send_short bytes = %v, want 40", short.Bytes)
 	}
 	if short.Want == nil || *short.Want != 100 {
 		t.Fatalf("send_short should name the file's full size it fell short of: got %v, want 100", short.Want)
@@ -198,7 +201,7 @@ func TestSendFileReportsNothingExtraOnACleanSend(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	var events []recordedEvent
-	writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+	writeEvent := func(event, cache string, status int, bytes, want *int64, reason string) {
 		events = append(events, recordedEvent{event, reason, bytes, want})
 	}
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
@@ -210,6 +213,53 @@ func TestSendFileReportsNothingExtraOnACleanSend(t *testing.T) {
 		if e.Event == "send_short" {
 			t.Fatalf("a clean, complete send must never report send_short: %+v", events)
 		}
+	}
+}
+
+// council P3-2 on #138: the zero-byte-count fix was only ever tested at
+// the Go-struct level (the test's own callback records an int64), never
+// against the real serialized JSON line -- none of the existing tests
+// even exercised a send_short with n==0, so reverting the pointer back
+// to a plain int64 with omitempty (silently dropping a genuine zero)
+// would pass every one of them. This drives the real Handler, with a
+// real log io.Writer, and parses the actual JSON line it wrote.
+func TestSendShortsZeroByteCountSurvivesRealJSONEncoding(t *testing.T) {
+	content := []byte("a whole, uninterrupted tarball")
+	sum := sha512.Sum512(content)
+	hexSum := hex.EncodeToString(sum[:])
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(cacheDir+"/"+hexSum, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := &Proxy{Lock: Lock{"/left-pad/-/left-pad-1.3.0.tgz": hexSum}, Cache: cacheDir}
+
+	var log bytes.Buffer
+	w := &failAfterWriter{allow: 0} // fails before a single body byte goes out: n must be 0, not nil
+	r := httptest.NewRequest(http.MethodGet, "/left-pad/-/left-pad-1.3.0.tgz", nil)
+	p.Handler(&log).ServeHTTP(w, r)
+
+	var found map[string]any
+	for _, line := range bytes.Split(log.Bytes(), []byte("\n")) {
+		if len(line) == 0 || line[0] != '{' {
+			continue // the historical plain-text completion line, alongside the JSON events
+		}
+		var entry map[string]any
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("not valid JSON: %s: %v", line, err)
+		}
+		if entry["event"] == "send_short" {
+			found = entry
+		}
+	}
+	if found == nil {
+		t.Fatalf("no send_short line in the log: %s", log.String())
+	}
+	bytesVal, ok := found["bytes"]
+	if !ok {
+		t.Fatalf(`a zero byte count must still appear in the JSON as "bytes":0, not be omitted entirely: %v`, found)
+	}
+	if n, ok := bytesVal.(float64); !ok || n != 0 {
+		t.Fatalf(`"bytes" should be the real zero count, got %v`, bytesVal)
 	}
 }
 
@@ -231,7 +281,7 @@ func TestSendFileNeverReportsSendShortOnHEAD(t *testing.T) {
 
 	w := &failAfterWriter{allow: 0} // would fail on the very first body byte, if any were written
 	var events []recordedEvent
-	writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+	writeEvent := func(event, cache string, status int, bytes, want *int64, reason string) {
 		events = append(events, recordedEvent{event, reason, bytes, want})
 	}
 	r := httptest.NewRequest(http.MethodHead, "/x", nil)

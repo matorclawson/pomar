@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -197,5 +198,87 @@ func TestWorkloadMarkersAreExplicitBoundedUntrustedAndWindowed(t *testing.T) {
 	conflict := fmt.Sprintf("POMAR_PROGRESS_V1 {\"phase\":\"BUILD\",\"sequence\":2}\nPOMAR_PROGRESS_V1 {\"phase\":\"PACKAGING\",\"sequence\":2}\n")
 	if got := workloadPhase([]byte(conflict), false); got != nil {
 		t.Fatalf("accepted conflicting phase: %+v", got)
+	}
+}
+
+// failAfterWriter is an http.ResponseWriter whose Write fails once allow
+// bytes have gone out, simulating a client/tunnel that stops reading
+// partway through -- the same shape npmproxy's own send_short tests use.
+type failAfterWriter struct {
+	header  http.Header
+	allow   int
+	written int
+}
+
+func (w *failAfterWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failAfterWriter) WriteHeader(int) {}
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	remaining := w.allow - w.written
+	if remaining <= 0 {
+		return 0, fmt.Errorf("broken pipe (fake)")
+	}
+	n := len(p)
+	if n > remaining {
+		n = remaining
+	}
+	w.written += n
+	if n < len(p) {
+		return n, fmt.Errorf("broken pipe (fake)")
+	}
+	return n, nil
+}
+
+// council P3-3 on #138: this package's own registry-progress reader
+// silently dropped send_short lines entirely (not in the switch that
+// decides which events are even counted) and treated every 2xx
+// "completed" as proof of a clean transfer, regardless of whether the
+// same request also logged a send_short -- exactly the gap
+// docs/job-failure-diagnostics.md names: the status line is already on
+// the wire before the body copy can fail, so a 2xx completed line alone
+// is this host's own write succeeding, never the guest's receipt. This
+// drives a real cache-hit request through a writer that fails partway,
+// producing a genuine send_short alongside its 2xx completed line, and
+// checks that this reader neither drops the event nor counts that
+// request's completion as evidence of a transfer.
+func TestRegistryProgressNeverCountsASendShortCompletionAsATransfer(t *testing.T) {
+	m, _, v := openSigning(t, false)
+	id := "registry-progress-short"
+	rec := filepath.Join(v.Root(), attemptsDir, id)
+	os.MkdirAll(rec, 0700)
+
+	cacheDir := t.TempDir()
+	sum := strings.Repeat("b", 128)
+	content := bytes.Repeat([]byte("x"), 1000)
+	if err := os.WriteFile(filepath.Join(cacheDir, sum), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := &npmproxy.Proxy{Lock: npmproxy.Lock{"/pkg/-/pkg-1.tgz": sum}, Cache: cacheDir}
+
+	file, err := os.OpenFile(filepath.Join(rec, "npmproxy.log"), os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	w := &failAfterWriter{allow: 100}
+	p.Handler(file).ServeHTTP(w, httptest.NewRequest("GET", "/pkg/-/pkg-1.tgz", nil))
+
+	e := Entry{Attempt: id, State: StateRunning}
+	obs := m.progressOf(e, time.Now())
+	if obs.Registry.Events["send_short"] != 1 {
+		t.Fatalf("send_short must be observed, not silently dropped: %+v", obs.Registry)
+	}
+	if obs.Registry.Completed != 1 || obs.Registry.Statuses[200] != 1 {
+		t.Fatalf("the completed 2xx line should still be observed as a completion: %+v", obs.Registry)
+	}
+	if obs.Registry.LastTransferAt != nil {
+		t.Fatalf("a completed 2xx alongside a send_short for the same request must not be counted as a transfer: %+v", obs.Registry)
 	}
 }

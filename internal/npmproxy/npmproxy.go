@@ -225,7 +225,7 @@ func (p *Proxy) Handler(log io.Writer) http.Handler {
 				route = r.URL.Path
 			}
 		}
-		writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+		writeEvent := func(event, cache string, status int, bytes, want *int64, reason string) {
 			if log == nil {
 				return
 			}
@@ -239,11 +239,14 @@ func (p *Proxy) Handler(log io.Writer) http.Handler {
 				Cache     string `json:"cache,omitempty"`
 				ElapsedMS int64  `json:"elapsed_ms"`
 				Status    int    `json:"status,omitempty"`
-				// Bytes has no omitempty: for send_short specifically, zero
-				// bytes actually written is a real, meaningful measurement
-				// (the write failed before anything went out), not merely
-				// "nothing to report" (council P3 on #138).
-				Bytes  int64  `json:"bytes"`
+				// Bytes and Want are both pointers, omitted entirely for the
+				// lifecycle markers (received, cache, upstream_*) where byte
+				// counts are meaningless -- only completed and send_short
+				// set them, so a genuine zero byte count from either of
+				// those (council P3 on #138: send_short's own zero was
+				// being silently dropped) still serializes, distinct from
+				// "not applicable to this event at all".
+				Bytes  *int64 `json:"bytes,omitempty"`
 				Want   *int64 `json:"want,omitempty"` // send_short only: the size the write fell short of
 				Reason string `json:"reason,omitempty"`
 			}{"pomar.npm-request/v1", time.Now().UTC().Format(time.RFC3339Nano), id, event, method, route, cache, time.Since(started).Milliseconds(), status, bytes, want, reason}
@@ -251,10 +254,10 @@ func (p *Proxy) Handler(log io.Writer) http.Handler {
 			defer logMu.Unlock()
 			_ = json.NewEncoder(log).Encode(entry)
 		}
-		trace := func(event, cache string) { writeEvent(event, cache, 0, 0, nil, "") }
+		trace := func(event, cache string) { writeEvent(event, cache, 0, nil, nil, "") }
 		trace("received", "unknown")
 		status, n, hit := p.serve(w, r, writeEvent)
-		writeEvent("completed", "", status, n, nil, "")
+		writeEvent("completed", "", status, &n, nil, "")
 		if log != nil {
 			logMu.Lock()
 			defer logMu.Unlock()
@@ -268,8 +271,8 @@ func fail(w http.ResponseWriter, code int, msg string) (int, int64, bool) {
 	return code, 0, false
 }
 
-func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, writeEvent func(event, cache string, status int, bytes int64, want *int64, reason string)) (int, int64, bool) {
-	trace := func(event, cache string) { writeEvent(event, cache, 0, 0, nil, "") }
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, writeEvent func(event, cache string, status int, bytes, want *int64, reason string)) (int, int64, bool) {
+	trace := func(event, cache string) { writeEvent(event, cache, 0, nil, nil, "") }
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return fail(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -339,13 +342,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, writeEvent func(ev
 // told -- HTTP offers no way to revise a status after WriteHeader. What it
 // can do is say so: a short or erroring copy is reported as its own
 // "send_short" event (never silently folded into "completed" as if the
-// guest received every byte), naming exactly how many of the expected
-// bytes actually went out and why, for whoever reads the log afterward.
-// This was a real gap (zeocouncil, PROFROD-SOW-330/pomar#83): io.Copy's
+// guest received every byte), naming how many bytes this host's own
+// write actually completed and why, for whoever reads the log afterward.
+// This was a real gap (profrod, PROFROD-SOW-330/pomar#83): io.Copy's
 // error was discarded entirely, and "completed" was logged regardless,
 // making a truncated delivery indistinguishable from a clean one from the
 // log alone.
-func sendFile(w http.ResponseWriter, r *http.Request, f *os.File, hit bool, writeEvent func(event, cache string, status int, bytes int64, want *int64, reason string)) (int, int64, bool) {
+func sendFile(w http.ResponseWriter, r *http.Request, f *os.File, hit bool, writeEvent func(event, cache string, status int, bytes, want *int64, reason string)) (int, int64, bool) {
 	want := int64(-1)
 	if fi, err := f.Stat(); err == nil {
 		want = fi.Size()
@@ -362,9 +365,9 @@ func sendFile(w http.ResponseWriter, r *http.Request, f *os.File, hit bool, writ
 		if want >= 0 {
 			wantPtr = &want
 		}
-		writeEvent("send_short", "", 0, n, wantPtr, shortReason(err))
+		writeEvent("send_short", "", 0, &n, wantPtr, shortReason(err))
 	} else if want >= 0 && n != want {
-		writeEvent("send_short", "", 0, n, &want, "copy ended with no error short of the file's stated size")
+		writeEvent("send_short", "", 0, &n, &want, "copy ended with no error short of the file's stated size")
 	}
 	return http.StatusOK, n, hit
 }

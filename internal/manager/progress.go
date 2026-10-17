@@ -293,6 +293,17 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		lines = lines[1:]
 	}
 	states := map[uint64]string{}
+	// council P3-3 on #138: a "completed" 2xx is this host's own write
+	// already having reported success on the wire before the copy ran; it
+	// was never proof the guest received every byte (docs/job-failure-
+	// diagnostics.md). shortRequests tracks which request IDs also logged
+	// a send_short, so such a request's "completed" line never counts as
+	// evidence of a clean transfer here, even though its status is still
+	// 2xx. send_short always precedes its request's completed line (the
+	// relay writes it from inside serve(), before Handler's own
+	// "completed" write), so by the time a request's completed line is
+	// reached, this map already reflects whether it had one.
+	shortRequests := map[uint64]bool{}
 	for _, line := range lines {
 		if len(line) > 4096 {
 			continue
@@ -314,7 +325,7 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		}
 		t = t.UTC()
 		switch ev.Event {
-		case "received", "cache", "upstream_started", "upstream_connect_started", "upstream_connected", "upstream_first_byte", "completed":
+		case "received", "cache", "upstream_started", "upstream_connect_started", "upstream_connected", "upstream_first_byte", "send_short", "completed":
 		default:
 			continue
 		}
@@ -327,10 +338,13 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 				p.CacheMisses++
 			}
 		}
+		if ev.Event == "send_short" {
+			shortRequests[ev.Request] = true
+		}
 		if p.LastEventAt == nil || t.After(*p.LastEventAt) {
 			p.LastEventAt = &t
 		}
-		if ev.Event == "upstream_first_byte" || (ev.Event == "completed" && ev.Status >= 200 && ev.Status < 300) {
+		if ev.Event == "upstream_first_byte" || (ev.Event == "completed" && ev.Status >= 200 && ev.Status < 300 && !shortRequests[ev.Request]) {
 			if p.LastTransferAt == nil || t.After(*p.LastTransferAt) {
 				p.LastTransferAt = &t
 			}
