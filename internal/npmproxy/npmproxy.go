@@ -15,6 +15,7 @@
 package npmproxy
 
 import (
+	"context"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
@@ -22,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -33,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -222,7 +225,7 @@ func (p *Proxy) Handler(log io.Writer) http.Handler {
 				route = r.URL.Path
 			}
 		}
-		writeEvent := func(event, cache string, status int, bytes int64) {
+		writeEvent := func(event, cache string, status int, bytes int64, reason string) {
 			if log == nil {
 				return
 			}
@@ -237,15 +240,16 @@ func (p *Proxy) Handler(log io.Writer) http.Handler {
 				ElapsedMS int64  `json:"elapsed_ms"`
 				Status    int    `json:"status,omitempty"`
 				Bytes     int64  `json:"bytes,omitempty"`
-			}{"pomar.npm-request/v1", time.Now().UTC().Format(time.RFC3339Nano), id, event, method, route, cache, time.Since(started).Milliseconds(), status, bytes}
+				Reason    string `json:"reason,omitempty"`
+			}{"pomar.npm-request/v1", time.Now().UTC().Format(time.RFC3339Nano), id, event, method, route, cache, time.Since(started).Milliseconds(), status, bytes, reason}
 			logMu.Lock()
 			defer logMu.Unlock()
 			_ = json.NewEncoder(log).Encode(entry)
 		}
-		trace := func(event, cache string) { writeEvent(event, cache, 0, 0) }
+		trace := func(event, cache string) { writeEvent(event, cache, 0, 0, "") }
 		trace("received", "unknown")
-		status, n, hit := p.serve(w, r, trace)
-		writeEvent("completed", "", status, n)
+		status, n, hit := p.serve(w, r, writeEvent)
+		writeEvent("completed", "", status, n, "")
 		if log != nil {
 			logMu.Lock()
 			defer logMu.Unlock()
@@ -259,7 +263,8 @@ func fail(w http.ResponseWriter, code int, msg string) (int, int64, bool) {
 	return code, 0, false
 }
 
-func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, trace func(string, string)) (int, int64, bool) {
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, writeEvent func(event, cache string, status int, bytes int64, reason string)) (int, int64, bool) {
+	trace := func(event, cache string) { writeEvent(event, cache, 0, 0, "") }
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return fail(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -275,7 +280,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, trace func(string,
 	if f, err := os.Open(dst); err == nil {
 		trace("cache", "hit")
 		defer f.Close()
-		return sendFile(w, r, f, true)
+		return sendFile(w, r, f, true, writeEvent)
 	}
 	trace("cache", "miss")
 	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.Upstream+r.URL.Path, nil)
@@ -320,18 +325,58 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, trace func(string,
 		return fail(w, http.StatusInternalServerError, "cache unavailable")
 	}
 	defer f.Close()
-	return sendFile(w, r, f, false)
+	return sendFile(w, r, f, false, writeEvent)
 }
 
-func sendFile(w http.ResponseWriter, r *http.Request, f *os.File, hit bool) (int, int64, bool) {
+// sendFile writes f's whole content as the response body. The status line
+// and Content-Length are already on the wire by the time io.Copy can fail,
+// so a write that falls short can't change what the client was already
+// told -- HTTP offers no way to revise a status after WriteHeader. What it
+// can do is say so: a short or erroring copy is reported as its own
+// "send_short" event (never silently folded into "completed" as if the
+// guest received every byte), naming exactly how many of the expected
+// bytes actually went out and why, for whoever reads the log afterward.
+// This was a real gap (zeocouncil, PROFROD-SOW-330/pomar#83): io.Copy's
+// error was discarded entirely, and "completed" was logged regardless,
+// making a truncated delivery indistinguishable from a clean one from the
+// log alone.
+func sendFile(w http.ResponseWriter, r *http.Request, f *os.File, hit bool, writeEvent func(event, cache string, status int, bytes int64, reason string)) (int, int64, bool) {
+	want := int64(-1)
 	if fi, err := f.Stat(); err == nil {
-		w.Header().Set("Content-Length", fmt.Sprint(fi.Size()))
+		want = fi.Size()
+		w.Header().Set("Content-Length", fmt.Sprint(want))
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return http.StatusOK, 0, hit
 	}
-	n, _ := io.Copy(w, f)
+	n, err := io.Copy(w, f)
+	if err != nil {
+		writeEvent("send_short", "", 0, n, shortReason(err))
+	} else if want >= 0 && n != want {
+		writeEvent("send_short", "", 0, n, "copy ended with no error short of the file's stated size")
+	}
 	return http.StatusOK, n, hit
+}
+
+// shortReason classifies a failed write into one of a small, fixed set of
+// safe categories, never the raw error text: this log already redacts
+// paths, queries and headers (Handler's own doc comment), and an error
+// chain is not something this package controls the contents of either.
+func shortReason(err error) string {
+	switch {
+	case errors.Is(err, syscall.EPIPE):
+		return "broken pipe"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "connection reset"
+	case errors.Is(err, net.ErrClosed):
+		return "connection closed"
+	case errors.Is(err, context.Canceled):
+		return "request canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline exceeded"
+	default:
+		return "write failed"
+	}
 }
