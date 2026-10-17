@@ -16,14 +16,14 @@ func TestResetAgentUnknownIsFencedAgainstAFreshReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.ReportAgent("waiting-input", "", ""); err != nil {
+	if _, err := s.ReportAgent("waiting-input", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	stale, _ := s.Agent()
 
 	// A fresh report lands before the fenced reset is actually called --
 	// exactly the race the fence exists for.
-	if err := s.ReportAgent("running", "", ""); err != nil {
+	if _, err := s.ReportAgent("running", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	fresh, _ := s.Agent()
@@ -55,7 +55,7 @@ func TestResetAgentUnknownKeepsAcceptedDirectly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReportAgent("waiting-input", "a detail", "in-1"); err != nil {
+	if _, err := s.ReportAgent("waiting-input", "a detail", "in-1"); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := s.Agent()

@@ -1166,9 +1166,16 @@ var AgentStates = map[string]bool{"running": true, "waiting-input": true, "permi
 
 // ReportAgent records an adapter's report and tells every client. An empty
 // state keeps the last one, so an adapter may report only an acceptance.
-func (s *TermSession) ReportAgent(state, detail, accepted string) error {
+// It returns the StateSeq this call left in place (unchanged if state was
+// empty), under the same lock that set it: council P3-2 on #137 found that
+// a caller re-reading it afterward, via a separate Agent() call outside
+// this lock, lets a differently-ordered concurrent report's StateSeq come
+// back instead of this call's own -- returning it here, from inside the
+// same critical section that assigned it, closes that gap at the source
+// rather than needing the caller to re-derive it.
+func (s *TermSession) ReportAgent(state, detail, accepted string) (uint64, error) {
 	if state != "" && !AgentStates[state] {
-		return fmt.Errorf("unknown agent state %q", state)
+		return 0, fmt.Errorf("unknown agent state %q", state)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1186,7 +1193,7 @@ func (s *TermSession) ReportAgent(state, detail, accepted string) error {
 	for c := range s.viewers {
 		c.notify(Event{Kind: EventState})
 	}
-	return nil
+	return s.agent.StateSeq, nil
 }
 
 // Agent returns the agent state last reported, and a channel closed at the

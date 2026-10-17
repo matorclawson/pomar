@@ -186,6 +186,17 @@ func (a *adapter) serve() {
 // reason (council P3): a report that landed after this decision was made
 // has already moved StateSeq past what's passed here, so it's a no-op,
 // never a clobber.
+//
+// A known limit of this same design (council P3-1 on #137, round three):
+// once a reporter has been superseded, c can never again equal a.conn for
+// IT -- the eviction already moved a.conn elsewhere -- so its own later
+// exit can no longer trigger a reset by this path either. If it never
+// reconnects and reports again (it dies, or its next connection only
+// sends an acceptance), the state it last reported keeps showing, stale,
+// until a fresh report or the session's own end. docs/sessions.md's
+// contract section says so plainly, so an adapter author knows to
+// reconnect and re-report after being superseded, rather than assume an
+// earlier connection still speaks for anything.
 func (a *adapter) disconnected(c net.Conn) {
 	a.mu.Lock()
 	stillLatest := a.conn == c // false if serve() already superseded c with a newer connection
@@ -241,8 +252,9 @@ func (a *adapter) read(c net.Conn) {
 		if err == nil && r.State == "" && r.Accepted == "" {
 			err = errors.New("a report carries a state, an accepted input_id, or both")
 		}
+		var seq uint64
 		if err == nil {
-			err = a.t.ReportAgent(r.State, r.Detail, r.Accepted)
+			seq, err = a.t.ReportAgent(r.State, r.Detail, r.Accepted)
 		}
 		if err != nil {
 			a.reply(c, map[string]string{"error": err.Error()})
@@ -258,21 +270,20 @@ func (a *adapter) read(c net.Conn) {
 			// the state that's still current (op-only connections, which
 			// never reach here at all, likewise never touch it).
 			//
-			// st is read via a.t.Agent() outside this lock, so two
-			// connections reporting around the same time -- a superseded
-			// one still draining buffered lines, plus the new one that
-			// replaced it -- can both reach here with their own calls
-			// interleaved. Council P3-A: an unconditional overwrite could
-			// let the superseded connection's delayed report win, naming
-			// stateConn as c while holding the OTHER connection's higher
-			// seq, corrupting which connection a later disconnect
-			// attributes the reset decision to. Forward-only: a report
-			// only takes over stateConn if its StateSeq is actually newer
-			// than what's already recorded.
-			st, _ := a.t.Agent()
+			// seq is ReportAgent's OWN return value, taken from inside the
+			// same lock that assigned it, not a separate a.t.Agent() read
+			// afterward. Council P3-2 (the P3-A remainder): a separate
+			// read could still lose a tie -- a superseded connection R and
+			// its replacement R' both reporting around the same time could
+			// each read back R''s seq (whichever of R/R' took a.t's lock
+			// last), letting R win stateConn while actually holding R''s
+			// seq, so R''s later genuine exit would wrongly look stale and
+			// never reset. Using ReportAgent's own return value ties each
+			// connection to the exact seq ITS OWN call produced, so this
+			// can't happen regardless of read ordering afterward.
 			a.mu.Lock()
-			if st.StateSeq > a.stateSeq {
-				a.stateConn, a.stateSeq = c, st.StateSeq
+			if seq > a.stateSeq {
+				a.stateConn, a.stateSeq = c, seq
 			}
 			a.mu.Unlock()
 		}

@@ -331,6 +331,32 @@ adapter is its owner's work).
   `seen`, `seq` (counting reports), `state_seq` and `accepted_input`.
 - Every attached client gets it as a `State` frame, on attach and on every
   report.
+- **A state lasts only while the connection that reported it stays open
+  AND is still the latest one.** Any new connection to the same socket —
+  including one of this contract's own `begin`/`finish` hook calls, which
+  never reports a state at all — closes whatever was previously the
+  latest connection, the same as rule 2 above. If that was the connection
+  that set the current state, its own subsequent EOF, error or close (the
+  read loop ending, having been closed out from under it) resets the
+  state to `unknown` at once: a connect-report-exit adapter's state is
+  gone the moment it disconnects, so `-when-ready` never trusts a stale
+  `waiting-input` from a program that's no longer there to mean it.
+  Conversely, a connection that's merely been superseded — not its own
+  genuine exit — never resets anything by that alone: state survives a
+  hook call arriving while a persistent reporter is still connected, and
+  only moves again on a fresh report, that reporter's own later exit, or
+  the session ending.
+- **A known limit of that same rule:** once a persistent reporter has been
+  superseded this way, its own later exit can no longer be observed as
+  _its_ exit — the socket already closed it out, and nothing names it as
+  "the one still owed a reset" anymore. If the reporter doesn't reconnect
+  and report again (it dies without a fresh connection, or its next
+  connection only ever sends an acceptance), its last state keeps
+  showing, stale, until either a fresh state report arrives on some
+  connection or the session itself ends. An adapter that intends to stay
+  the state's owner across a hook call superseding it should reconnect
+  and report again afterward, not assume its earlier connection still
+  speaks for anything.
 
 **What it doesn't claim:** a state is what the adapter said, when it said
 it. The program may have moved on since; `-when-ready` narrows the window

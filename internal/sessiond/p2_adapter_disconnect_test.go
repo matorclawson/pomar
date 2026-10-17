@@ -217,3 +217,61 @@ func TestResetAgentUnknownKeepsAcceptedButClearsState(t *testing.T) {
 		t.Fatalf("Accepted is a past fact, not current state: a disconnect must not erase it: %+v", after)
 	}
 }
+
+// council P3-3 on #137 (round three): statically, the mutant
+// `resetDue := stillLatest` (dropping the `&& wasStateConn` half of the
+// guard entirely) survives the whole existing suite -- nothing actually
+// drives an op-only connection's OWN, unsuperseded close while it is the
+// single latest connection, after a real reporter already set state and
+// was itself superseded away. That mutant would wrongly reset state on
+// every hook's own exit, exactly the original round-one bug, just
+// reached a different way. This drives precisely that shape: a reporter
+// sets state, an op-only connection supersedes it (state must survive,
+// as the test above already checks), and then THAT op-only connection's
+// own close (nothing superseding it) must likewise leave state alone --
+// it was never stateConn, regardless of being the latest.
+func TestAnOpOnlyConnectionsOwnUnsupersededExitNeverResetsAgentState(t *testing.T) {
+	_, c := serve(t, root(t))
+	req := shell("op-oponly-own-exit", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
+	req.StateChannel = true
+	var made Created
+	if err := c.Do("POST", "/v1/sessions", req, &made); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	path := strings.TrimSpace(waitScreen(t, c, "agent", ".sock").Lines[0])
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ad := &fakeAdapter{conn: conn, rd: bufio.NewReader(conn)}
+	ad.report(t, AdapterReport{State: "waiting-input"})
+	var state SessionView
+	for end := time.Now().Add(5 * time.Second); state.Agent.State != "waiting-input" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/agent", nil, &state)
+	}
+	if state.Agent.State != "waiting-input" {
+		t.Fatalf("setup: %+v", state)
+	}
+
+	// An op-only connection supersedes the reporter -- now the single
+	// latest connection, but never stateConn.
+	ops := dialOps(t, path)
+	if r := ops.call(t, opRequest{Op: "begin", ID: "op-own-1", Digest: "d1"}); r["first"] != true {
+		t.Fatalf("begin: %+v", r)
+	}
+
+	// Its own close, unsuperseded by anything -- a plain hook exit after
+	// its begin/finish calls -- must not touch state, even though it IS
+	// a.conn at the moment it closes.
+	ops.conn.Close()
+	for end := time.Now().Add(500 * time.Millisecond); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if err := c.Do("GET", "/v1/sessions/agent", nil, &state); err != nil {
+			t.Fatal(err)
+		}
+		if state.Agent.State != "waiting-input" {
+			t.Fatalf("an op-only connection's own exit, however latest, must not reset state it never set: %+v", state)
+		}
+	}
+}
