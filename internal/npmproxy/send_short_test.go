@@ -47,6 +47,7 @@ func (w *failAfterWriter) Write(p []byte) (int, error) {
 type recordedEvent struct {
 	Event, Reason string
 	Bytes         int64
+	Want          *int64
 }
 
 // A send that falls short of the file's full length — whether io.Copy
@@ -72,8 +73,8 @@ func TestSendFileReportsSendShortOnAWriteFailure(t *testing.T) {
 
 	w := &failAfterWriter{allow: 100}
 	var events []recordedEvent
-	writeEvent := func(event, cache string, status int, bytes int64, reason string) {
-		events = append(events, recordedEvent{event, reason, bytes})
+	writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+		events = append(events, recordedEvent{event, reason, bytes, want})
 	}
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
 	status, n, hit := sendFile(w, r, f, false, writeEvent)
@@ -103,6 +104,9 @@ func TestSendFileReportsSendShortOnAWriteFailure(t *testing.T) {
 	}
 	if short.Bytes != 100 {
 		t.Fatalf("send_short's bytes = %d, want 100 (not the file's full 10000, and not 0)", short.Bytes)
+	}
+	if short.Want == nil || *short.Want != 10000 {
+		t.Fatalf("send_short should name the size it fell short of: got %v, want 10000", short.Want)
 	}
 	if short.Reason == "" {
 		t.Fatal("send_short must carry a reason, not an empty one")
@@ -149,8 +153,8 @@ func TestSendFileReportsSendShortOnANilErrorShortCount(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	var events []recordedEvent
-	writeEvent := func(event, cache string, status int, bytes int64, reason string) {
-		events = append(events, recordedEvent{event, reason, bytes})
+	writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+		events = append(events, recordedEvent{event, reason, bytes, want})
 	}
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
 	status, n, _ := sendFile(rec, r, f, false, writeEvent)
@@ -169,6 +173,9 @@ func TestSendFileReportsSendShortOnANilErrorShortCount(t *testing.T) {
 	}
 	if short.Bytes != 40 {
 		t.Fatalf("send_short bytes = %d, want 40", short.Bytes)
+	}
+	if short.Want == nil || *short.Want != 100 {
+		t.Fatalf("send_short should name the file's full size it fell short of: got %v, want 100", short.Want)
 	}
 	if short.Reason == "" {
 		t.Fatal("send_short must carry a reason even without an io.Copy error")
@@ -191,8 +198,8 @@ func TestSendFileReportsNothingExtraOnACleanSend(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	var events []recordedEvent
-	writeEvent := func(event, cache string, status int, bytes int64, reason string) {
-		events = append(events, recordedEvent{event, reason, bytes})
+	writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+		events = append(events, recordedEvent{event, reason, bytes, want})
 	}
 	r := httptest.NewRequest(http.MethodGet, "/x", nil)
 	status, n, _ := sendFile(rec, r, f, false, writeEvent)
@@ -224,8 +231,8 @@ func TestSendFileNeverReportsSendShortOnHEAD(t *testing.T) {
 
 	w := &failAfterWriter{allow: 0} // would fail on the very first body byte, if any were written
 	var events []recordedEvent
-	writeEvent := func(event, cache string, status int, bytes int64, reason string) {
-		events = append(events, recordedEvent{event, reason, bytes})
+	writeEvent := func(event, cache string, status int, bytes int64, want *int64, reason string) {
+		events = append(events, recordedEvent{event, reason, bytes, want})
 	}
 	r := httptest.NewRequest(http.MethodHead, "/x", nil)
 	status, n, _ := sendFile(w, r, f, false, writeEvent)
