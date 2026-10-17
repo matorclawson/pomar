@@ -27,8 +27,8 @@ The response includes a short `summary` and these structured fields:
 | `log.availability`, `bytes`, `last_output_at`, `quiet_seconds` | Missing, unreadable, empty and available output are distinct; unknown amounts/times are null |
 | `log.tail_text`, `tail_offset`, `tail_bytes` | A bounded live output tail with raw byte offset/count; invalid UTF-8 is replaced for display |
 | `log.window_truncated`, `changed_during_read` | The window omits older bytes, or the file changed during this read |
-| `registry.event_counts`, `cache_hits_observed`, `cache_misses_observed` | Actual received/cache/upstream/connect/first-byte/completion events in the inspected trace window |
-| `registry.pending_observed`, `completed_status_counts`, `last_transfer_at` | Observed requests without a completion, HTTP outcomes and last observed network transfer |
+| `registry.event_counts`, `cache_hits_observed`, `cache_misses_observed` | Actual received/cache/upstream/connect/first-byte/send_short/completion events in the inspected trace window |
+| `registry.pending_observed`, `completed_status_counts`, `last_transfer_at` | Observed requests without a completion, HTTP outcomes and last observed network transfer. A completed 2xx is excluded from `last_transfer_at` when its own request also logged a `send_short` (docs/job-failure-diagnostics.md: a 2xx status alone is never proof the guest received every byte), or when this window's own evidence for that request is incomplete (a bounded tail window can retain a completion while an earlier `send_short` for the same request fell outside it) |
 | `resources.observed_at`, `peaks`, `disk_scope` | Measurement time and historical VM peaks; the disk figure is a shared-filesystem delta, not per-job I/O |
 | `stall_assessment` | `NOT_DETERMINED`: silence, heartbeats and low CPU alone do not prove a stall or its cause |
 

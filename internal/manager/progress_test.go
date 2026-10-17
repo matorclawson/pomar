@@ -282,3 +282,57 @@ func TestRegistryProgressNeverCountsASendShortCompletionAsATransfer(t *testing.T
 		t.Fatalf("a completed 2xx alongside a send_short for the same request must not be counted as a transfer: %+v", obs.Registry)
 	}
 }
+
+// pomar's review of #139 (round three, maintainer source review): a
+// bounded tail window can retain a request's "completed" 2xx line while
+// its own send_short fell in the dropped-or-untruncated-away first
+// fragment (progressFile's partial read drops exactly one leading,
+// possibly-truncated line). shortRequests would then have no entry for
+// that request, so its orphaned completion would be credited as a
+// transfer -- exactly the false-positive this package exists to avoid.
+// This drives registryProgress directly with partial=true and a window
+// whose only evidence for a request is its own completed line, no
+// received/cache/send_short visible at all, matching pomar's named
+// fixture precisely.
+func TestRegistryProgressTreatsAnOrphanedCompletionInATruncatedWindowAsPossiblyShort(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	// The first line is a truncated fragment of the real send_short line
+	// that fell outside the retained window -- partial=true means
+	// registryProgress itself drops it, same as it always does for a tail
+	// read's possibly-cut-off leading line. What's left after that drop
+	// is exactly the orphaned completed line pomar's fixture names: no
+	// received/cache/send_short visible for request 7 at all.
+	log := strings.Join([]string{
+		`e":false,"status":200,"bytes":0,"want":1000,"reason":"write failed"}`, // the dropped, truncated fragment
+		`{"schema":"pomar.npm-request/v1","request":7,"event":"completed","time":"2026-10-17T11:59:59Z","status":200}`,
+	}, "\n") + "\n"
+	p := registryProgress([]byte(log), true, now)
+	if p.Completed != 1 || p.Statuses[200] != 1 {
+		t.Fatalf("the observed completion/status counters must still be preserved: %+v", p)
+	}
+	if p.LastTransferAt != nil {
+		t.Fatalf("an orphaned completion in a truncated window, with no in-window evidence it was clean, must not be credited as a transfer: %+v", p)
+	}
+}
+
+// council P3 on #139 (round three): shortRequests was never cleared on a
+// fresh "received", so a request ID reused for a second, genuinely clean
+// transfer after an earlier short one would still have its clean
+// completion wrongly suppressed by the first use's stale entry.
+func TestRegistryProgressClearsShortRequestsOnAReusedRequestID(t *testing.T) {
+	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+	log := strings.Join([]string{
+		`{"schema":"pomar.npm-request/v1","request":9,"event":"received","time":"2026-10-17T11:00:00Z"}`,
+		`{"schema":"pomar.npm-request/v1","request":9,"event":"send_short","time":"2026-10-17T11:00:01Z","status":200,"bytes":10}`,
+		`{"schema":"pomar.npm-request/v1","request":9,"event":"completed","time":"2026-10-17T11:00:01Z","status":200}`,
+		`{"schema":"pomar.npm-request/v1","request":9,"event":"received","time":"2026-10-17T11:00:02Z"}`,
+		`{"schema":"pomar.npm-request/v1","request":9,"event":"completed","time":"2026-10-17T11:00:03Z","status":200}`,
+	}, "\n") + "\n"
+	p := registryProgress([]byte(log), false, now)
+	if p.Coverage != "REQUEST_ID_REUSE_OBSERVED" {
+		t.Fatalf("a reused request ID should be flagged: %+v", p)
+	}
+	if p.LastTransferAt == nil {
+		t.Fatalf("the reused ID's second, genuinely clean completion must be credited as a transfer, not suppressed by the first use's stale send_short: %+v", p)
+	}
+}
