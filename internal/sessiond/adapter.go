@@ -54,8 +54,10 @@ type adapter struct {
 	root string
 	ops  *opJournal // opened once the session's ID is known, in start
 
-	mu   sync.Mutex
-	conn net.Conn
+	mu        sync.Mutex
+	conn      net.Conn
+	stateConn net.Conn // the connection whose report last set the current agent state, if any
+	stateSeq  uint64   // the StateSeq that report produced; the fence passed to ResetAgentUnknown
 }
 
 // statePath is a create's state socket: the same for every retry of one
@@ -151,24 +153,38 @@ func (a *adapter) serve() {
 	}
 }
 
-// disconnected takes the agent state back to unknown when c's own read
-// loop ends and nothing has already taken its place (council P2: a
-// disconnected adapter's last report is no longer anyone's word for the
-// program's current state). A connection superseded by a newer one
-// (serve's own Close, above) must NOT do this: by the time its read
-// loop notices and gets here, a.conn already names the new connection,
-// which may already have reported something of its own; only a
-// connection that is still a.conn when its own loop ends counts as a
-// genuine disconnect, not a handover.
+// disconnected takes the agent state back to unknown when the exact
+// connection whose report set the CURRENT state goes away -- never
+// merely because some connection closed (council P2 on #137: an op-only
+// connection, such as one of the hook scripts in docs/sessions.md that
+// only ever calls begin/finish and never sends an AdapterReport, must
+// leave the state alone when it disconnects; it was never speaking for
+// it). c is compared against stateConn, not conn: a connection can be
+// the latest (conn) without ever having reported state, and a state
+// reporter that gets superseded as the latest connection (serve's own
+// Close, above) still correctly triggers a reset here once its own read
+// loop ends, since nothing superseding it has spoken for state either.
+// The compare-and-clear of conn and stateConn happens under the same
+// lock acquisition that decides whether to reset, but the reset itself
+// still runs after releasing it (ResetAgentUnknown takes the session's
+// own lock, a different one) -- a fresh report could land in that exact
+// gap. ResetAgentUnknown is fenced against stateSeq for exactly that
+// reason (council P3): a report that landed after this decision was made
+// has already moved StateSeq past what's passed here, so it's a no-op,
+// never a clobber.
 func (a *adapter) disconnected(c net.Conn) {
 	a.mu.Lock()
-	if a.conn != c {
-		a.mu.Unlock()
-		return
+	if a.conn == c {
+		a.conn = nil
 	}
-	a.conn = nil
+	wasStateConn, seq := a.stateConn == c, a.stateSeq
+	if wasStateConn {
+		a.stateConn = nil
+	}
 	a.mu.Unlock()
-	a.t.ResetAgentUnknown()
+	if wasStateConn {
+		a.t.ResetAgentUnknown(seq)
+	}
 }
 
 // opRequest is an adapter's begin, finish or status call, on the same
@@ -215,6 +231,20 @@ func (a *adapter) read(c net.Conn) {
 		if err != nil {
 			a.reply(c, map[string]string{"error": err.Error()})
 			return
+		}
+		if r.State != "" {
+			// This connection set the current state: record it, and the
+			// exact StateSeq that report produced, so a later disconnect
+			// resets only if this is still the freshest word. An
+			// accepted-only report does NOT move stateConn: it never
+			// claimed to speak for state, so it must not take over
+			// "owning" a reset from whichever connection actually set
+			// the state that's still current (op-only connections, which
+			// never reach here at all, likewise never touch it).
+			st, _ := a.t.Agent()
+			a.mu.Lock()
+			a.stateConn, a.stateSeq = c, st.StateSeq
+			a.mu.Unlock()
 		}
 	}
 	if sc.Err() != nil {

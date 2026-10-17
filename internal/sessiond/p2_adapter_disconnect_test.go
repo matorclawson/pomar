@@ -73,13 +73,21 @@ func TestAdapterDisconnectResetsAgentStateToUnknown(t *testing.T) {
 	}
 }
 
-// A new connection superseding the old one (serve's own Close, when an
-// adapter reconnects before its old connection's read loop even notices)
-// is not a disconnect: the old read loop returning afterward must not
-// reset state out from under the connection that replaced it.
-func TestAdapterSupersessionDoesNotResetTheNewConnectionsState(t *testing.T) {
+// council P2-1 on #137: the first version of the fix reset state when ANY
+// connection disconnected, including an op-only one — exactly the hook
+// scripts docs/sessions.md shows, which only ever call begin/finish and
+// never send an AdapterReport. Every exit of such a hook was wiping out
+// whatever the real adapter had reported. The fix tracks which connection
+// actually set the current state (stateConn), separately from which
+// connection is merely the latest (conn, used for notices); only that
+// exact connection's own disconnect — whether a plain exit or being
+// superseded by the next connection — resets anything. This test checks
+// both ends: an op-only connection never triggers a reset, however it
+// disconnects, and a real reporter's disconnect still correctly does,
+// even when it's via supersession rather than a plain close.
+func TestAnOpOnlyConnectionNeverResetsAgentState(t *testing.T) {
 	_, c := serve(t, root(t))
-	req := shell("op-super", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
+	req := shell("op-oponly", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
 	req.StateChannel = true
 	var made Created
 	if err := c.Do("POST", "/v1/sessions", req, &made); err != nil {
@@ -87,35 +95,109 @@ func TestAdapterSupersessionDoesNotResetTheNewConnectionsState(t *testing.T) {
 	}
 	path := strings.TrimSpace(waitScreen(t, c, "agent", ".sock").Lines[0])
 
-	conn1, err := net.Dial("unix", path)
+	// An op-only connection, as the very first connection: it never
+	// touches state at all.
+	ops := dialOps(t, path)
+	if r := ops.call(t, opRequest{Op: "begin", ID: "op-1", Digest: "d1"}); r["first"] != true {
+		t.Fatalf("begin: %+v", r)
+	}
+
+	// A real reporter connects next — superseding (closing) the op-only
+	// connection above. Its own disconnect must not have left anything
+	// behind that disturbs this report.
+	conn, err := net.Dial("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ad1 := &fakeAdapter{conn: conn1, rd: bufio.NewReader(conn1)}
-	ad1.report(t, AdapterReport{State: "waiting-input"})
-	var ready SessionView
-	for end := time.Now().Add(5 * time.Second); ready.Agent.State != "waiting-input" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-		c.Do("GET", "/v1/sessions/agent", nil, &ready)
+	ad := &fakeAdapter{conn: conn, rd: bufio.NewReader(conn)}
+	ad.report(t, AdapterReport{State: "waiting-input"})
+	var state SessionView
+	for end := time.Now().Add(5 * time.Second); state.Agent.State != "waiting-input" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/agent", nil, &state)
 	}
-	if ready.Agent.State != "waiting-input" {
-		t.Fatalf("the first report should have been seen: %+v", ready)
+	if state.Agent.State != "waiting-input" {
+		t.Fatalf("the reporter's state should stick, undisturbed by the op-only connection that preceded it: %+v", state)
 	}
 
-	// A second connection arrives without conn1 ever being told to close:
-	// the server itself closes conn1 as the superseded one (serve's own
-	// policy, not this test's doing).
-	conn2, err := net.Dial("unix", path)
+	// A second op-only connection now supersedes the still-open reporter.
+	// The reporter's own disconnect, triggered by that supersession, DOES
+	// correctly reset state — it was the one speaking for it, and now
+	// it's gone.
+	ops2 := dialOps(t, path)
+	for end := time.Now().Add(5 * time.Second); state.Agent.State != "unknown" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/agent", nil, &state)
+	}
+	if state.Agent.State != "unknown" {
+		t.Fatalf("the reporter's own disconnect, even via supersession, should still reset state: %+v", state)
+	}
+	if r := ops2.call(t, opRequest{Op: "begin", ID: "op-2", Digest: "d2"}); r["first"] != true {
+		t.Fatalf("begin: %+v", r)
+	}
+
+	// A third connection reports a fresh state, superseding the op-only
+	// one above. If that op-only connection had incorrectly become
+	// stateConn, its own disconnect (triggered by this very supersession)
+	// would try to reset — which must lose to this fresh report, never
+	// clobber it.
+	conn3, err := net.Dial("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn2.Close()
+	defer conn3.Close()
+	ad3 := &fakeAdapter{conn: conn3, rd: bufio.NewReader(conn3)}
+	ad3.report(t, AdapterReport{State: "running"})
+	for end := time.Now().Add(5 * time.Second); state.Agent.State != "running" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/agent", nil, &state)
+	}
+	if state.Agent.State != "running" {
+		t.Fatalf("a fresh report must never be clobbered by an op-only connection's own disconnect: %+v", state)
+	}
+}
 
-	// Give conn1's read loop every chance to notice its own closure and
-	// run its cleanup; state must still read as last reported, never
-	// unknown, since conn2 has already taken its place.
-	time.Sleep(200 * time.Millisecond)
-	var stillReady SessionView
-	if err := c.Do("GET", "/v1/sessions/agent", nil, &stillReady); err != nil || stillReady.Agent.State != "waiting-input" {
-		t.Fatalf("a superseded connection's cleanup must not reset the new connection's state: %+v", stillReady)
+// council P2-2 on #137: ResetAgentUnknown used to rebuild the whole
+// AgentState, losing Accepted along with State and Detail. An acceptance
+// is a past fact (the program already confirmed it took an input), not a
+// claim about the program's current state; a disconnected adapter no
+// longer vouches for "running", but it never un-confirms an input it
+// already said was accepted. Before the fix, a disconnect right after an
+// acceptance would flip a live input-status read from "yes" back to
+// "pending", and a send already waiting in awaitAccepted could settle
+// without ever seeing the acceptance it was actually told about.
+func TestResetAgentUnknownKeepsAcceptedButClearsState(t *testing.T) {
+	_, c := serve(t, root(t))
+	req := shell("op-keep-accepted", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
+	req.StateChannel = true
+	var made Created
+	if err := c.Do("POST", "/v1/sessions", req, &made); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	path := strings.TrimSpace(waitScreen(t, c, "agent", ".sock").Lines[0])
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad := &fakeAdapter{conn: conn, rd: bufio.NewReader(conn)}
+	ad.report(t, AdapterReport{State: "waiting-input", Accepted: "in-1"})
+
+	var reported SessionView
+	for end := time.Now().Add(5 * time.Second); reported.Agent.Accepted != "in-1" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/agent", nil, &reported)
+	}
+	if reported.Agent.State != "waiting-input" || reported.Agent.Accepted != "in-1" {
+		t.Fatalf("the combined state+accepted report should have been seen: %+v", reported)
+	}
+
+	conn.Close()
+
+	var after SessionView
+	for end := time.Now().Add(5 * time.Second); after.Agent.State != "unknown" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/agent", nil, &after)
+	}
+	if after.Agent.State != "unknown" {
+		t.Fatalf("state should still reset on disconnect: %+v", after)
+	}
+	if after.Agent.Accepted != "in-1" {
+		t.Fatalf("Accepted is a past fact, not current state: a disconnect must not erase it: %+v", after)
 	}
 }

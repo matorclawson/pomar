@@ -926,12 +926,21 @@ func (s *Server) awaitReady(t *seatterm.TermSession, wait time.Duration) (uint64
 
 // unclaimReady gives back a readiness claim awaitReady made, but only if
 // nothing has claimed past it since: a newer report (a real state change)
-// must never be un-claimed by a late give-back racing behind it.
-func (s *Server) unclaimReady(id string, seq uint64) {
+// must never be un-claimed by a late give-back racing behind it. t may be
+// nil in tests that exercise only the bookkeeping; a live caller always
+// has the session at hand to wake anyone else already waiting on it
+// (council P3 on #137: this used to update readyUsed without waking a
+// different when-ready send blocked in awaitReady's own select, leaving
+// it to sit out its whole wait bound instead of re-checking at once).
+func (s *Server) unclaimReady(t *seatterm.TermSession, id string, seq uint64) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.readyUsed[id] == seq {
+	gaveBack := s.readyUsed[id] == seq
+	if gaveBack {
 		delete(s.readyUsed, id)
+	}
+	s.mu.Unlock()
+	if gaveBack && t != nil {
+		t.WakeAgentWaiters()
 	}
 }
 
@@ -1061,7 +1070,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	var readySeq uint64 // 0: nothing claimed, or already given back
 	giveBackReady := func() {
 		if readySeq != 0 {
-			s.unclaimReady(t.ID, readySeq)
+			s.unclaimReady(t, t.ID, readySeq)
 			readySeq = 0
 		}
 	}

@@ -90,3 +90,79 @@ func TestARefusedWhenReadySendGivesBackTheReadinessItClaimed(t *testing.T) {
 	}
 	waitScreen(t, c, "agent", "got:hi")
 }
+
+// council P3 on #137: a give-back used to update the bookkeeping without
+// waking anyone already blocked in awaitReady's own select -- a second
+// when-ready send, already waiting when the first one's claim is given
+// back, would sit out its whole wait bound instead of noticing the
+// readiness is available again right away. Driven directly against
+// awaitReady/unclaimReady (same package, the actual functions under
+// test), not through two concurrent HTTP sends: a real send's claim is
+// given back the instant Control fails, with no way to hold it open from
+// outside, so there'd be no real window to put a second send to sleep in
+// first.
+func TestABlockedAwaitReadyWakesOnAGiveBackNotJustATimeout(t *testing.T) {
+	s, c := serve(t, root(t))
+	req := shell("op-giveback-wake", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
+	req.StateChannel = true
+	var made Created
+	if err := c.Do("POST", "/v1/sessions", req, &made); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	path := strings.TrimSpace(waitScreen(t, c, "agent", ".sock").Lines[0])
+
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ad := &fakeAdapter{conn: conn, rd: bufio.NewReader(conn)}
+	ad.report(t, AdapterReport{State: "waiting-input"})
+	var ready SessionView
+	for end := time.Now().Add(5 * time.Second); ready.Agent.State != "waiting-input" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/agent", nil, &ready)
+	}
+	if ready.Agent.State != "waiting-input" {
+		t.Fatalf("the report should have been seen: %+v", ready)
+	}
+
+	s.mu.Lock()
+	sess := s.named["agent"]
+	s.mu.Unlock()
+	if sess == nil {
+		t.Fatal("the session isn't registered under its name")
+	}
+
+	// Claim the one readiness directly, exactly as a send's awaitReady
+	// would, and hold the claim open -- nothing refuses it here, so it
+	// stays claimed until explicitly given back below.
+	seq, ok := s.awaitReady(sess, time.Second)
+	if !ok {
+		t.Fatal("the first claim should have succeeded")
+	}
+
+	// A second, independent awaitReady call blocks now: the readiness is
+	// claimed, and the adapter never reports again, so without a wake
+	// signal this can only resolve by its own long timeout.
+	secondDone := make(chan bool, 1)
+	start := time.Now()
+	go func() {
+		_, ok := s.awaitReady(sess, 10*time.Second)
+		secondDone <- ok
+	}()
+	time.Sleep(100 * time.Millisecond) // let the second call actually reach its blocking select
+
+	s.unclaimReady(sess, sess.ID, seq)
+
+	select {
+	case ok := <-secondDone:
+		if !ok {
+			t.Fatal("the second awaitReady should have claimed the given-back readiness")
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("the blocked second call took %s to notice the give-back, want well under its 10s bound", elapsed)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the blocked second awaitReady never woke on the give-back; it's sitting out its own 10s timeout instead")
+	}
+}
