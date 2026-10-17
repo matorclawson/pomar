@@ -154,16 +154,30 @@ func (a *adapter) serve() {
 }
 
 // disconnected takes the agent state back to unknown when the exact
-// connection whose report set the CURRENT state goes away -- never
-// merely because some connection closed (council P2 on #137: an op-only
-// connection, such as one of the hook scripts in docs/sessions.md that
-// only ever calls begin/finish and never sends an AdapterReport, must
-// leave the state alone when it disconnects; it was never speaking for
-// it). c is compared against stateConn, not conn: a connection can be
-// the latest (conn) without ever having reported state, and a state
-// reporter that gets superseded as the latest connection (serve's own
-// Close, above) still correctly triggers a reset here once its own read
-// loop ends, since nothing superseding it has spoken for state either.
+// connection whose report set the CURRENT state goes away ON ITS OWN --
+// never merely because some connection closed, and never merely because
+// it was superseded. Two council findings on #137, both against the
+// first version of this function:
+//
+// P2 (round one): an op-only connection, such as one of the hook scripts
+// in docs/sessions.md that only ever calls begin/finish and never sends
+// an AdapterReport, must leave the state alone when it disconnects; it
+// was never speaking for state. Fixed by comparing c against stateConn,
+// not conn.
+//
+// P2-1 (round two): that alone still reset state on every new
+// connection's ARRIVAL, not just a reporter's own exit. serve() closes
+// whatever was the single latest connection the moment any new one is
+// accepted -- including a short-lived op-only hook call -- so a
+// long-lived real reporter got forcibly evicted by each such call, its
+// read loop ended here, and this function saw c still equal to stateConn
+// and reset anyway. Only the moment moved (exit -> arrival); every hook
+// call still wiped real state. Fixed: a reset now also requires c to
+// still be a.conn -- i.e. that this disconnect is this connection's own
+// genuine end (error, EOF, or the program closing it), not merely having
+// been superseded by a newer connection, which serve's own Close already
+// reassigned a.conn away from before this call could observe it.
+//
 // The compare-and-clear of conn and stateConn happens under the same
 // lock acquisition that decides whether to reset, but the reset itself
 // still runs after releasing it (ResetAgentUnknown takes the session's
@@ -174,15 +188,17 @@ func (a *adapter) serve() {
 // never a clobber.
 func (a *adapter) disconnected(c net.Conn) {
 	a.mu.Lock()
-	if a.conn == c {
+	stillLatest := a.conn == c // false if serve() already superseded c with a newer connection
+	if stillLatest {
 		a.conn = nil
 	}
 	wasStateConn, seq := a.stateConn == c, a.stateSeq
-	if wasStateConn {
+	resetDue := stillLatest && wasStateConn
+	if resetDue {
 		a.stateConn = nil
 	}
 	a.mu.Unlock()
-	if wasStateConn {
+	if resetDue {
 		a.t.ResetAgentUnknown(seq)
 	}
 }
@@ -241,9 +257,23 @@ func (a *adapter) read(c net.Conn) {
 			// "owning" a reset from whichever connection actually set
 			// the state that's still current (op-only connections, which
 			// never reach here at all, likewise never touch it).
+			//
+			// st is read via a.t.Agent() outside this lock, so two
+			// connections reporting around the same time -- a superseded
+			// one still draining buffered lines, plus the new one that
+			// replaced it -- can both reach here with their own calls
+			// interleaved. Council P3-A: an unconditional overwrite could
+			// let the superseded connection's delayed report win, naming
+			// stateConn as c while holding the OTHER connection's higher
+			// seq, corrupting which connection a later disconnect
+			// attributes the reset decision to. Forward-only: a report
+			// only takes over stateConn if its StateSeq is actually newer
+			// than what's already recorded.
 			st, _ := a.t.Agent()
 			a.mu.Lock()
-			a.stateConn, a.stateSeq = c, st.StateSeq
+			if st.StateSeq > a.stateSeq {
+				a.stateConn, a.stateSeq = c, st.StateSeq
+			}
 			a.mu.Unlock()
 		}
 	}

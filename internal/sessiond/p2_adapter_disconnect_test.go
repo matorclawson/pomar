@@ -73,18 +73,22 @@ func TestAdapterDisconnectResetsAgentStateToUnknown(t *testing.T) {
 	}
 }
 
-// council P2-1 on #137: the first version of the fix reset state when ANY
-// connection disconnected, including an op-only one — exactly the hook
-// scripts docs/sessions.md shows, which only ever call begin/finish and
-// never send an AdapterReport. Every exit of such a hook was wiping out
-// whatever the real adapter had reported. The fix tracks which connection
-// actually set the current state (stateConn), separately from which
-// connection is merely the latest (conn, used for notices); only that
-// exact connection's own disconnect — whether a plain exit or being
-// superseded by the next connection — resets anything. This test checks
-// both ends: an op-only connection never triggers a reset, however it
-// disconnects, and a real reporter's disconnect still correctly does,
-// even when it's via supersession rather than a plain close.
+// council P2-1 on #137: the first version of this fix tracked stateConn
+// separately from conn, but still reset state whenever the stateConn
+// connection disconnected for ANY reason — including merely being
+// superseded. serve() closes whatever was the single latest connection
+// the instant any new one is accepted, so a short-lived op-only hook
+// call (begin/finish, never an AdapterReport) forcibly evicted a
+// long-lived real reporter, whose read loop then ended and whose
+// disconnect still fired a reset — every such hook call wiped real
+// state; only the moment moved from "hook exits" to "hook arrives". The
+// fix requires a reset to ALSO be this connection's own genuine end
+// (error, EOF, the program closing it) — never merely having been
+// superseded, which is instead distinguishable because a.conn no longer
+// names it by the time disconnected runs. This test drives exactly that:
+// a real reporter superseded by a later connection keeps its last
+// reported state, and only a later, genuinely unsuperseded close of a
+// state-reporting connection resets anything.
 func TestAnOpOnlyConnectionNeverResetsAgentState(t *testing.T) {
 	_, c := serve(t, root(t))
 	req := shell("op-oponly", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
@@ -119,19 +123,21 @@ func TestAnOpOnlyConnectionNeverResetsAgentState(t *testing.T) {
 		t.Fatalf("the reporter's state should stick, undisturbed by the op-only connection that preceded it: %+v", state)
 	}
 
-	// A second op-only connection now supersedes the still-open reporter.
-	// The reporter's own disconnect, triggered by that supersession, DOES
-	// correctly reset state — it was the one speaking for it, and now
-	// it's gone.
+	// A second op-only connection now supersedes the still-open reporter —
+	// exactly the shape of a begin/finish hook call arriving while a real
+	// adapter stays connected. The reporter's disconnect here is NOT its
+	// own doing; it must leave the reported state alone, not reset it.
 	ops2 := dialOps(t, path)
-	for end := time.Now().Add(5 * time.Second); state.Agent.State != "unknown" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-		c.Do("GET", "/v1/sessions/agent", nil, &state)
-	}
-	if state.Agent.State != "unknown" {
-		t.Fatalf("the reporter's own disconnect, even via supersession, should still reset state: %+v", state)
-	}
 	if r := ops2.call(t, opRequest{Op: "begin", ID: "op-2", Digest: "d2"}); r["first"] != true {
 		t.Fatalf("begin: %+v", r)
+	}
+	for end := time.Now().Add(500 * time.Millisecond); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if err := c.Do("GET", "/v1/sessions/agent", nil, &state); err != nil {
+			t.Fatal(err)
+		}
+		if state.Agent.State != "waiting-input" {
+			t.Fatalf("a reporter merely superseded by a new connection (even one that's op-only) must not have its state reset — only its own genuine exit should: %+v", state)
+		}
 	}
 
 	// A third connection reports a fresh state, superseding the op-only
@@ -143,7 +149,6 @@ func TestAnOpOnlyConnectionNeverResetsAgentState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn3.Close()
 	ad3 := &fakeAdapter{conn: conn3, rd: bufio.NewReader(conn3)}
 	ad3.report(t, AdapterReport{State: "running"})
 	for end := time.Now().Add(5 * time.Second); state.Agent.State != "running" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
@@ -151,6 +156,17 @@ func TestAnOpOnlyConnectionNeverResetsAgentState(t *testing.T) {
 	}
 	if state.Agent.State != "running" {
 		t.Fatalf("a fresh report must never be clobbered by an op-only connection's own disconnect: %+v", state)
+	}
+
+	// Now conn3's own genuine exit — not superseded by anything — must
+	// still reset state: it was the real stateConn, and nothing else has
+	// spoken for state since.
+	conn3.Close()
+	for end := time.Now().Add(5 * time.Second); state.Agent.State != "unknown" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		c.Do("GET", "/v1/sessions/agent", nil, &state)
+	}
+	if state.Agent.State != "unknown" {
+		t.Fatalf("a state reporter's own, unsuperseded exit must still reset state: %+v", state)
 	}
 }
 
