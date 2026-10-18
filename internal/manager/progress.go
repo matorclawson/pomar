@@ -71,18 +71,25 @@ type WorkloadPhase struct {
 }
 
 type RegistryProgress struct {
-	Availability   string         `json:"availability"`
-	Coverage       string         `json:"coverage"`
-	Requests       int            `json:"requests_observed"`
-	Pending        int            `json:"pending_observed"`
-	Completed      int            `json:"completed_observed"`
-	Statuses       map[int]int    `json:"completed_status_counts"`
-	Events         map[string]int `json:"event_counts"`
-	CacheHits      int            `json:"cache_hits_observed"`
-	CacheMisses    int            `json:"cache_misses_observed"`
-	FirstEventAt   *time.Time     `json:"first_event_at"`
-	LastEventAt    *time.Time     `json:"last_event_at"`
-	LastTransferAt *time.Time     `json:"last_transfer_at"`
+	Availability string         `json:"availability"`
+	Coverage     string         `json:"coverage"`
+	Requests     int            `json:"requests_observed"`
+	Pending      int            `json:"pending_observed"`
+	Completed    int            `json:"completed_observed"`
+	Statuses     map[int]int    `json:"completed_status_counts"`
+	Events       map[string]int `json:"event_counts"`
+	CacheHits    int            `json:"cache_hits_observed"`
+	CacheMisses  int            `json:"cache_misses_observed"`
+	// FirstEventAt is the first ACCEPTED event encountered in arrival
+	// (line) order, not necessarily the lowest timestamp among accepted
+	// events (council C8 on #141): an accepted event can itself be a few
+	// milliseconds behind the one just before it (ordinary concurrency
+	// jitter, within outOfOrderTolerance of the watermark), so a later
+	// line can in principle carry an earlier timestamp than the one that
+	// already set FirstEventAt. It is never re-sorted or replaced once set.
+	FirstEventAt   *time.Time `json:"first_event_at"`
+	LastEventAt    *time.Time `json:"last_event_at"`
+	LastTransferAt *time.Time `json:"last_transfer_at"`
 	// WindowTruncated is this trace read's own partial flag (the window's
 	// leading, possibly-cut-off fragment was dropped): install-stall.go's
 	// own classification treats this as it would any other observed gap in

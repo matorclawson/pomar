@@ -707,10 +707,44 @@ func TestRegistryProgressOutOfOrderComparesAgainstTheWatermarkNotJustThePrevious
 		t.Fatalf("EventsOutOfOrder = %d, want at least 90: accumulated sub-tolerance drift must still be caught against the watermark, not hidden by comparing only to the immediately preceding (already-drifted) event: %+v", p.EventsOutOfOrder, p)
 	}
 	// The real gap between the watermark (base) and the later genuine
-	// event (base+5s) is 5 seconds -- never the ~94s a drifted-away
-	// "previous event" baseline would have produced.
-	if p.LongestGapSeconds == nil || *p.LongestGapSeconds > 10 {
-		t.Fatalf("LongestGapSeconds = %v, want <= 10: comparing against the watermark instead of the drifted previous event must not fabricate a large false gap: %+v", p.LongestGapSeconds, p)
+	// event (base+5s) is exactly 5 seconds -- never the ~94s a
+	// drifted-away "previous event" baseline would have produced. Council
+	// N8c: pin the exact value and the From/To identity, not just a loose
+	// upper bound.
+	if p.LongestGapSeconds == nil || *p.LongestGapSeconds != 5 {
+		t.Fatalf("LongestGapSeconds = %v, want exactly 5: comparing against the watermark instead of the drifted previous event must not fabricate a large false gap: %+v", p.LongestGapSeconds, p)
+	}
+	if p.LongestGapFromAt == nil || !p.LongestGapFromAt.Equal(base) {
+		t.Fatalf("LongestGapFromAt = %v, want the watermark (base): %+v", p.LongestGapFromAt, p)
+	}
+	if p.LongestGapToAt == nil || !p.LongestGapToAt.Equal(forward) {
+		t.Fatalf("LongestGapToAt = %v, want the later genuine event (base+5s): %+v", p.LongestGapToAt, p)
+	}
+	if p.LongestGapFromEvent != "received" || p.LongestGapToEvent != "received" {
+		t.Fatalf("LongestGapFromEvent/ToEvent must name the real events: %+v", p)
+	}
+}
+
+// council C8: FirstEventAt is documented as "first accepted in arrival
+// order", not "earliest by timestamp" -- an accepted event can carry a
+// timestamp a little behind the one right before it (ordinary jitter,
+// within tolerance), so pin that documented behavior directly: the
+// SECOND line here has the lower timestamp, but FirstEventAt must still
+// be the FIRST line's (later) timestamp, not re-sorted to the lower one.
+func TestRegistryProgressFirstEventAtIsFirstAcceptedNotEarliestTimestamp(t *testing.T) {
+	now := time.Date(2026, 10, 18, 13, 0, 0, 0, time.UTC)
+	log := strings.Join([]string{
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"2026-10-18T12:00:01.000Z"}`,
+		// 500ms earlier than the line above: ordinary jitter, accepted.
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"2026-10-18T12:00:00.500Z"}`,
+	}, "\n") + "\n"
+	p := registryProgress([]byte(log), false, now, nil, false, time.Time{}, nil)
+	if p.EventsOutOfOrder != 0 {
+		t.Fatalf("500ms of ordinary jitter must not be flagged out of order: %+v", p)
+	}
+	want := time.Date(2026, 10, 18, 12, 0, 1, 0, time.UTC)
+	if p.FirstEventAt == nil || !p.FirstEventAt.Equal(want) {
+		t.Fatalf("FirstEventAt = %v, want %v (the first-ARRIVED event, not the second line's lower timestamp): %+v", p.FirstEventAt, want, p)
 	}
 }
 

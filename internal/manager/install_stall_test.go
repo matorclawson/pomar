@@ -439,8 +439,6 @@ func TestProgressOfWiresInstallStallEndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rec, logName), []byte("installing\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	created := time.Now().Add(-30 * time.Second)
-
 	cacheDir := t.TempDir()
 	sum := strings.Repeat("c", 128)
 	content := bytes.Repeat([]byte("x"), 1000)
@@ -456,8 +454,18 @@ func TestProgressOfWiresInstallStallEndToEnd(t *testing.T) {
 	w := &failAfterWriter{allow: 50}
 	p.Handler(file).ServeHTTP(w, httptest.NewRequest("GET", "/pkg/-/pkg-1.tgz", nil))
 
+	// council C4 (M05L/M05q/M05C): Created and the `now` passed to
+	// progressOf are both computed from ONE time.Now() call, taken AFTER
+	// the real npmproxy Handler above has already stamped its own events
+	// with the real wall clock (so none of them read as EventsInFuture),
+	// giving an EXACT expected ElapsedSeconds -- the prior +/-5s tolerance
+	// (from two separate, independently-drifting time.Now() calls) could
+	// not tell "the real e.Created was wired through" apart from "some
+	// other, nearby, wrong time was".
+	fixedNow := time.Now()
+	created := fixedNow.Add(-30 * time.Second)
 	e := Entry{Attempt: id, State: StateRunning, Created: created}
-	obs := m.progressOf(e, time.Now())
+	obs := m.progressOf(e, fixedNow)
 	if obs.InstallStall.Contract != "pomar.install-stall-diagnostic/v1" || obs.InstallStall.Attempt != id {
 		t.Fatalf("envelope not wired: %+v", obs.InstallStall)
 	}
@@ -479,8 +487,8 @@ func TestProgressOfWiresInstallStallEndToEnd(t *testing.T) {
 	if obs.InstallStall.LogStatus != sourceOK {
 		t.Fatalf("the real log written for this attempt must flow through as LogStatus ok, not %s -- the wiring must pass THIS attempt's own p.Log, not a substitute: %+v", obs.InstallStall.LogStatus, obs.InstallStall)
 	}
-	if obs.InstallStall.ElapsedSeconds == nil || *obs.InstallStall.ElapsedSeconds < 25 || *obs.InstallStall.ElapsedSeconds > 35 {
-		t.Fatalf("ElapsedSeconds must be computed from THIS attempt's real e.Created (~30s ago), not some other/zero time: %+v", obs.InstallStall)
+	if obs.InstallStall.ElapsedSeconds == nil || *obs.InstallStall.ElapsedSeconds != 30 {
+		t.Fatalf("ElapsedSeconds must be exactly 30 (fixedNow - 30s == created, both from one time.Now() call): %+v", obs.InstallStall)
 	}
 
 	// Now with no npmproxy.log at all: RegistryStatus must read
@@ -523,6 +531,62 @@ func TestProgressOfWiresInstallStallEndToEnd(t *testing.T) {
 // mutant in progressOf's own window computation (e.g. passing the wrong
 // time, or no window at all) could still pass every other end-to-end test
 // above, since none of them put any real events outside the real window.
+// council C3/M05b (progress.go:376): a mutant that always passes `false`
+// for changedDuringRead (so npmproxy.log is never reported re-read mid-
+// change) survived, because TestRegistryProgressSetsChangedDuringReadFromItsOwnParameter
+// calls registryProgress directly with a synthetic bool, and
+// TestProgressOfWiresInstallStallEndToEnd's log never actually changes
+// during a read. This drives a REAL concurrent writer appending to the
+// real npmproxy.log file while progressOf repeatedly reads it, so
+// progressFile's own before/after Stat comparison has a real chance to
+// observe a genuine mid-read change, through the real call chain -- not a
+// parameter asserted in isolation.
+func TestProgressOfDetectsARealRegistryLogChangeDuringARead(t *testing.T) {
+	m, _, v := openSigning(t, false)
+	id := "install-stall-e2e-changed-during-read"
+	rec := filepath.Join(v.Root(), attemptsDir, id)
+	if err := os.MkdirAll(rec, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(rec, "npmproxy.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 1000)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := Entry{Attempt: id, State: StateRunning, Created: time.Now()}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				f.Write([]byte(strings.Repeat("y", 200) + "\n"))
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		obs := m.progressOf(e, time.Now())
+		if obs.Registry.ChangedDuringRead {
+			if obs.InstallStall.RegistryStatus != sourceUnknown {
+				t.Fatalf("a registry log that changed mid-read must report RegistryStatus unknown through the real wiring, not %s: %+v", obs.InstallStall.RegistryStatus, obs.InstallStall)
+			}
+			return // observed a real, end-to-end mid-read change: passed.
+		}
+	}
+	t.Fatal("never observed a real mid-read change to npmproxy.log within 5s of concurrent writing -- ChangedDuringRead must be reachable through the real progressFile/progressOf call chain, not just a synthetic parameter")
+}
+
 func TestProgressOfBindsRealRegistryEventsToTheRealWindowEndToEnd(t *testing.T) {
 	m, _, v := openSigning(t, false)
 	id := "install-stall-e2e-window-binding"
@@ -723,6 +787,25 @@ func TestInstallStallComparisonBoundariesAreExact(t *testing.T) {
 		if d2.Indication != indicationRegistryGapOver {
 			t.Fatalf("a gap one second past the margin must read as a confident over-threshold gap, not near: %+v", d2)
 		}
+		// council C5/M31lo: the margin is symmetric (diff is an absolute
+		// value) -- the LOWER edge (48s, diff=12) must be pinned too, not
+		// just the upper edge (72s) above.
+		reg3 := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second),
+			LongestGapSeconds: seconds(48), LongestGapFromEvent: "a", LongestGapFromAt: at(base, time.Second),
+			LongestGapToEvent: "b", LongestGapToAt: at(base, 49*time.Second)})
+		d3 := installStallDiagnostic("att-bound-7", reg3, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if d3.Indication != indicationInsufficientEvidence {
+			t.Fatalf("a gap exactly at the LOWER margin boundary (48s, diff == margin) must still be too-close-to-call: %+v", d3)
+		}
+		reg4 := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second),
+			LongestGapSeconds: seconds(47), LongestGapFromEvent: "a", LongestGapFromAt: at(base, time.Second),
+			LongestGapToEvent: "b", LongestGapToAt: at(base, 48*time.Second)})
+		d4 := installStallDiagnostic("att-bound-8", reg4, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if d4.Indication != indicationNoStall {
+			t.Fatalf("a gap one second past the LOWER margin (47s, clearly under threshold) must read as a confident NO_STALL_IN_WINDOW, not near: %+v", d4)
+		}
 	})
 
 	t.Run("registry gap over threshold is a strict boundary (recorded threshold, bypassing near-threshold)", func(t *testing.T) {
@@ -758,6 +841,148 @@ func TestInstallStallComparisonBoundariesAreExact(t *testing.T) {
 		dUnder := installStallDiagnostic("att-bound-6", regActive, logUnder, base, we, "", *we, &recorded)
 		if dUnder.Indication == indicationGuestQuietActive {
 			t.Fatalf("guest-quiet one second under the threshold must not read active: %+v", dUnder)
+		}
+	})
+}
+
+// council C1/M04 and C2/M03i: the near-threshold and AttemptIntervalUnknown
+// triggers were never combined with a genuine send_short fact -- unlike
+// the 8 event/status/truncation triggers in
+// TestInstallStallEachInsufficientEvidenceTriggerIsIndependent, these two
+// live outside that function's fixture set (nearThreshold is computed
+// separately; AttemptIntervalUnknown is folded into anyUnbound but was
+// only ever exercised alone). A mutant moving either check to apply only
+// when there's no competing send_short fact would have survived.
+func TestInstallStallNearThresholdAndIntervalUnknownStillWinOverSendShort(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	okReg := func(extra RegistryProgress) RegistryProgress {
+		extra.Availability = "AVAILABLE"
+		return extra
+	}
+	sendShort := []ShortRequestEvidence{{Request: 1, Bytes: seconds(0), Reason: "write failed"}}
+
+	t.Run("near-threshold wins over a genuine send_short fact (C1/M04)", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{"send_short": 1}, Statuses: map[int]int{},
+			ShortRequests: sendShort,
+			FirstEventAt:  at(base, time.Second), LastEventAt: at(base, 3*time.Second),
+			LongestGapSeconds: seconds(65), LongestGapFromEvent: "a", LongestGapFromAt: at(base, time.Second),
+			LongestGapToEvent: "b", LongestGapToAt: at(base, 66*time.Second)})
+		we := end(base, 4*time.Second)
+		d := installStallDiagnostic("att-c1", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if d.Indication != indicationInsufficientEvidence {
+			t.Fatalf("indication = %s, want %s: a near-threshold gap must preempt even a genuine send_short fact: %+v", d.Indication, indicationInsufficientEvidence, d)
+		}
+		if d.SendShortCount != 1 {
+			t.Fatalf("the send_short fact must still be reported: %+v", d)
+		}
+	})
+
+	t.Run("interval-unknown wins over a genuine send_short fact (C2/M03i)", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{"send_short": 1}, Statuses: map[int]int{},
+			ShortRequests: sendShort,
+			FirstEventAt:  at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
+		invalidEnd := base // before created: an invalid interval
+		created := base.Add(10 * time.Second)
+		d := installStallDiagnostic("att-c2", reg, ProgressLog{Availability: "AVAILABLE"}, created, &invalidEnd, "", invalidEnd, nil)
+		if !d.AttemptIntervalUnknown {
+			t.Fatalf("AttemptIntervalUnknown must still be set: %+v", d)
+		}
+		if d.Indication != indicationInsufficientEvidence {
+			t.Fatalf("indication = %s, want %s: an invalid interval must preempt even a genuine send_short fact: %+v", d.Indication, indicationInsufficientEvidence, d)
+		}
+		if d.SendShortCount != 1 {
+			t.Fatalf("the send_short fact must still be reported: %+v", d)
+		}
+	})
+}
+
+// council C6/M18a-d: the 9 distinct *_unknown_reason STRINGS install_stall.go
+// itself produces (elapsed: 1; longest-gap: 2; trailing: 3; guest-quiet: 3,
+// not counting each field's shared windowEnd==nil case, which reuses the
+// caller-supplied windowEndUnknownReason and is exercised by
+// TestInstallStallFactsUnknownWhenWindowEndUnknown) were never individually
+// pinned to their EXACT text -- a mutant swapping, truncating or
+// misattributing any one of them would still pass every existing test,
+// which only checked "non-empty".
+func TestInstallStallUnknownReasonStringsAreExact(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	okReg := func(extra RegistryProgress) RegistryProgress {
+		extra.Availability = "AVAILABLE"
+		return extra
+	}
+	we := end(base, 10*time.Second)
+
+	t.Run("longest-gap: registry status unknown", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{}, ChangedDuringRead: true})
+		d := installStallDiagnostic("att-r1", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if want := "registry status is unknown"; d.LongestRegistryGapUnknownReason != want {
+			t.Fatalf("LongestRegistryGapUnknownReason = %q, want %q: %+v", d.LongestRegistryGapUnknownReason, want, d)
+		}
+	})
+	t.Run("longest-gap: fewer than two recognized events", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, time.Second)})
+		d := installStallDiagnostic("att-r2", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if want := "fewer than two recognized, in-window events were observed"; d.LongestRegistryGapUnknownReason != want {
+			t.Fatalf("LongestRegistryGapUnknownReason = %q, want %q: %+v", d.LongestRegistryGapUnknownReason, want, d)
+		}
+	})
+
+	t.Run("trailing: registry status unknown", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{}, ChangedDuringRead: true})
+		d := installStallDiagnostic("att-r3", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if want := "registry status is unknown"; d.TrailingRegistrySilenceUnknownReason != want {
+			t.Fatalf("TrailingRegistrySilenceUnknownReason = %q, want %q: %+v", d.TrailingRegistrySilenceUnknownReason, want, d)
+		}
+	})
+	t.Run("trailing: no in-window registry event observed", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{}})
+		d := installStallDiagnostic("att-r4", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if want := "no in-window registry event was observed"; d.TrailingRegistrySilenceUnknownReason != want {
+			t.Fatalf("TrailingRegistrySilenceUnknownReason = %q, want %q: %+v", d.TrailingRegistrySilenceUnknownReason, want, d)
+		}
+	})
+	t.Run("trailing: window end precedes last observed registry event", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 20*time.Second)}) // after `we` (base+10s)
+		d := installStallDiagnostic("att-r5", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if want := "window end precedes the last observed registry event"; d.TrailingRegistrySilenceUnknownReason != want {
+			t.Fatalf("TrailingRegistrySilenceUnknownReason = %q, want %q: %+v", d.TrailingRegistrySilenceUnknownReason, want, d)
+		}
+	})
+
+	t.Run("guest-quiet: log status unknown", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
+		d := installStallDiagnostic("att-r6", reg, ProgressLog{Availability: "AVAILABLE", ChangedDuringRead: true}, base, we, "", *we, nil)
+		if want := "log status is unknown"; d.GuestQuietUnknownReason != want {
+			t.Fatalf("GuestQuietUnknownReason = %q, want %q: %+v", d.GuestQuietUnknownReason, want, d)
+		}
+	})
+	t.Run("guest-quiet: no output observed yet", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
+		d := installStallDiagnostic("att-r7", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if want := "no output has been observed yet"; d.GuestQuietUnknownReason != want {
+			t.Fatalf("GuestQuietUnknownReason = %q, want %q: %+v", d.GuestQuietUnknownReason, want, d)
+		}
+	})
+	t.Run("guest-quiet: window end precedes guest's last observed output", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
+		d := installStallDiagnostic("att-r8", reg, ProgressLog{Availability: "AVAILABLE", LastOutputAt: at(base, 20*time.Second)}, base, we, "", *we, nil) // after `we`
+		if want := "window end precedes the guest's last observed output"; d.GuestQuietUnknownReason != want {
+			t.Fatalf("GuestQuietUnknownReason = %q, want %q: %+v", d.GuestQuietUnknownReason, want, d)
+		}
+	})
+
+	t.Run("elapsed: the shared interval-invalid reason is carried through verbatim", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
+		created := time.Time{} // missing Created
+		d := installStallDiagnostic("att-r9", reg, ProgressLog{Availability: "AVAILABLE"}, created, we, "", *we, nil)
+		if want := "attempt has no recorded Created time"; d.ElapsedUnknownReason != want {
+			t.Fatalf("ElapsedUnknownReason = %q, want %q: %+v", d.ElapsedUnknownReason, want, d)
 		}
 	})
 }

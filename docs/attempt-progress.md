@@ -29,6 +29,8 @@ The response includes a short `summary` and these structured fields:
 | `log.window_truncated`, `changed_during_read` | The window omits older bytes, or the file changed during this read |
 | `registry.event_counts`, `cache_hits_observed`, `cache_misses_observed` | Actual received/cache/upstream/connect/first-byte/send_short/completion events in the inspected trace window |
 | `registry.pending_observed`, `completed_status_counts`, `last_transfer_at` | Observed requests without a completion, HTTP outcomes and last observed network transfer. A completed 2xx is excluded from `last_transfer_at` when its own request also logged a `send_short` (docs/job-failure-diagnostics.md: a 2xx status alone is never proof the guest received every byte), or when this window's own evidence for that request is incomplete (a bounded tail window can retain a completion while an earlier `send_short` for the same request fell outside it) |
+| `registry.window_truncated`, `changed_during_read`, `events_before_window_start`, `events_after_window_end`, `events_out_of_order`, `events_in_future` | The same truncation/mid-read-change/unbound-event facts as `log.*` above, but for the registry trace; these feed `install_stall`'s own source-status and trigger facts below, not just `registry.*` on its own |
+| `registry.first_event_at`, `last_event_at` | The first and last recognized, in-window, in-order event. `first_event_at` is the first such event encountered in arrival (line) order, not re-sorted to the lowest timestamp among accepted events: an accepted event can itself carry a timestamp a little behind the one right before it (ordinary concurrency jitter, within the 1-second tolerance), so a later line can in principle hold an earlier timestamp than the one that already set `first_event_at` |
 | `resources.observed_at`, `peaks`, `disk_scope` | Measurement time and historical VM peaks; the disk figure is a shared-filesystem delta, not per-job I/O |
 | `stall_assessment` | `NOT_DETERMINED`: silence, heartbeats and low CPU alone do not prove a stall or its cause |
 | `install_stall` | A fact-only diagnostic for PROFROD-SOW-330's install-stall question (POMAR-CC-SOW-37), computed on this same read. See below. |
@@ -50,11 +52,12 @@ interval is never reported as an observed silence.
 `events_in_future` count registry events this read can't bind to the
 attempt's own timeline; such events are excluded from every gap and
 first/last-event fact, and a non-zero count of any of them is itself a
-trigger below. `events_out_of_order` only counts an event timestamped
-more than a short tolerance earlier than one already accepted: ordinary
-concurrent requests can legitimately land a few milliseconds out of
-strict timestamp order (the relay stamps its own clock before acquiring
-its log lock), and that alone is never treated as corrupted data.
+trigger below. `events_out_of_order` only counts an event timestamped more than 1
+second earlier than the highest-timestamp accepted event so far (a
+watermark, not merely the previous line): ordinary concurrent requests
+can legitimately land a few milliseconds out of strict timestamp order
+(the relay stamps its own clock before acquiring its log lock), and that
+alone is never treated as corrupted data.
 `attempt_interval_unknown` is true whenever the attempt's own
 `[created, window end]` interval isn't actually known or is internally
 invalid: a terminal attempt recorded no Ended time, the attempt recorded
@@ -81,7 +84,7 @@ evidential class is never read off evidence this uncertain.
 
 `send_short_requests` (at most 3 entries) are bounded and sanitized at
 the source, consistent with "the registry projection contains aggregates,
-not raw paths" above: `path`/`reason` are ASCII-printable-only and
+not raw paths" below: `path`/`reason` are ASCII-printable-only and
 length-bounded, `reason` is always one of a closed set (never raw text),
 and `truncated` flags an entry that was altered from the log's own bytes.
 The whole `install_stall` object is itself capped at 4 KiB, enforced on
