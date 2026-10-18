@@ -35,6 +35,10 @@ type AttemptProgress struct {
 	Resources      ProgressResources `json:"resources"`
 	// Absence of stdout or a low CPU sample is not proof of a stall.
 	StallAssessment string `json:"stall_assessment"`
+	// InstallStall is PROFROD-SOW-330/POMAR-CC-SOW-37's own diagnosis,
+	// computed on read from the same Log/Registry/times above -- never a
+	// verified cause, never retry/config/egress authority.
+	InstallStall InstallStallDiagnostic `json:"install_stall"`
 }
 
 type ProgressResources struct {
@@ -67,17 +71,179 @@ type WorkloadPhase struct {
 }
 
 type RegistryProgress struct {
-	Availability   string         `json:"availability"`
-	Coverage       string         `json:"coverage"`
-	Requests       int            `json:"requests_observed"`
-	Pending        int            `json:"pending_observed"`
-	Completed      int            `json:"completed_observed"`
-	Statuses       map[int]int    `json:"completed_status_counts"`
-	Events         map[string]int `json:"event_counts"`
-	CacheHits      int            `json:"cache_hits_observed"`
-	CacheMisses    int            `json:"cache_misses_observed"`
-	LastEventAt    *time.Time     `json:"last_event_at"`
-	LastTransferAt *time.Time     `json:"last_transfer_at"`
+	Availability string         `json:"availability"`
+	Coverage     string         `json:"coverage"`
+	Requests     int            `json:"requests_observed"`
+	Pending      int            `json:"pending_observed"`
+	Completed    int            `json:"completed_observed"`
+	Statuses     map[int]int    `json:"completed_status_counts"`
+	Events       map[string]int `json:"event_counts"`
+	CacheHits    int            `json:"cache_hits_observed"`
+	CacheMisses  int            `json:"cache_misses_observed"`
+	// FirstEventAt is the first ACCEPTED event encountered in arrival
+	// (line) order, not necessarily the lowest timestamp among accepted
+	// events (council C8 on #141): an accepted event can itself be a few
+	// milliseconds behind the one just before it (ordinary concurrency
+	// jitter, within outOfOrderTolerance of the watermark), so a later
+	// line can in principle carry an earlier timestamp than the one that
+	// already set FirstEventAt. It is never re-sorted or replaced once set.
+	FirstEventAt   *time.Time `json:"first_event_at"`
+	LastEventAt    *time.Time `json:"last_event_at"`
+	LastTransferAt *time.Time `json:"last_transfer_at"`
+	// WindowTruncated is this trace read's own partial flag (the window's
+	// leading, possibly-cut-off fragment was dropped): install-stall.go's
+	// own classification treats this as it would any other observed gap in
+	// coverage, never as proof nothing happened before the window started.
+	WindowTruncated bool `json:"window_truncated"`
+	// LongestGap* names the single largest gap between two consecutive
+	// recognized events IN this window (never across requests' own
+	// internal retry logic, just event-to-event in arrival order); empty
+	// when fewer than two recognized events were observed. Both are this
+	// host's own clock (the relay's own time.Now(), the same clock as
+	// Entry.Created/Ended and progressFile's file mtimes) -- never a
+	// guest-reported time.
+	LongestGapSeconds   *int64     `json:"longest_gap_seconds,omitempty"`
+	LongestGapFromEvent string     `json:"longest_gap_from_event,omitempty"`
+	LongestGapFromAt    *time.Time `json:"longest_gap_from_at,omitempty"`
+	LongestGapToEvent   string     `json:"longest_gap_to_event,omitempty"`
+	LongestGapToAt      *time.Time `json:"longest_gap_to_at,omitempty"`
+	// ShortRequests is at most 3 send_short events, oldest first, each
+	// naming the already-redacted route Path npmproxy itself logs (never
+	// a raw URL, header or query -- the same redaction Handler already
+	// enforces before any of this is written) and the byte/want/reason
+	// fields send_short itself carries.
+	ShortRequests []ShortRequestEvidence `json:"short_requests,omitempty"`
+	// EventsSinceGuestQuiet counts recognized events at or after the
+	// guestQuietSince cutoff passed to registryProgress (the guest log's
+	// own LastOutputAt) -- a fact a caller can read for itself, not a
+	// boolean conclusion this package draws about whose fault a stall is.
+	EventsSinceGuestQuiet int `json:"events_since_guest_quiet"`
+	// ChangedDuringRead mirrors ProgressLog.ChangedDuringRead for this
+	// same npmproxy.log read (council P1-2 on #141: previously computed
+	// by progressFile and silently discarded for this source) -- a
+	// non-atomic tail read, taken while the file was still being written.
+	ChangedDuringRead bool `json:"changed_during_read"`
+	// EventsBeforeWindowStart/EventsAfterWindowEnd/EventsOutOfOrder
+	// (council P2-2 on #141) count recognized events that fall outside
+	// [windowStart, windowEnd] or arrive with a timestamp earlier than an
+	// already-accepted one, when registryProgress was given a window to
+	// bind against. Such events are facts on their own (a non-zero count
+	// is itself worth surfacing) but are excluded from FirstEventAt,
+	// LastEventAt, the gap tracking and EventsSinceGuestQuiet -- an event
+	// that can't be trusted to belong to this attempt's own timeline
+	// must never silently widen or narrow an "observed" gap.
+	EventsBeforeWindowStart int `json:"events_before_window_start"`
+	EventsAfterWindowEnd    int `json:"events_after_window_end"`
+	// EventsOutOfOrder only counts an event whose timestamp is more than
+	// outOfOrderTolerance earlier than one already accepted -- council N1:
+	// npmproxy stamps time.Now() before acquiring its own log lock, so
+	// ordinary concurrent requests (the normal case for a real install,
+	// not an edge case) can legitimately land a few milliseconds out of
+	// strict order; treating that as corrupted data made a real,
+	// concurrent install unable to ever produce an evidential indication.
+	EventsOutOfOrder int `json:"events_out_of_order"`
+	// EventsInFuture counts a recognized event timestamped after `now`
+	// (council N3): previously silently dropped and indistinguishable
+	// from a line that simply wasn't there; now a fact in its own right
+	// (a clock problem, or a read racing a still-landing write).
+	EventsInFuture int `json:"events_in_future"`
+}
+
+// outOfOrderTolerance: see EventsOutOfOrder's own doc above.
+const outOfOrderTolerance = 1 * time.Second
+
+// ShortRequestEvidence is one send_short event. Path and Reason are
+// bounded and sanitized here, at the source, not trusted to upstream
+// redaction or left for a caller to bound -- docs/attempt-progress.md's
+// own promise ("the registry projection contains aggregates, not raw
+// paths") is enforced at the one place that builds this slice, not
+// re-derived downstream.
+type ShortRequestEvidence struct {
+	Request uint64 `json:"request"`
+	Path    string `json:"path,omitempty"`
+	Bytes   *int64 `json:"bytes,omitempty"`
+	Want    *int64 `json:"want,omitempty"`
+	// Reason is always one of a closed set (shortReason's own classified
+	// buckets, plus sendFile's nil-error short-count message, plus
+	// "other" for anything else) -- never raw text passed through.
+	Reason string `json:"reason,omitempty"`
+	// Truncated is true when Path was shortened, or when Path/Reason
+	// contained characters outside a tarball path's own charset and were
+	// replaced -- an explicit signal that this entry isn't the log's
+	// exact bytes, rather than a silent, unflagged alteration.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// maxShortRequestEvidence bounds ShortRequests: evidence, not a full log replay.
+const maxShortRequestEvidence = 3
+
+// maxEvidencePathLen bounds ShortRequestEvidence's Path, applied to the
+// already-sanitized (ASCII-printable-only) string: pomar's review found
+// npmproxy's own Path has no length bound of its own beyond the log
+// line's 4096-byte cap, and a handful of such paths alone could blow past
+// this field's own small share of the attempt-progress response.
+const maxEvidencePathLen = 200
+
+// evidenceReasons is the closed set a send_short Reason is ever allowed
+// to report as: shortReason's own classified buckets (internal/npmproxy),
+// plus sendFile's nil-error short-count message, plus "other" for
+// anything that doesn't match (never raw text passed through).
+var evidenceReasons = map[string]bool{
+	"broken pipe": true, "connection reset": true, "connection closed": true,
+	"request canceled": true, "deadline exceeded": true, "write failed": true,
+	"copy ended with no error short of the file's stated size": true,
+}
+
+// sanitizeEvidenceText replaces anything outside printable ASCII with a
+// placeholder (so no amount of JSON-escaping-expansion can make a
+// bounded-byte-length string marshal larger than a small, predictable
+// multiple of its own length -- pomar's U+0001/'<' counterexample),
+// then bounds the result to maxLen. The returned bool is true if the
+// text was altered in either way.
+// jsonEscapes is every byte that doesn't marshal to exactly one byte of
+// JSON output -- not just control characters and non-ASCII. Council M08/
+// M08b (round five on #141): the first version of this function treated
+// any printable-ASCII byte (0x20-0x7e) as already safe, which includes
+// '<', '>', '&', '"' and '\\'. Go's encoding/json, by default, HTML-escapes
+// '<'/'>'/'&' to six-byte \u00XX sequences, and '"'/'\\' always need a
+// two-byte escape -- an all-'<' adversarial path, bounded only by raw
+// byte count, still marshaled to well over this report's 4 KiB cap.
+// Replacing these five too, alongside the already-excluded control/
+// non-ASCII bytes, makes every surviving byte cost exactly one byte in
+// the real marshaled output, so the raw-length bound below is an actual
+// bound on the escaped size too, regardless of json.Marshal's own
+// HTML-escaping setting.
+var jsonEscapes = map[byte]bool{'<': true, '>': true, '&': true, '"': true, '\\': true}
+
+func sanitizeEvidenceText(s string, maxLen int) (string, bool) {
+	altered := false
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f || c > 0x7e || jsonEscapes[c] {
+			out = append(out, '?')
+			altered = true
+			continue
+		}
+		out = append(out, c)
+	}
+	if len(out) > maxLen {
+		out = out[:maxLen]
+		altered = true
+	}
+	return string(out), altered
+}
+
+// closedEvidence sanitizes and bounds one send_short evidence entry,
+// before it's ever stored: the one place this slice is built.
+func closedEvidence(e ShortRequestEvidence) ShortRequestEvidence {
+	path, pathAltered := sanitizeEvidenceText(e.Path, maxEvidencePathLen)
+	e.Path = path
+	e.Truncated = pathAltered
+	if !evidenceReasons[e.Reason] {
+		e.Reason = "other"
+	}
+	return e
 }
 
 // progressFile never follows a record-file symlink or blocks on a FIFO.
@@ -198,8 +364,23 @@ func (m *Manager) progressOf(e Entry, now time.Time) *AttemptProgress {
 	} else if os.IsNotExist(err) {
 		p.Log.Availability = "NOT_CREATED"
 	}
-	if b, _, offset, _, err := progressFile(record, "npmproxy.log", progressRegistryWindow, true); err == nil {
-		p.Registry = registryProgress(b, offset > 0, now)
+	// windowEnd is nil only when this attempt is terminal but never
+	// recorded an Ended time -- council P2-1 on #141: that must read as
+	// unknown everywhere it's used, never silently fall back to `now`
+	// and manufacture a growing fact out of wall-clock time.
+	var windowEnd *time.Time
+	var windowEndUnknownReason string
+	switch {
+	case e.Terminal() && e.Ended.IsZero():
+		windowEndUnknownReason = "attempt is terminal but recorded no Ended time"
+	case e.Terminal():
+		end := e.Ended
+		windowEnd = &end
+	default:
+		windowEnd = &now
+	}
+	if b, _, offset, changed, err := progressFile(record, "npmproxy.log", progressRegistryWindow, true); err == nil {
+		p.Registry = registryProgress(b, offset > 0, now, p.Log.LastOutputAt, changed, e.Created, windowEnd)
 	} else if os.IsNotExist(err) {
 		p.Registry.Availability = "NOT_CREATED"
 	}
@@ -219,6 +400,7 @@ func (m *Manager) progressOf(e Entry, now time.Time) *AttemptProgress {
 			p.Phase, p.Summary = "OUTCOME_UNCONFIRMED", "Helper status was lost; reconcile execution outcome before any retry."
 		}
 	}
+	p.InstallStall = installStallDiagnostic(e.Attempt, p.Registry, p.Log, e.Created, windowEnd, windowEndUnknownReason, now, nil)
 	return p
 }
 
@@ -286,13 +468,36 @@ func workloadPhase(b []byte, partial bool) *WorkloadPhase {
 	return latest
 }
 
-func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
-	p := RegistryProgress{Availability: "AVAILABLE", Coverage: "TAIL_WINDOW", Statuses: map[int]int{}, Events: map[string]int{}}
+// windowStart/windowEnd (council P2-2 on #141) bind recognized events to
+// the attempt's own timeline: windowEnd nil means the end of that
+// timeline isn't known for this read (a terminal attempt with no
+// recorded Ended), in which case only windowStart still applies.
+func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *time.Time, changedDuringRead bool, windowStart time.Time, windowEnd *time.Time) RegistryProgress {
+	p := RegistryProgress{Availability: "AVAILABLE", Coverage: "TAIL_WINDOW", Statuses: map[int]int{}, Events: map[string]int{}, WindowTruncated: partial, ChangedDuringRead: changedDuringRead}
 	lines := bytes.Split(b, []byte{'\n'})
 	if partial && len(lines) > 0 {
 		lines = lines[1:]
 	}
 	states := map[uint64]string{}
+	// maxAcceptedAt/maxAcceptedName track the highest-timestamp accepted
+	// event seen so far (a watermark), never the literal previous line in
+	// arrival order. Council N8 (round six on #141): the first version of
+	// this check compared against the previous event alone, so a run of
+	// small, each-individually-within-tolerance backward steps (e.g. 0.9s
+	// at a time, the normal concurrency jitter outOfOrderTolerance exists
+	// to absorb) could accumulate unbounded net drift without ever
+	// tripping EventsOutOfOrder -- council's own probe: 90s of accumulated
+	// backward drift in 0.9s steps, none flagged, then a correct,
+	// real-time event arriving afterward computed its gap against the
+	// drifted-away previous timestamp instead of the true high point,
+	// producing a false REGISTRY_GAP_OVER_THRESHOLD. Comparing against the
+	// watermark instead means a genuinely drifting run is itself correctly
+	// excluded once it's past tolerance from the highest point actually
+	// seen, not merely from whatever its own last (already-drifted) step
+	// happened to be.
+	var maxAcceptedAt time.Time
+	var maxAcceptedName string
+	var longestGap time.Duration
 	// council P3-3 on #138: a "completed" 2xx is this host's own write
 	// already having reported success on the wire before the copy ran; it
 	// was never proof the guest received every byte (docs/job-failure-
@@ -328,15 +533,27 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 			Time    string `json:"time"`
 			Status  int    `json:"status"`
 			Cache   string `json:"cache"`
+			Path    string `json:"path"`
+			Bytes   *int64 `json:"bytes"`
+			Want    *int64 `json:"want"`
+			Reason  string `json:"reason"`
 		}
 		if json.Unmarshal(line, &ev) != nil || ev.Schema != "pomar.npm-request/v1" || ev.Request == 0 {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339Nano, ev.Time)
-		if err != nil || t.After(now) {
+		if err != nil {
 			continue
 		}
 		t = t.UTC()
+		if t.After(now) {
+			// Council N3: a future-stamped event is itself a fact worth
+			// surfacing (a clock problem, or a read racing a write that
+			// hasn't finished landing), not silently indistinguishable
+			// from a line that simply isn't there.
+			p.EventsInFuture++
+			continue
+		}
 		switch ev.Event {
 		case "received", "cache", "upstream_started", "upstream_connect_started", "upstream_connected", "upstream_first_byte", "send_short", "completed":
 		default:
@@ -356,8 +573,70 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		if ev.Event == "send_short" || incompleteCoverage {
 			shortRequests[ev.Request] = true
 		}
-		if p.LastEventAt == nil || t.After(*p.LastEventAt) {
-			p.LastEventAt = &t
+		if ev.Event == "send_short" && len(p.ShortRequests) < maxShortRequestEvidence {
+			p.ShortRequests = append(p.ShortRequests, closedEvidence(ShortRequestEvidence{Request: ev.Request, Path: ev.Path, Bytes: ev.Bytes, Want: ev.Want, Reason: ev.Reason}))
+		}
+		// An event that can't be trusted to belong to this attempt's own
+		// timeline (before it started, after a known end, or arriving
+		// with a materially earlier timestamp than one already accepted)
+		// is still counted as its own fact, but excluded from every
+		// time-based one below it: FirstEventAt/LastEventAt/the gap
+		// tracking/EventsSinceGuestQuiet would otherwise silently narrow
+		// or widen an "observed" interval using a timestamp this
+		// function can't vouch for.
+		//
+		// Council N1 (round five on #141): npmproxy's own writeEvent
+		// calls time.Now() BEFORE acquiring logMu (internal/npmproxy/
+		// npmproxy.go), so under real concurrency -- many npm requests
+		// in flight at once, the ordinary case for an actual install,
+		// not an edge case -- two goroutines can race between stamping
+		// their own time and acquiring the lock to write it, letting a
+		// line land in the file slightly out of timestamp order relative
+		// to one just before it, with NOTHING wrong with either event.
+		// A strict t.Before(prevEventAt) check (this function's first
+		// version) flagged every such ordinary race as "out of order",
+		// which -- combined with a non-zero count being an
+		// INSUFFICIENT_EVIDENCE trigger -- meant a real, concurrent
+		// install could never produce an evidential indication at all
+		// (council's own measurement: 0/60 trials did, at 16 concurrent
+		// requests). outOfOrderTolerance absorbs exactly that scheduling
+		// jitter without absorbing a genuinely corrupted or reordered
+		// log: only a timestamp materially earlier than what's already
+		// been accepted -- past the tolerance, not merely a few
+		// milliseconds behind it -- counts as out of order.
+		beforeStart := !windowStart.IsZero() && t.Before(windowStart)
+		afterEnd := windowEnd != nil && t.After(*windowEnd)
+		outOfOrder := !maxAcceptedAt.IsZero() && maxAcceptedAt.Sub(t) > outOfOrderTolerance
+		if beforeStart {
+			p.EventsBeforeWindowStart++
+		}
+		if afterEnd {
+			p.EventsAfterWindowEnd++
+		}
+		if outOfOrder {
+			p.EventsOutOfOrder++
+		}
+		if !beforeStart && !afterEnd && !outOfOrder {
+			if p.FirstEventAt == nil {
+				p.FirstEventAt = &t
+			}
+			if guestQuietSince != nil && !t.Before(*guestQuietSince) {
+				p.EventsSinceGuestQuiet++
+			}
+			if !maxAcceptedAt.IsZero() {
+				if gap := t.Sub(maxAcceptedAt); gap > longestGap {
+					longestGap = gap
+					p.LongestGapFromEvent, p.LongestGapToEvent = maxAcceptedName, ev.Event
+					from, to := maxAcceptedAt, t
+					p.LongestGapFromAt, p.LongestGapToAt = &from, &to
+				}
+			}
+			if maxAcceptedAt.IsZero() || t.After(maxAcceptedAt) {
+				maxAcceptedAt, maxAcceptedName = t, ev.Event
+			}
+			if p.LastEventAt == nil || t.After(*p.LastEventAt) {
+				p.LastEventAt = &t
+			}
 		}
 		if ev.Event == "upstream_first_byte" || (ev.Event == "completed" && ev.Status >= 200 && ev.Status < 300 && !shortRequests[ev.Request]) {
 			if p.LastTransferAt == nil || t.After(*p.LastTransferAt) {
@@ -389,6 +668,10 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		if state != "completed" {
 			p.Pending++
 		}
+	}
+	if longestGap > 0 {
+		seconds := int64(longestGap / time.Second)
+		p.LongestGapSeconds = &seconds
 	}
 	return p
 }
