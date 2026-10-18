@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -334,5 +335,78 @@ func TestRegistryProgressClearsShortRequestsOnAReusedRequestID(t *testing.T) {
 	}
 	if p.LastTransferAt == nil {
 		t.Fatalf("the reused ID's second, genuinely clean completion must be credited as a transfer, not suppressed by the first use's stale send_short: %+v", p)
+	}
+}
+
+// POMAR-CC-SOW-37 (the install-stall collector): registryProgress's new
+// fields -- first/last event times, the single largest gap, truncation and
+// up to 3 send_short evidence records -- must come straight out of the
+// same reviewed parse of the log, passed through verbatim (the path
+// council's amendment 5 asked to be verified as passthrough, never
+// reconstructed): whatever string the log line already carries for "path"
+// is exactly what shows up here, no matter what it is.
+func TestRegistryProgressNewFieldsForInstallStall(t *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 1, 0, 0, time.UTC)
+	log := strings.Join([]string{
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"2026-10-18T11:59:00Z"}`,
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"upstream_started","time":"2026-10-18T11:59:30Z"}`,
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"send_short","time":"2026-10-18T12:00:00Z","path":"/left-pad/-/left-pad-1.3.0.tgz","bytes":100,"want":10000,"reason":"write failed"}`,
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"completed","time":"2026-10-18T12:00:00Z","status":200}`,
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"2026-10-18T12:00:01Z"}`,
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"send_short","time":"2026-10-18T12:00:02Z","path":"[redacted]","bytes":0,"reason":"write failed"}`,
+	}, "\n") + "\n"
+	p := registryProgress([]byte(log), false, now)
+
+	if p.FirstEventAt == nil || !p.FirstEventAt.Equal(time.Date(2026, 10, 18, 11, 59, 0, 0, time.UTC)) {
+		t.Fatalf("FirstEventAt wrong: %+v", p.FirstEventAt)
+	}
+	if p.LongestGapSeconds == nil || *p.LongestGapSeconds != 30 || p.LongestGapFromEvent != "received" || p.LongestGapToEvent != "upstream_started" {
+		t.Fatalf("the 30s received->upstream_started gap should be the longest recorded: %+v", p)
+	}
+	if p.WindowTruncated {
+		t.Fatalf("a non-partial read must not report itself truncated: %+v", p)
+	}
+	if len(p.ShortRequests) != 2 {
+		t.Fatalf("both send_short events should be carried as evidence (under the 3-entry bound): %+v", p.ShortRequests)
+	}
+	if p.ShortRequests[0].Path != "/left-pad/-/left-pad-1.3.0.tgz" || p.ShortRequests[0].Bytes == nil || *p.ShortRequests[0].Bytes != 100 || p.ShortRequests[0].Want == nil || *p.ShortRequests[0].Want != 10000 {
+		t.Fatalf("first send_short evidence not passed through verbatim: %+v", p.ShortRequests[0])
+	}
+	// council amendment 5: whatever the log line's own path field says --
+	// including an already-redacted "[redacted]" -- comes through exactly
+	// as written, never reconstructed or re-derived here.
+	if p.ShortRequests[1].Path != "[redacted]" {
+		t.Fatalf("an already-redacted path must pass through unchanged, not be reconstructed: %+v", p.ShortRequests[1])
+	}
+}
+
+// A partial (tail) read must report itself truncated via the same flag
+// the caller already passed in, so a consumer never has to re-derive it.
+func TestRegistryProgressReportsItsOwnTruncation(t *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	log := strings.Join([]string{
+		`garbage truncated fragment`,
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"completed","time":"2026-10-18T11:59:59Z","status":200}`,
+	}, "\n") + "\n"
+	p := registryProgress([]byte(log), true, now)
+	if !p.WindowTruncated {
+		t.Fatalf("a partial read must say so: %+v", p)
+	}
+}
+
+// ShortRequests is evidence, not a full replay: bounded at maxShortRequestEvidence.
+func TestRegistryProgressBoundsShortRequestEvidence(t *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 1, 0, 0, time.UTC)
+	var lines []string
+	for i := uint64(1); i <= 5; i++ {
+		lines = append(lines,
+			`{"schema":"pomar.npm-request/v1","request":`+strconv.FormatUint(i, 10)+`,"event":"received","time":"2026-10-18T12:00:00Z"}`,
+			`{"schema":"pomar.npm-request/v1","request":`+strconv.FormatUint(i, 10)+`,"event":"send_short","time":"2026-10-18T12:00:00Z","bytes":0}`,
+		)
+	}
+	log := strings.Join(lines, "\n") + "\n"
+	p := registryProgress([]byte(log), false, now)
+	if len(p.ShortRequests) != maxShortRequestEvidence {
+		t.Fatalf("ShortRequests should be bounded at %d, got %d", maxShortRequestEvidence, len(p.ShortRequests))
 	}
 }

@@ -35,6 +35,10 @@ type AttemptProgress struct {
 	Resources      ProgressResources `json:"resources"`
 	// Absence of stdout or a low CPU sample is not proof of a stall.
 	StallAssessment string `json:"stall_assessment"`
+	// InstallStall is PROFROD-SOW-330/POMAR-CC-SOW-37's own diagnosis,
+	// computed on read from the same Log/Registry/times above -- never a
+	// verified cause, never retry/config/egress authority.
+	InstallStall InstallStallDiagnostic `json:"install_stall"`
 }
 
 type ProgressResources struct {
@@ -76,9 +80,47 @@ type RegistryProgress struct {
 	Events         map[string]int `json:"event_counts"`
 	CacheHits      int            `json:"cache_hits_observed"`
 	CacheMisses    int            `json:"cache_misses_observed"`
+	FirstEventAt   *time.Time     `json:"first_event_at"`
 	LastEventAt    *time.Time     `json:"last_event_at"`
 	LastTransferAt *time.Time     `json:"last_transfer_at"`
+	// WindowTruncated is this trace read's own partial flag (the window's
+	// leading, possibly-cut-off fragment was dropped): install-stall.go's
+	// own classification treats this as it would any other observed gap in
+	// coverage, never as proof nothing happened before the window started.
+	WindowTruncated bool `json:"window_truncated"`
+	// LongestGap* names the single largest gap between two consecutive
+	// recognized events IN this window (never across requests' own
+	// internal retry logic, just event-to-event in arrival order); empty
+	// when fewer than two recognized events were observed. Both are this
+	// host's own clock (the relay's own time.Now(), the same clock as
+	// Entry.Created/Ended and progressFile's file mtimes) -- never a
+	// guest-reported time.
+	LongestGapSeconds   *int64     `json:"longest_gap_seconds,omitempty"`
+	LongestGapFromEvent string     `json:"longest_gap_from_event,omitempty"`
+	LongestGapFromAt    *time.Time `json:"longest_gap_from_at,omitempty"`
+	LongestGapToEvent   string     `json:"longest_gap_to_event,omitempty"`
+	LongestGapToAt      *time.Time `json:"longest_gap_to_at,omitempty"`
+	// ShortRequests is at most 3 send_short events, oldest first, each
+	// naming the already-redacted route Path npmproxy itself logs (never
+	// a raw URL, header or query -- the same redaction Handler already
+	// enforces before any of this is written) and the byte/want/reason
+	// fields send_short itself carries.
+	ShortRequests []ShortRequestEvidence `json:"short_requests,omitempty"`
 }
+
+// ShortRequestEvidence is one send_short event, bounded to the fields
+// npmproxy's own log line already carries -- nothing recomputed, nothing
+// added that line didn't already have.
+type ShortRequestEvidence struct {
+	Request uint64 `json:"request"`
+	Path    string `json:"path,omitempty"`
+	Bytes   *int64 `json:"bytes,omitempty"`
+	Want    *int64 `json:"want,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// maxShortRequestEvidence bounds ShortRequests: evidence, not a full log replay.
+const maxShortRequestEvidence = 3
 
 // progressFile never follows a record-file symlink or blocks on a FIFO.
 // The file is bounded before JSON or log interpretation; replacement and
@@ -219,6 +261,7 @@ func (m *Manager) progressOf(e Entry, now time.Time) *AttemptProgress {
 			p.Phase, p.Summary = "OUTCOME_UNCONFIRMED", "Helper status was lost; reconcile execution outcome before any retry."
 		}
 	}
+	p.InstallStall = installStallDiagnostic(e.Attempt, p.Registry, p.Log, e.Created, e.Ended, e.Terminal(), now, nil)
 	return p
 }
 
@@ -287,12 +330,15 @@ func workloadPhase(b []byte, partial bool) *WorkloadPhase {
 }
 
 func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
-	p := RegistryProgress{Availability: "AVAILABLE", Coverage: "TAIL_WINDOW", Statuses: map[int]int{}, Events: map[string]int{}}
+	p := RegistryProgress{Availability: "AVAILABLE", Coverage: "TAIL_WINDOW", Statuses: map[int]int{}, Events: map[string]int{}, WindowTruncated: partial}
 	lines := bytes.Split(b, []byte{'\n'})
 	if partial && len(lines) > 0 {
 		lines = lines[1:]
 	}
 	states := map[uint64]string{}
+	var prevEventAt time.Time
+	var prevEventName string
+	var longestGap time.Duration
 	// council P3-3 on #138: a "completed" 2xx is this host's own write
 	// already having reported success on the wire before the copy ran; it
 	// was never proof the guest received every byte (docs/job-failure-
@@ -328,6 +374,10 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 			Time    string `json:"time"`
 			Status  int    `json:"status"`
 			Cache   string `json:"cache"`
+			Path    string `json:"path"`
+			Bytes   *int64 `json:"bytes"`
+			Want    *int64 `json:"want"`
+			Reason  string `json:"reason"`
 		}
 		if json.Unmarshal(line, &ev) != nil || ev.Schema != "pomar.npm-request/v1" || ev.Request == 0 {
 			continue
@@ -356,6 +406,21 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		if ev.Event == "send_short" || incompleteCoverage {
 			shortRequests[ev.Request] = true
 		}
+		if ev.Event == "send_short" && len(p.ShortRequests) < maxShortRequestEvidence {
+			p.ShortRequests = append(p.ShortRequests, ShortRequestEvidence{Request: ev.Request, Path: ev.Path, Bytes: ev.Bytes, Want: ev.Want, Reason: ev.Reason})
+		}
+		if p.FirstEventAt == nil {
+			p.FirstEventAt = &t
+		}
+		if !prevEventAt.IsZero() {
+			if gap := t.Sub(prevEventAt); gap > longestGap {
+				longestGap = gap
+				p.LongestGapFromEvent, p.LongestGapToEvent = prevEventName, ev.Event
+				from, to := prevEventAt, t
+				p.LongestGapFromAt, p.LongestGapToAt = &from, &to
+			}
+		}
+		prevEventAt, prevEventName = t, ev.Event
 		if p.LastEventAt == nil || t.After(*p.LastEventAt) {
 			p.LastEventAt = &t
 		}
@@ -389,6 +454,10 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		if state != "completed" {
 			p.Pending++
 		}
+	}
+	if longestGap > 0 {
+		seconds := int64(longestGap / time.Second)
+		p.LongestGapSeconds = &seconds
 	}
 	return p
 }
