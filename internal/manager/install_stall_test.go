@@ -257,11 +257,14 @@ func TestInstallStallFactsUnknownWhenWindowEndUnknown(t *testing.T) {
 	if d.GuestQuietSeconds != nil || d.GuestQuietUnknownReason == "" {
 		t.Fatalf("GuestQuietSeconds must be unknown, not computed against now: %+v", d)
 	}
+	// council N2: a nil windowEnd must itself bar NO_STALL_IN_WINDOW --
+	// not knowing where the window even ends is not the same as having
+	// observed its full extent and found nothing.
+	if !d.WindowEndUnknown || d.WindowEndUnknownReason == "" {
+		t.Fatalf("WindowEndUnknown must be set, with its reason: %+v", d)
+	}
 	if d.Indication != indicationInsufficientEvidence {
-		// the window-end-unknown case isn't itself one of indicationFor's
-		// named triggers directly, but every fact being unknown here
-		// should still never read as a confident NO_STALL_IN_WINDOW.
-		t.Logf("indication = %s (not independently asserted here, see per-field checks above)", d.Indication)
+		t.Fatalf("indication = %s, want %s: a nil windowEnd must never read as a confident NO_STALL_IN_WINDOW: %+v", d.Indication, indicationInsufficientEvidence, d)
 	}
 }
 
@@ -516,4 +519,101 @@ func TestSourceStatusForTreatsUnrecognizedAvailabilityAsUnknown(t *testing.T) {
 			t.Fatalf("status for %q = %s, want ok", v, status)
 		}
 	}
+}
+
+// council M14-M17: each unknown fact must serialize as an explicit JSON
+// null, not be omitted (indistinguishable from "never measured"). Checks
+// the real marshaled output, not just the Go-level nil pointer.
+func TestInstallStallUnknownFactsSerializeAsExplicitNull(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	// Everything unknown at once: no created time, no registry events, no
+	// guest output, default threshold.
+	d := installStallDiagnostic("att-null", RegistryProgress{Availability: "AVAILABLE", Events: map[string]int{}, Statuses: map[int]int{}},
+		ProgressLog{Availability: "AVAILABLE"}, time.Time{}, nil, "window end unknown for this test", base, nil)
+
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"elapsed_seconds", "longest_registry_gap_seconds", "trailing_registry_silence_seconds", "guest_quiet_seconds"} {
+		v, present := raw[key]
+		if !present {
+			t.Fatalf("%q must be present in the serialized JSON even when unknown (omitted key, not null): %s", key, b)
+		}
+		if string(v) != "null" {
+			t.Fatalf("%q = %s, want literal null", key, v)
+		}
+	}
+}
+
+// council M02-M04: each of INSUFFICIENT_EVIDENCE's own trigger conditions
+// must independently force it, isolated from every other one -- not just
+// a combined fixture that happens to also satisfy several at once.
+func TestInstallStallEachInsufficientEvidenceTriggerIsIndependent(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	okReg := func(extra RegistryProgress) RegistryProgress {
+		extra.Availability = "AVAILABLE"
+		return extra
+	}
+	cleanReg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+		FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
+	cleanLog := ProgressLog{Availability: "AVAILABLE"}
+	we := end(base, 3*time.Second)
+
+	tests := []struct {
+		name string
+		reg  RegistryProgress
+		log  ProgressLog
+	}{
+		{"log window truncated alone", cleanReg, ProgressLog{Availability: "AVAILABLE", WindowTruncated: true}},
+		{"registry window truncated alone", func() RegistryProgress { r := cleanReg; r.WindowTruncated = true; return r }(), cleanLog},
+		{"events before window start alone", func() RegistryProgress { r := cleanReg; r.EventsBeforeWindowStart = 1; return r }(), cleanLog},
+		{"events after window end alone", func() RegistryProgress { r := cleanReg; r.EventsAfterWindowEnd = 1; return r }(), cleanLog},
+		{"events out of order alone", func() RegistryProgress { r := cleanReg; r.EventsOutOfOrder = 1; return r }(), cleanLog},
+		{"events in future alone", func() RegistryProgress { r := cleanReg; r.EventsInFuture = 1; return r }(), cleanLog},
+		{"log status unknown alone", cleanReg, ProgressLog{Availability: "AVAILABLE", ChangedDuringRead: true}},
+		{"registry status unknown alone", func() RegistryProgress { r := cleanReg; r.ChangedDuringRead = true; return r }(), cleanLog},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := installStallDiagnostic("att-trigger", tc.reg, tc.log, base, we, "", *we, nil)
+			if d.Indication != indicationInsufficientEvidence {
+				t.Fatalf("indication = %s, want %s: this trigger alone must force it: %+v", d.Indication, indicationInsufficientEvidence, d)
+			}
+		})
+	}
+}
+
+// council M02-M04 (continued): the near-threshold trigger must fire from
+// EITHER the internal gap OR the trailing silence independently.
+func TestInstallStallNearThresholdTriggersFromEitherGapField(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	okReg := func(extra RegistryProgress) RegistryProgress {
+		extra.Availability = "AVAILABLE"
+		return extra
+	}
+	t.Run("longest registry gap near threshold", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 3*time.Second),
+			LongestGapSeconds: seconds(65), LongestGapFromEvent: "a", LongestGapFromAt: at(base, time.Second),
+			LongestGapToEvent: "b", LongestGapToAt: at(base, 66*time.Second)})
+		we := end(base, 4*time.Second)
+		d := installStallDiagnostic("att-near-1", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if d.Indication != indicationInsufficientEvidence {
+			t.Fatalf("indication = %s: %+v", d.Indication, d)
+		}
+	})
+	t.Run("trailing silence near threshold", func(t *testing.T) {
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
+		we := end(base, 67*time.Second) // trailing silence = 65s, near the 60s default
+		d := installStallDiagnostic("att-near-2", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if d.Indication != indicationInsufficientEvidence {
+			t.Fatalf("indication = %s: %+v", d.Indication, d)
+		}
+	})
 }

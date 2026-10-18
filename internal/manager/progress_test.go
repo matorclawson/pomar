@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -427,9 +428,10 @@ func TestRegistryProgressBindsEventsToTheirWindow(t *testing.T) {
 		`{"schema":"pomar.npm-request/v1","request":2,"event":"completed","time":"2026-10-18T12:00:02Z","status":200}`,
 		// After windowEnd: must be excluded.
 		`{"schema":"pomar.npm-request/v1","request":3,"event":"received","time":"2026-10-18T12:00:20Z"}`,
-		// Out of order (earlier than the previous accepted event, but
-		// itself inside [windowStart, windowEnd]).
-		`{"schema":"pomar.npm-request/v1","request":4,"event":"received","time":"2026-10-18T12:00:01.5Z"}`,
+		// Out of order (materially earlier than the previous accepted
+		// event -- past outOfOrderTolerance, not ordinary concurrency
+		// jitter -- but itself inside [windowStart, windowEnd]).
+		`{"schema":"pomar.npm-request/v1","request":4,"event":"received","time":"2026-10-18T12:00:00.1Z"}`,
 	}, "\n") + "\n"
 	p := registryProgress([]byte(log), false, now, nil, false, windowStart, &windowEnd)
 
@@ -602,5 +604,129 @@ func TestClosedEvidenceSanitizesNULBytes(t *testing.T) {
 	}
 	if e.Reason != "other" {
 		t.Fatalf("a NUL-byte reason must map to the closed \"other\" bucket, got %q", e.Reason)
+	}
+}
+
+// council N1 (round five on #141): ordinary scheduling jitter between
+// concurrent requests (npmproxy stamps time.Now() before acquiring its
+// own log lock) must NOT count as out of order -- only a materially
+// earlier timestamp, past outOfOrderTolerance, does.
+func TestRegistryProgressToleratesOrdinaryConcurrencyJitter(t *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 1, 0, 0, time.UTC)
+	log := strings.Join([]string{
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"2026-10-18T12:00:01.050Z"}`,
+		// 40ms earlier than the line before it: ordinary jitter, well
+		// under outOfOrderTolerance (1s).
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"2026-10-18T12:00:01.010Z"}`,
+	}, "\n") + "\n"
+	p := registryProgress([]byte(log), false, now, nil, false, time.Time{}, nil)
+	if p.EventsOutOfOrder != 0 {
+		t.Fatalf("40ms of ordinary concurrent-write jitter must not count as out of order: %+v", p)
+	}
+}
+
+// council N1: a real concurrent Handler, not a synthetic log, must still
+// produce a usable (non-INSUFFICIENT_EVIDENCE-forced) registry trace --
+// this is council's own measurement that the strict version made a real,
+// concurrent install (the ordinary case) unable to ever produce an
+// evidential indication.
+func TestRegistryProgressHandlesARealConcurrentHandler(t *testing.T) {
+	now := time.Now().Add(time.Hour)
+	cacheDir := t.TempDir()
+	lock := npmproxy.Lock{}
+	for i := 0; i < 16; i++ {
+		path := "/pkg" + strconv.Itoa(i) + "/-/pkg" + strconv.Itoa(i) + "-1.0.0.tgz"
+		sum := strings.Repeat(strconv.Itoa(i%10), 128)
+		if err := os.WriteFile(filepath.Join(cacheDir, sum), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lock[path] = sum
+	}
+	p := &npmproxy.Proxy{Lock: lock, Cache: cacheDir}
+	var logBuf bytes.Buffer
+	var logMu sync.Mutex
+	h := p.Handler(syncWriter{&logBuf, &logMu})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			path := "/pkg" + strconv.Itoa(i) + "/-/pkg" + strconv.Itoa(i) + "-1.0.0.tgz"
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", path, nil))
+		}(i)
+	}
+	wg.Wait()
+
+	reg := registryProgress(logBuf.Bytes(), false, now, nil, false, time.Time{}, nil)
+	if reg.Requests != 16 || reg.Completed != 16 {
+		t.Fatalf("all 16 concurrent requests should be observed and completed: %+v", reg)
+	}
+	if reg.EventsOutOfOrder > 0 {
+		t.Fatalf("16 real concurrent requests should not trip the out-of-order guard (council's own measurement: this made a real install unable to ever produce an evidential indication): %+v", reg)
+	}
+}
+
+// syncWriter serializes concurrent writes for a test's own log buffer
+// (Handler's own internal logMu already serializes its writes to this
+// writer, but the test needs its own lock too since it reads the buffer
+// after Wait, from a different goroutine than any writer).
+type syncWriter struct {
+	buf *bytes.Buffer
+	mu  *sync.Mutex
+}
+
+func (w syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// council N3: a future-stamped event must be counted, not silently
+// dropped and indistinguishable from a line that was never there.
+func TestRegistryProgressCountsFutureStampedEvents(t *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	log := `{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"2026-10-18T13:00:00Z"}` + "\n"
+	p := registryProgress([]byte(log), false, now, nil, false, time.Time{}, nil)
+	if p.EventsInFuture != 1 {
+		t.Fatalf("EventsInFuture = %d, want 1: %+v", p.EventsInFuture, p)
+	}
+	if p.FirstEventAt != nil {
+		t.Fatalf("a future-stamped event must still be excluded from FirstEventAt: %+v", p)
+	}
+}
+
+// council N5/M05b/M06: registryProgress's own ChangedDuringRead output
+// must actually come from the changedDuringRead parameter it was given
+// -- a wiring-level test, not just install_stall's own downstream
+// handling of an already-set field.
+func TestRegistryProgressSetsChangedDuringReadFromItsOwnParameter(t *testing.T) {
+	now := time.Now()
+	p := registryProgress([]byte("{}\n"), false, now, nil, true, time.Time{}, nil)
+	if !p.ChangedDuringRead {
+		t.Fatal("ChangedDuringRead must reflect the changedDuringRead parameter registryProgress was actually given")
+	}
+	p2 := registryProgress([]byte("{}\n"), false, now, nil, false, time.Time{}, nil)
+	if p2.ChangedDuringRead {
+		t.Fatal("ChangedDuringRead must be false when the parameter was false")
+	}
+}
+
+// council M08/M08b: an all-'<' adversarial path -- the exact case the
+// first sanitizer version missed, since '<' is printable ASCII and
+// survived it unchanged, then Go's default json.Marshal HTML-escapes it
+// 6x -- must still come out bounded after sanitization.
+func TestClosedEvidenceSanitizesHTMLEscapedCharacters(t *testing.T) {
+	allLessThan := strings.Repeat("<", 500)
+	e := closedEvidence(ShortRequestEvidence{Request: 1, Path: allLessThan, Reason: "write failed"})
+	if strings.Contains(e.Path, "<") {
+		t.Fatalf("'<' must not survive sanitization (it HTML-escapes to 6 bytes under Go's default json.Marshal): %q", e.Path)
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > maxEvidencePathLen*2+100 {
+		t.Fatalf("a sanitized, bounded entry should marshal to roughly its raw length, not 6x it: got %d bytes", len(b))
 	}
 }

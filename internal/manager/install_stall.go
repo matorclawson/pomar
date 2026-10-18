@@ -64,11 +64,23 @@ type InstallStallDiagnostic struct {
 	RegistryChangedDuringRead bool   `json:"registry_changed_during_read"`
 
 	// Events this function can't bind to the attempt's own timeline
-	// (council P2-2): a non-zero count here is itself a fact, and is why
-	// none of the time-based facts below ever include such an event.
+	// (council P2-2/N1/N3): a non-zero count here is itself a fact, and
+	// is why none of the time-based facts below ever include such an
+	// event. EventsOutOfOrder only counts a materially earlier timestamp
+	// (past outOfOrderTolerance), not the ordinary scheduling jitter of
+	// legitimate concurrent requests.
 	EventsBeforeWindowStart int `json:"events_before_window_start"`
 	EventsAfterWindowEnd    int `json:"events_after_window_end"`
 	EventsOutOfOrder        int `json:"events_out_of_order"`
+	EventsInFuture          int `json:"events_in_future"`
+
+	// WindowEndUnknown (council N2): true exactly when windowEnd was nil
+	// -- a terminal attempt with no recorded Ended time. NO_STALL_IN_WINDOW
+	// must never be read when this is true: not knowing where the
+	// window even ends is not the same as having observed its full
+	// extent and found nothing.
+	WindowEndUnknown       bool   `json:"window_end_unknown"`
+	WindowEndUnknownReason string `json:"window_end_unknown_reason,omitempty"`
 
 	SendShortCount    int                    `json:"send_short_count"`
 	SendShortRequests []ShortRequestEvidence `json:"send_short_requests,omitempty"`
@@ -190,6 +202,12 @@ func installStallDiagnostic(attempt string, reg RegistryProgress, log ProgressLo
 	d.EventsBeforeWindowStart = reg.EventsBeforeWindowStart
 	d.EventsAfterWindowEnd = reg.EventsAfterWindowEnd
 	d.EventsOutOfOrder = reg.EventsOutOfOrder
+	d.EventsInFuture = reg.EventsInFuture
+
+	if windowEnd == nil {
+		d.WindowEndUnknown = true
+		d.WindowEndUnknownReason = windowEndUnknownReason
+	}
 
 	d.SendShortCount = reg.Events["send_short"]
 	d.SendShortRequests = reg.ShortRequests // already bounded/sanitized at the source (registryProgress)
@@ -290,7 +308,7 @@ func enforceReportCap(d InstallStallDiagnostic) InstallStallDiagnostic {
 func indicationFor(d InstallStallDiagnostic) string {
 	anyUnknownSource := d.LogStatus != sourceOK || d.RegistryStatus != sourceOK
 	anyTruncated := d.LogWindowTruncated || d.RegistryWindowTruncated
-	anyUnbound := d.EventsBeforeWindowStart > 0 || d.EventsAfterWindowEnd > 0 || d.EventsOutOfOrder > 0
+	anyUnbound := d.EventsBeforeWindowStart > 0 || d.EventsAfterWindowEnd > 0 || d.EventsOutOfOrder > 0 || d.EventsInFuture > 0 || d.WindowEndUnknown
 	nearThreshold := false
 	if d.ThresholdSource == "default" {
 		for _, gap := range []*int64{d.LongestRegistryGapSeconds, d.TrailingRegistrySilenceSeconds} {

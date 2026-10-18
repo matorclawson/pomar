@@ -46,10 +46,18 @@ why -- an unknown fact is never indistinguishable from one simply omitted.
 created to the first retained registry event): a truncated trace window's
 dropped leading fragment may have held continuous activity, so that
 interval is never reported as an observed silence.
-`events_before_window_start`/`events_after_window_end`/`events_out_of_order`
-count registry events this read can't bind to the attempt's own timeline;
-such events are excluded from every gap and first/last-event fact, and a
-non-zero count of any of them is itself a trigger below.
+`events_before_window_start`/`events_after_window_end`/`events_out_of_order`/
+`events_in_future` count registry events this read can't bind to the
+attempt's own timeline; such events are excluded from every gap and
+first/last-event fact, and a non-zero count of any of them is itself a
+trigger below. `events_out_of_order` only counts an event timestamped
+more than a short tolerance earlier than one already accepted: ordinary
+concurrent requests can legitimately land a few milliseconds out of
+strict timestamp order (the relay stamps its own clock before acquiring
+its log lock), and that alone is never treated as corrupted data.
+`window_end_unknown` is true exactly when a terminal attempt recorded no
+Ended time -- not knowing where the window ends is itself a trigger
+below, distinct from having observed the window's full extent.
 
 `indication` is OPTIONAL: a one-word, evidential-named summary
 (`PROXY_SHORT_DELIVERY_OBSERVED`, `REGISTRY_GAP_OVER_THRESHOLD`,

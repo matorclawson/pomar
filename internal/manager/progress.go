@@ -127,8 +127,23 @@ type RegistryProgress struct {
 	// must never silently widen or narrow an "observed" gap.
 	EventsBeforeWindowStart int `json:"events_before_window_start"`
 	EventsAfterWindowEnd    int `json:"events_after_window_end"`
-	EventsOutOfOrder        int `json:"events_out_of_order"`
+	// EventsOutOfOrder only counts an event whose timestamp is more than
+	// outOfOrderTolerance earlier than one already accepted -- council N1:
+	// npmproxy stamps time.Now() before acquiring its own log lock, so
+	// ordinary concurrent requests (the normal case for a real install,
+	// not an edge case) can legitimately land a few milliseconds out of
+	// strict order; treating that as corrupted data made a real,
+	// concurrent install unable to ever produce an evidential indication.
+	EventsOutOfOrder int `json:"events_out_of_order"`
+	// EventsInFuture counts a recognized event timestamped after `now`
+	// (council N3): previously silently dropped and indistinguishable
+	// from a line that simply wasn't there; now a fact in its own right
+	// (a clock problem, or a read racing a still-landing write).
+	EventsInFuture int `json:"events_in_future"`
 }
+
+// outOfOrderTolerance: see EventsOutOfOrder's own doc above.
+const outOfOrderTolerance = 1 * time.Second
 
 // ShortRequestEvidence is one send_short event. Path and Reason are
 // bounded and sanitized here, at the source, not trusted to upstream
@@ -178,12 +193,27 @@ var evidenceReasons = map[string]bool{
 // multiple of its own length -- pomar's U+0001/'<' counterexample),
 // then bounds the result to maxLen. The returned bool is true if the
 // text was altered in either way.
+// jsonEscapes is every byte that doesn't marshal to exactly one byte of
+// JSON output -- not just control characters and non-ASCII. Council M08/
+// M08b (round five on #141): the first version of this function treated
+// any printable-ASCII byte (0x20-0x7e) as already safe, which includes
+// '<', '>', '&', '"' and '\\'. Go's encoding/json, by default, HTML-escapes
+// '<'/'>'/'&' to six-byte \u00XX sequences, and '"'/'\\' always need a
+// two-byte escape -- an all-'<' adversarial path, bounded only by raw
+// byte count, still marshaled to well over this report's 4 KiB cap.
+// Replacing these five too, alongside the already-excluded control/
+// non-ASCII bytes, makes every surviving byte cost exactly one byte in
+// the real marshaled output, so the raw-length bound below is an actual
+// bound on the escaped size too, regardless of json.Marshal's own
+// HTML-escaping setting.
+var jsonEscapes = map[byte]bool{'<': true, '>': true, '&': true, '"': true, '\\': true}
+
 func sanitizeEvidenceText(s string, maxLen int) (string, bool) {
 	altered := false
 	out := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if c < 0x20 || c == 0x7f || c > 0x7e {
+		if c < 0x20 || c == 0x7f || c > 0x7e || jsonEscapes[c] {
 			out = append(out, '?')
 			altered = true
 			continue
@@ -489,10 +519,18 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 			continue
 		}
 		t, err := time.Parse(time.RFC3339Nano, ev.Time)
-		if err != nil || t.After(now) {
+		if err != nil {
 			continue
 		}
 		t = t.UTC()
+		if t.After(now) {
+			// Council N3: a future-stamped event is itself a fact worth
+			// surfacing (a clock problem, or a read racing a write that
+			// hasn't finished landing), not silently indistinguishable
+			// from a line that simply isn't there.
+			p.EventsInFuture++
+			continue
+		}
 		switch ev.Event {
 		case "received", "cache", "upstream_started", "upstream_connect_started", "upstream_connected", "upstream_first_byte", "send_short", "completed":
 		default:
@@ -517,15 +555,35 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 		}
 		// An event that can't be trusted to belong to this attempt's own
 		// timeline (before it started, after a known end, or arriving
-		// with an earlier timestamp than one already accepted) is still
-		// counted as its own fact, but excluded from every time-based
-		// one below it: FirstEventAt/LastEventAt/the gap tracking/
-		// EventsSinceGuestQuiet would otherwise silently narrow or widen
-		// an "observed" interval using a timestamp this function can't
-		// vouch for.
+		// with a materially earlier timestamp than one already accepted)
+		// is still counted as its own fact, but excluded from every
+		// time-based one below it: FirstEventAt/LastEventAt/the gap
+		// tracking/EventsSinceGuestQuiet would otherwise silently narrow
+		// or widen an "observed" interval using a timestamp this
+		// function can't vouch for.
+		//
+		// Council N1 (round five on #141): npmproxy's own writeEvent
+		// calls time.Now() BEFORE acquiring logMu (internal/npmproxy/
+		// npmproxy.go), so under real concurrency -- many npm requests
+		// in flight at once, the ordinary case for an actual install,
+		// not an edge case -- two goroutines can race between stamping
+		// their own time and acquiring the lock to write it, letting a
+		// line land in the file slightly out of timestamp order relative
+		// to one just before it, with NOTHING wrong with either event.
+		// A strict t.Before(prevEventAt) check (this function's first
+		// version) flagged every such ordinary race as "out of order",
+		// which -- combined with a non-zero count being an
+		// INSUFFICIENT_EVIDENCE trigger -- meant a real, concurrent
+		// install could never produce an evidential indication at all
+		// (council's own measurement: 0/60 trials did, at 16 concurrent
+		// requests). outOfOrderTolerance absorbs exactly that scheduling
+		// jitter without absorbing a genuinely corrupted or reordered
+		// log: only a timestamp materially earlier than what's already
+		// been accepted -- past the tolerance, not merely a few
+		// milliseconds behind it -- counts as out of order.
 		beforeStart := !windowStart.IsZero() && t.Before(windowStart)
 		afterEnd := windowEnd != nil && t.After(*windowEnd)
-		outOfOrder := !prevEventAt.IsZero() && t.Before(prevEventAt)
+		outOfOrder := !prevEventAt.IsZero() && prevEventAt.Sub(t) > outOfOrderTolerance
 		if beforeStart {
 			p.EventsBeforeWindowStart++
 		}
