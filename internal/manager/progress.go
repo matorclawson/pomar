@@ -472,8 +472,24 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 		lines = lines[1:]
 	}
 	states := map[uint64]string{}
-	var prevEventAt time.Time
-	var prevEventName string
+	// maxAcceptedAt/maxAcceptedName track the highest-timestamp accepted
+	// event seen so far (a watermark), never the literal previous line in
+	// arrival order. Council N8 (round six on #141): the first version of
+	// this check compared against the previous event alone, so a run of
+	// small, each-individually-within-tolerance backward steps (e.g. 0.9s
+	// at a time, the normal concurrency jitter outOfOrderTolerance exists
+	// to absorb) could accumulate unbounded net drift without ever
+	// tripping EventsOutOfOrder -- council's own probe: 90s of accumulated
+	// backward drift in 0.9s steps, none flagged, then a correct,
+	// real-time event arriving afterward computed its gap against the
+	// drifted-away previous timestamp instead of the true high point,
+	// producing a false REGISTRY_GAP_OVER_THRESHOLD. Comparing against the
+	// watermark instead means a genuinely drifting run is itself correctly
+	// excluded once it's past tolerance from the highest point actually
+	// seen, not merely from whatever its own last (already-drifted) step
+	// happened to be.
+	var maxAcceptedAt time.Time
+	var maxAcceptedName string
 	var longestGap time.Duration
 	// council P3-3 on #138: a "completed" 2xx is this host's own write
 	// already having reported success on the wire before the copy ran; it
@@ -583,7 +599,7 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 		// milliseconds behind it -- counts as out of order.
 		beforeStart := !windowStart.IsZero() && t.Before(windowStart)
 		afterEnd := windowEnd != nil && t.After(*windowEnd)
-		outOfOrder := !prevEventAt.IsZero() && prevEventAt.Sub(t) > outOfOrderTolerance
+		outOfOrder := !maxAcceptedAt.IsZero() && maxAcceptedAt.Sub(t) > outOfOrderTolerance
 		if beforeStart {
 			p.EventsBeforeWindowStart++
 		}
@@ -600,15 +616,17 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 			if guestQuietSince != nil && !t.Before(*guestQuietSince) {
 				p.EventsSinceGuestQuiet++
 			}
-			if !prevEventAt.IsZero() {
-				if gap := t.Sub(prevEventAt); gap > longestGap {
+			if !maxAcceptedAt.IsZero() {
+				if gap := t.Sub(maxAcceptedAt); gap > longestGap {
 					longestGap = gap
-					p.LongestGapFromEvent, p.LongestGapToEvent = prevEventName, ev.Event
-					from, to := prevEventAt, t
+					p.LongestGapFromEvent, p.LongestGapToEvent = maxAcceptedName, ev.Event
+					from, to := maxAcceptedAt, t
 					p.LongestGapFromAt, p.LongestGapToAt = &from, &to
 				}
 			}
-			prevEventAt, prevEventName = t, ev.Event
+			if maxAcceptedAt.IsZero() || t.After(maxAcceptedAt) {
+				maxAcceptedAt, maxAcceptedName = t, ev.Event
+			}
 			if p.LastEventAt == nil || t.After(*p.LastEventAt) {
 				p.LastEventAt = &t
 			}

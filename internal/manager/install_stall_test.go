@@ -470,6 +470,18 @@ func TestProgressOfWiresInstallStallEndToEnd(t *testing.T) {
 	if obs.InstallStall.RegistryStatus != sourceOK {
 		t.Fatalf("a real, successfully-read registry trace must read ok, not %s: %+v", obs.InstallStall.RegistryStatus, obs.InstallStall)
 	}
+	// Council M05b (round 6 mutation re-run at 0c2f536): nothing here
+	// previously pinned that progressOf's own call site actually passes
+	// THIS attempt's real p.Log and e.Created through, as opposed to some
+	// other/zero value -- a mutant swapping an argument, or passing a
+	// fresh zero-value ProgressLog/time.Time instead of the real ones,
+	// would still have passed every assertion above.
+	if obs.InstallStall.LogStatus != sourceOK {
+		t.Fatalf("the real log written for this attempt must flow through as LogStatus ok, not %s -- the wiring must pass THIS attempt's own p.Log, not a substitute: %+v", obs.InstallStall.LogStatus, obs.InstallStall)
+	}
+	if obs.InstallStall.ElapsedSeconds == nil || *obs.InstallStall.ElapsedSeconds < 25 || *obs.InstallStall.ElapsedSeconds > 35 {
+		t.Fatalf("ElapsedSeconds must be computed from THIS attempt's real e.Created (~30s ago), not some other/zero time: %+v", obs.InstallStall)
+	}
 
 	// Now with no npmproxy.log at all: RegistryStatus must read
 	// unavailable, never silently "ok" -- the exact UNAVAILABLE-as-ok
@@ -499,6 +511,52 @@ func TestProgressOfWiresInstallStallEndToEnd(t *testing.T) {
 	obs3 := m.progressOf(e3, time.Now())
 	if obs3.InstallStall.ElapsedSeconds != nil || obs3.InstallStall.ElapsedUnknownReason == "" {
 		t.Fatalf("a terminal attempt with no Ended must report ElapsedSeconds unknown: %+v", obs3.InstallStall)
+	}
+}
+
+// council M26/M27/M28b (round 6 mutation re-run at 0c2f536): the
+// window-binding path (EventsBeforeWindowStart/EventsAfterWindowEnd and
+// their resulting INSUFFICIENT_EVIDENCE trigger) was only ever exercised
+// through registryProgress directly, with synthetic windowStart/windowEnd
+// arguments -- never through the real progressOf wiring, where
+// windowStart/windowEnd come from a real Entry's own Created/Ended. A
+// mutant in progressOf's own window computation (e.g. passing the wrong
+// time, or no window at all) could still pass every other end-to-end test
+// above, since none of them put any real events outside the real window.
+func TestProgressOfBindsRealRegistryEventsToTheRealWindowEndToEnd(t *testing.T) {
+	m, _, v := openSigning(t, false)
+	id := "install-stall-e2e-window-binding"
+	rec := filepath.Join(v.Root(), attemptsDir, id)
+	if err := os.MkdirAll(rec, 0700); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	ended := created.Add(10 * time.Second)
+	log := strings.Join([]string{
+		// Before the real Created: must be excluded and counted.
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"2026-10-18T11:59:50Z"}`,
+		// Genuinely in-window.
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"2026-10-18T12:00:05Z"}`,
+		// After the real Ended: must be excluded and counted.
+		`{"schema":"pomar.npm-request/v1","request":3,"event":"received","time":"2026-10-18T12:00:20Z"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(rec, "npmproxy.log"), []byte(log), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := Entry{Attempt: id, State: StateExited, Created: created, Ended: ended} // terminal, real window [created, ended]
+	obs := m.progressOf(e, ended.Add(time.Hour))
+
+	if obs.Registry.EventsBeforeWindowStart != 1 {
+		t.Fatalf("Registry.EventsBeforeWindowStart = %d, want 1 (real event before the real Created): %+v", obs.Registry.EventsBeforeWindowStart, obs.Registry)
+	}
+	if obs.Registry.EventsAfterWindowEnd != 1 {
+		t.Fatalf("Registry.EventsAfterWindowEnd = %d, want 1 (real event after the real Ended): %+v", obs.Registry.EventsAfterWindowEnd, obs.Registry)
+	}
+	if obs.InstallStall.EventsBeforeWindowStart != 1 || obs.InstallStall.EventsAfterWindowEnd != 1 {
+		t.Fatalf("InstallStall must carry the real window-binding counts through end to end: %+v", obs.InstallStall)
+	}
+	if obs.InstallStall.Indication != indicationInsufficientEvidence {
+		t.Fatalf("indication = %s, want %s: real unbound events against the real window must force it: %+v", obs.InstallStall.Indication, indicationInsufficientEvidence, obs.InstallStall)
 	}
 }
 
@@ -552,15 +610,26 @@ func TestInstallStallUnknownFactsSerializeAsExplicitNull(t *testing.T) {
 
 // council M02-M04: each of INSUFFICIENT_EVIDENCE's own trigger conditions
 // must independently force it, isolated from every other one -- not just
-// a combined fixture that happens to also satisfy several at once.
+// a combined fixture that happens to also satisfy several at once. Council
+// (round 6 mutation re-run at 0c2f536): these fixtures all had
+// SendShortCount == 0, so a mutant narrowing INSUFFICIENT_EVIDENCE's
+// precedence to apply only when there's no competing evidential fact (the
+// exact P1-1 regression, reintroduced for just one trigger at a time)
+// would still pass every one of these -- only the single, separately
+// combined "insufficient evidence wins over a genuine fact" case in
+// TestInstallStallIndications (which uses WindowTruncated specifically)
+// would ever catch it, and only for that one trigger. Every trigger here
+// now also carries a genuine send_short fact, confirmed still reported
+// even though it doesn't win the Indication.
 func TestInstallStallEachInsufficientEvidenceTriggerIsIndependent(t *testing.T) {
 	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	okReg := func(extra RegistryProgress) RegistryProgress {
 		extra.Availability = "AVAILABLE"
 		return extra
 	}
-	cleanReg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
-		FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
+	cleanReg := okReg(RegistryProgress{Events: map[string]int{"send_short": 1}, Statuses: map[int]int{},
+		ShortRequests: []ShortRequestEvidence{{Request: 1, Bytes: seconds(0), Reason: "write failed"}},
+		FirstEventAt:  at(base, time.Second), LastEventAt: at(base, 2*time.Second)})
 	cleanLog := ProgressLog{Availability: "AVAILABLE"}
 	we := end(base, 3*time.Second)
 
@@ -582,7 +651,10 @@ func TestInstallStallEachInsufficientEvidenceTriggerIsIndependent(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			d := installStallDiagnostic("att-trigger", tc.reg, tc.log, base, we, "", *we, nil)
 			if d.Indication != indicationInsufficientEvidence {
-				t.Fatalf("indication = %s, want %s: this trigger alone must force it: %+v", d.Indication, indicationInsufficientEvidence, d)
+				t.Fatalf("indication = %s, want %s: this trigger alone must force it even alongside a genuine send_short fact: %+v", d.Indication, indicationInsufficientEvidence, d)
+			}
+			if d.SendShortCount != 1 {
+				t.Fatalf("the send_short fact must still be reported even though it didn't win the indication: %+v", d)
 			}
 		})
 	}
@@ -616,6 +688,106 @@ func TestInstallStallNearThresholdTriggersFromEitherGapField(t *testing.T) {
 			t.Fatalf("indication = %s: %+v", d.Indication, d)
 		}
 	})
+}
+
+// council M31/Tge (round 6 mutation re-run at 0c2f536): the exact
+// boundaries of every >/>=/<= comparison in indicationFor must be pinned,
+// not just values comfortably inside or outside them -- a mutant that
+// flips a strict comparison to inclusive (or back) at exactly one of
+// these boundaries would otherwise survive indefinitely.
+func TestInstallStallComparisonBoundariesAreExact(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	okReg := func(extra RegistryProgress) RegistryProgress {
+		extra.Availability = "AVAILABLE"
+		return extra
+	}
+
+	t.Run("near-threshold margin is inclusive at the boundary (default threshold, 20% of 60s = 12s)", func(t *testing.T) {
+		// Exactly at the margin (72s, diff=12 from the 60s default): must
+		// still read as too-close-to-call.
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second),
+			LongestGapSeconds: seconds(72), LongestGapFromEvent: "a", LongestGapFromAt: at(base, time.Second),
+			LongestGapToEvent: "b", LongestGapToAt: at(base, 73*time.Second)})
+		we := end(base, 3*time.Second)
+		d := installStallDiagnostic("att-bound-1", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if d.Indication != indicationInsufficientEvidence {
+			t.Fatalf("a gap exactly at the margin boundary (diff == margin) must still be too-close-to-call: %+v", d)
+		}
+		// One second past the margin (73s, diff=13): must clearly read over.
+		reg2 := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second),
+			LongestGapSeconds: seconds(73), LongestGapFromEvent: "a", LongestGapFromAt: at(base, time.Second),
+			LongestGapToEvent: "b", LongestGapToAt: at(base, 74*time.Second)})
+		d2 := installStallDiagnostic("att-bound-2", reg2, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
+		if d2.Indication != indicationRegistryGapOver {
+			t.Fatalf("a gap one second past the margin must read as a confident over-threshold gap, not near: %+v", d2)
+		}
+	})
+
+	t.Run("registry gap over threshold is a strict boundary (recorded threshold, bypassing near-threshold)", func(t *testing.T) {
+		recorded := int64(60)
+		reg := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second),
+			LongestGapSeconds: seconds(60), LongestGapFromEvent: "a", LongestGapFromAt: at(base, time.Second),
+			LongestGapToEvent: "b", LongestGapToAt: at(base, 61*time.Second)})
+		we := end(base, 3*time.Second)
+		dAt := installStallDiagnostic("att-bound-3", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, &recorded)
+		if dAt.Indication != indicationNoStall {
+			t.Fatalf("a gap exactly equal to the threshold must not read as over it (strict >): %+v", dAt)
+		}
+		reg2 := reg
+		reg2.LongestGapSeconds = seconds(61)
+		dOver := installStallDiagnostic("att-bound-4", reg2, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, &recorded)
+		if dOver.Indication != indicationRegistryGapOver {
+			t.Fatalf("a gap one second over the threshold must read as over it: %+v", dOver)
+		}
+	})
+
+	t.Run("guest quiet active is an inclusive boundary (recorded threshold)", func(t *testing.T) {
+		recorded := int64(60)
+		we := end(base, 60*time.Second)
+		regActive := okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 59*time.Second), EventsSinceGuestQuiet: 1})
+		logAt := ProgressLog{Availability: "AVAILABLE", LastOutputAt: at(base, 0)} // quiet for exactly 60s
+		dAt := installStallDiagnostic("att-bound-5", regActive, logAt, base, we, "", *we, &recorded)
+		if dAt.Indication != indicationGuestQuietActive {
+			t.Fatalf("guest-quiet exactly equal to the threshold (inclusive >=) must still read active: %+v", dAt)
+		}
+		logUnder := ProgressLog{Availability: "AVAILABLE", LastOutputAt: at(base, time.Second)} // quiet for 59s
+		dUnder := installStallDiagnostic("att-bound-6", regActive, logUnder, base, we, "", *we, &recorded)
+		if dUnder.Indication == indicationGuestQuietActive {
+			t.Fatalf("guest-quiet one second under the threshold must not read active: %+v", dUnder)
+		}
+	})
+}
+
+// council M31/Tge: the out-of-order tolerance boundary is also strict --
+// exactly outOfOrderTolerance behind the watermark is still ordinary
+// jitter, one tick further is not.
+func TestRegistryProgressOutOfOrderToleranceBoundaryIsStrict(t *testing.T) {
+	now := time.Date(2026, 10, 18, 13, 0, 0, 0, time.UTC)
+	anchor := time.Date(2026, 10, 18, 12, 0, 1, 0, time.UTC)
+
+	atTolerance := strings.Join([]string{
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"` + anchor.Format(time.RFC3339Nano) + `"}`,
+		// Exactly outOfOrderTolerance (1s) earlier than the watermark.
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"` + anchor.Add(-outOfOrderTolerance).Format(time.RFC3339Nano) + `"}`,
+	}, "\n") + "\n"
+	p := registryProgress([]byte(atTolerance), false, now, nil, false, time.Time{}, nil)
+	if p.EventsOutOfOrder != 0 {
+		t.Fatalf("exactly at the tolerance boundary must still be accepted (strict >, not >=): %+v", p)
+	}
+
+	pastTolerance := strings.Join([]string{
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"` + anchor.Format(time.RFC3339Nano) + `"}`,
+		// One nanosecond past the tolerance.
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"` + anchor.Add(-outOfOrderTolerance-time.Nanosecond).Format(time.RFC3339Nano) + `"}`,
+	}, "\n") + "\n"
+	p2 := registryProgress([]byte(pastTolerance), false, now, nil, false, time.Time{}, nil)
+	if p2.EventsOutOfOrder != 1 {
+		t.Fatalf("one tick past the tolerance boundary must be flagged out of order: %+v", p2)
+	}
 }
 
 // pomar's review of 909bf31: the AttemptIntervalUnknown trigger (added

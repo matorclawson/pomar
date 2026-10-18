@@ -2,14 +2,18 @@ package npmproxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"syscall"
 	"testing"
 )
 
@@ -291,5 +295,35 @@ func TestSendFileNeverReportsSendShortOnHEAD(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Fatalf("HEAD should write no events at all from sendFile: %+v", events)
+	}
+}
+
+// council M18a-d (round 6 mutation re-run at 0c2f536): send_short_test.go
+// only ever exercised shortReason's default "write failed" bucket (a plain
+// errors.New, never one of the five explicitly classified cases) -- a
+// mutant swapping, dropping or misordering any of EPIPE/ECONNRESET/
+// ErrClosed/Canceled/DeadlineExceeded would still pass every existing
+// test. Each is asserted directly here, wrapped (via fmt.Errorf's %w) as a
+// real io.Copy failure would actually arrive, to also confirm
+// errors.Is-based matching is used rather than a bare ==.
+func TestShortReasonClassifiesEachKnownErrorExactly(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"EPIPE", fmt.Errorf("write: %w", syscall.EPIPE), "broken pipe"},
+		{"ECONNRESET", fmt.Errorf("write: %w", syscall.ECONNRESET), "connection reset"},
+		{"net.ErrClosed", fmt.Errorf("write: %w", net.ErrClosed), "connection closed"},
+		{"context.Canceled", fmt.Errorf("copy: %w", context.Canceled), "request canceled"},
+		{"context.DeadlineExceeded", fmt.Errorf("copy: %w", context.DeadlineExceeded), "deadline exceeded"},
+		{"an unclassified error", errors.New("some other I/O failure"), "write failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shortReason(tc.err); got != tc.want {
+				t.Fatalf("shortReason(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
 	}
 }

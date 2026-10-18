@@ -667,6 +667,53 @@ func TestRegistryProgressHandlesARealConcurrentHandler(t *testing.T) {
 	}
 }
 
+// council N8 (round six on #141): a run of small backward steps, each
+// individually within outOfOrderTolerance of the one right before it, must
+// not be able to accumulate unbounded net drift that an out-of-order check
+// based on "the previous event" alone would never catch -- council's own
+// probe, reproduced here exactly: 90s of accumulated drift in 0.9s steps,
+// comparing each step only to its immediate predecessor, never trips
+// EventsOutOfOrder, and a correct, real-time event arriving afterward then
+// computes its gap against the drifted-away previous timestamp instead of
+// the true high point, producing a false large gap. Comparing against the
+// watermark (the highest-timestamp accepted event so far) instead means
+// the drifting run is itself excluded once it's past tolerance from the
+// true high point, and the later real event's gap is computed from that
+// true high point, not from wherever the drift happened to end up.
+func TestRegistryProgressOutOfOrderComparesAgainstTheWatermarkNotJustThePreviousEvent(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	now := base.Add(time.Hour)
+	var lines []string
+	// 100 "received" events, request IDs 1..100, each 0.9s earlier than
+	// the one before it: step 0 at base, step 99 at base-89.1s.
+	for i := 0; i < 100; i++ {
+		ts := base.Add(-time.Duration(i) * 900 * time.Millisecond)
+		lines = append(lines, `{"schema":"pomar.npm-request/v1","request":`+strconv.Itoa(i+1)+`,"event":"received","time":"`+ts.Format(time.RFC3339Nano)+`"}`)
+	}
+	// A genuine, real-time event only 5s after the anchor (base) -- the
+	// true elapsed time between the anchor and this event is small.
+	forward := base.Add(5 * time.Second)
+	lines = append(lines, `{"schema":"pomar.npm-request/v1","request":200,"event":"received","time":"`+forward.Format(time.RFC3339Nano)+`"}`)
+	log := strings.Join(lines, "\n") + "\n"
+
+	p := registryProgress([]byte(log), false, now, nil, false, time.Time{}, nil)
+
+	// Everything past the first couple of drifting steps must read as out
+	// of order relative to the true watermark (base): only step 0 (base)
+	// and step 1 (base-0.9s, still within the 1s tolerance of base) are
+	// ever legitimately accepted; steps 2..99 are each more than 1s behind
+	// the watermark and must be excluded.
+	if p.EventsOutOfOrder < 90 {
+		t.Fatalf("EventsOutOfOrder = %d, want at least 90: accumulated sub-tolerance drift must still be caught against the watermark, not hidden by comparing only to the immediately preceding (already-drifted) event: %+v", p.EventsOutOfOrder, p)
+	}
+	// The real gap between the watermark (base) and the later genuine
+	// event (base+5s) is 5 seconds -- never the ~94s a drifted-away
+	// "previous event" baseline would have produced.
+	if p.LongestGapSeconds == nil || *p.LongestGapSeconds > 10 {
+		t.Fatalf("LongestGapSeconds = %v, want <= 10: comparing against the watermark instead of the drifted previous event must not fabricate a large false gap: %+v", p.LongestGapSeconds, p)
+	}
+}
+
 // syncWriter serializes concurrent writes for a test's own log buffer
 // (Handler's own internal logMu already serializes its writes to this
 // writer, but the test needs its own lock too since it reads the buffer
@@ -728,5 +775,30 @@ func TestClosedEvidenceSanitizesHTMLEscapedCharacters(t *testing.T) {
 	}
 	if len(b) > maxEvidencePathLen*2+100 {
 		t.Fatalf("a sanitized, bounded entry should marshal to roughly its raw length, not 6x it: got %d bytes", len(b))
+	}
+}
+
+// council (round 6 mutation re-run at 0c2f536): M08/M08b's fix added '<',
+// '>', '&', '"' and '\\' to jsonEscapes together, but the only test that
+// ever ran was all-'<' -- a mutant dropping '>', '&', '"' or '\\' alone
+// from the map would still pass every existing test. Each of the other
+// four is pinned here individually, the same way.
+func TestClosedEvidenceSanitizesEachJSONEscapedCharacterIndividually(t *testing.T) {
+	for _, c := range []byte{'>', '&', '"', '\\'} {
+		adversarial := strings.Repeat(string(c), 500)
+		e := closedEvidence(ShortRequestEvidence{Request: 1, Path: adversarial, Reason: "write failed"})
+		if strings.ContainsRune(e.Path, rune(c)) {
+			t.Fatalf("%q must not survive sanitization (it needs a multi-byte JSON escape under Go's default json.Marshal): %q", string(c), e.Path)
+		}
+		if !e.Truncated {
+			t.Fatalf("an all-%q path must be flagged altered: %+v", string(c), e)
+		}
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) > maxEvidencePathLen*2+100 {
+			t.Fatalf("%q: a sanitized, bounded entry should marshal to roughly its raw length, not several times it: got %d bytes", string(c), len(b))
+		}
 	}
 }

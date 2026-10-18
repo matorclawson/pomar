@@ -61,7 +61,12 @@ invalid: a terminal attempt recorded no Ended time, the attempt recorded
 no Created time, or the two are inconsistent (window end precedes
 Created) -- not knowing, or not trusting, where the window begins and
 ends is itself a trigger below, distinct from having observed the
-window's full extent.
+window's full extent. This field is a schema change from an earlier,
+narrower `window_end_unknown`/`window_end_unknown_reason` pair (council's
+review of pomar#141, round six): the JSON keys themselves were renamed to
+`attempt_interval_unknown`/`attempt_interval_unknown_reason`, not just
+broadened in meaning -- a consumer matching the old key names will see
+neither key present.
 
 `indication` is OPTIONAL: a one-word, evidential-named summary
 (`PROXY_SHORT_DELIVERY_OBSERVED`, `REGISTRY_GAP_OVER_THRESHOLD`,
