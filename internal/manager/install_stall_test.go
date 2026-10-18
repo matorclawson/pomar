@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -208,4 +209,66 @@ func TestInstallStallCoversEdgeGaps(t *testing.T) {
 			t.Fatalf("terminal attempt should measure the end edge against Ended, not now: %+v", d)
 		}
 	})
+}
+
+// pomar's review: ProgressLog.QuietSeconds is now.Sub(file mtime) -- right
+// for a running attempt, but for a terminal one it grows with wall-clock
+// time long after the install actually ended. Reading a terminal
+// attempt's progress days later must not manufacture a fresh
+// GUEST_QUIET_NO_REGISTRY_ACTIVITY from nothing but the passage of time.
+func TestInstallStallTerminalGuestQuietIsFrozenAtEnded(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	ended := base.Add(50 * time.Second)
+	lastOutput := base.Add(5 * time.Second) // Ended - LastOutputAt = 45s, under the 60s default threshold
+	// log.QuietSeconds as progressOf would actually compute it for a read
+	// taken long after Ended: now (far later) minus LastOutputAt -- this
+	// stale value, on its own, would be far over any threshold.
+	readMuchLater := base.Add(10000 * time.Second)
+	staleQuiet := int64(readMuchLater.Sub(lastOutput) / time.Second)
+	log := ProgressLog{LastOutputAt: &lastOutput, QuietSeconds: &staleQuiet}
+	reg := RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+		FirstEventAt: at(base, time.Second), LastEventAt: at(base, 48*time.Second)}
+
+	d := installStallDiagnostic("att-6", reg, log, base, ended, true, readMuchLater, nil)
+	if d.GuestQuietSeconds == nil || *d.GuestQuietSeconds != 45 {
+		t.Fatalf("a terminal attempt's guest-quiet duration must be frozen at Ended (45s: Ended-LastOutputAt), not the stale %ds a read taken long afterward would otherwise compute: %+v", staleQuiet, d)
+	}
+	if d.GuestQuietNoRegistryActivity {
+		t.Fatalf("a correctly-frozen 45s quiet period, under the 60s threshold, must not false-positive just because a much later read's stale wall-clock quiet would have exceeded it: %+v", d)
+	}
+}
+
+// council amendment 6 / pomar's review point 6: the report must actually
+// fit its own documented 4 KiB cap under worst-case population, not just
+// be assumed small because its fields look fixed-shape.
+func TestInstallStallFitsItsDocumentedCap(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	var evidence []ShortRequestEvidence
+	for i := uint64(1); i <= maxShortRequestEvidence; i++ {
+		evidence = append(evidence, ShortRequestEvidence{
+			Request: i,
+			// A worst-case-length, but still npmproxy-redaction-shaped, path.
+			Path:   "/@a-very-long-scope-name-for-worst-case/a-very-long-package-name-for-worst-case/-/a-very-long-package-name-for-worst-case-99.99.99-worst-case-build-metadata.tgz",
+			Bytes:  seconds(9999999999),
+			Want:   seconds(9999999999),
+			Reason: "connection reset",
+		})
+	}
+	reg := RegistryProgress{Events: map[string]int{"send_short": maxShortRequestEvidence}, Statuses: map[int]int{},
+		ShortRequests:     evidence,
+		FirstEventAt:      at(base, time.Second),
+		LastEventAt:       at(base, 2*time.Second),
+		LongestGapSeconds: seconds(9999999999), LongestGapFromEvent: "upstream_connect_started", LongestGapFromAt: at(base, time.Second),
+		LongestGapToEvent: "upstream_connected", LongestGapToAt: at(base, 2*time.Second)}
+	log := ProgressLog{LastOutputAt: at(base, time.Second), QuietSeconds: seconds(9999999999)}
+	d := installStallDiagnostic("a-worst-case-attempt-id-of-realistic-maximum-length-0123456789", reg, log, base, base.Add(3*time.Second), true, base.Add(4*time.Second), seconds(30))
+
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const capBytes = 4 << 10
+	if len(b) > capBytes {
+		t.Fatalf("worst-case InstallStallDiagnostic is %d bytes, over the documented %d-byte cap: %s", len(b), capBytes, b)
+	}
 }

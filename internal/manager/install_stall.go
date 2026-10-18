@@ -153,9 +153,22 @@ func installStallDiagnostic(attempt string, reg RegistryProgress, log ProgressLo
 		d.RegistryGapExceedsThreshold = true
 	}
 
-	if log.QuietSeconds != nil {
-		d.GuestQuietSeconds = log.QuietSeconds
-		if *log.QuietSeconds >= d.ThresholdSeconds && log.LastOutputAt != nil && reg.LastEventAt != nil && reg.LastEventAt.After(*log.LastOutputAt) {
+	// pomar's review: ProgressLog.QuietSeconds is now.Sub(file mtime) --
+	// correct for a RUNNING attempt (how long it's been silent as of this
+	// read), but for a TERMINAL one it keeps growing with wall-clock time
+	// long after the install itself ended, which would silently misreport
+	// "the guest went quiet" for an attempt read days later, however
+	// clean its actual install was. A terminal attempt's own quiet
+	// duration is frozen at Ended, not at whenever someone happens to
+	// read this.
+	quietSeconds := log.QuietSeconds
+	if terminal && !ended.IsZero() && log.LastOutputAt != nil && !ended.Before(*log.LastOutputAt) {
+		frozen := int64(ended.Sub(*log.LastOutputAt) / time.Second)
+		quietSeconds = &frozen
+	}
+	if quietSeconds != nil {
+		d.GuestQuietSeconds = quietSeconds
+		if *quietSeconds >= d.ThresholdSeconds && log.LastOutputAt != nil && reg.LastEventAt != nil && reg.LastEventAt.After(*log.LastOutputAt) {
 			d.GuestQuietNoRegistryActivity = true
 		}
 	}
