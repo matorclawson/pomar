@@ -251,17 +251,26 @@ func installStallDiagnostic(attempt string, reg RegistryProgress, log ProgressLo
 	return enforceReportCap(d)
 }
 
+// sourceStatusFor classifies by a CLOSED list of known-available values
+// (pomar's review of 073f8dd): the first version treated any string
+// other than the two known-bad ones as ok, so a genuinely unrecognized
+// or corrupted Availability value (neither a known-good nor a
+// known-unavailable one) would silently read as a clean "ok" source
+// instead of the unknown it actually is.
 func sourceStatusFor(availability string, changedDuringRead bool) (status, reason string) {
 	switch availability {
 	case "NOT_CREATED":
 		return sourceUnavailable, "not created yet"
 	case "UNAVAILABLE":
 		return sourceUnavailable, "could not be read"
+	case "AVAILABLE", "NO_OUTPUT_YET":
+		if changedDuringRead {
+			return sourceUnknown, "the file changed during this read; the tail read may not be internally consistent"
+		}
+		return sourceOK, ""
+	default:
+		return sourceUnknown, "unrecognized availability value: " + availability
 	}
-	if changedDuringRead {
-		return sourceUnknown, "the file changed during this read; the tail read may not be internally consistent"
-	}
-	return sourceOK, ""
 }
 
 // enforceReportCap is the last-resort guard on this report's own

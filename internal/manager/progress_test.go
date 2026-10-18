@@ -578,3 +578,29 @@ func TestRegistryProgressBoundsAndSanitizesRealAdversarialLines(t *testing.T) {
 		}
 	}
 }
+
+// pomar's review: their exact adversarial construction used NUL bytes
+// (0x00), not just 0x01 -- confirm those are sanitized too.
+func TestClosedEvidenceSanitizesNULBytes(t *testing.T) {
+	path := make([]byte, 200)
+	reason := make([]byte, 64)
+	for i := range path {
+		if i%5 == 0 {
+			path[i] = 0x00
+		} else {
+			path[i] = 'a'
+		}
+	}
+	for i := range reason {
+		reason[i] = 0x00
+	}
+	e := closedEvidence(ShortRequestEvidence{Request: 1, Path: string(path), Reason: string(reason)})
+	for i := 0; i < len(e.Path); i++ {
+		if e.Path[i] == 0x00 {
+			t.Fatalf("a NUL byte survived sanitization in Path: %q", e.Path)
+		}
+	}
+	if e.Reason != "other" {
+		t.Fatalf("a NUL-byte reason must map to the closed \"other\" bucket, got %q", e.Reason)
+	}
+}

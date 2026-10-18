@@ -498,3 +498,22 @@ func TestProgressOfWiresInstallStallEndToEnd(t *testing.T) {
 		t.Fatalf("a terminal attempt with no Ended must report ElapsedSeconds unknown: %+v", obs3.InstallStall)
 	}
 }
+
+// pomar's review of 073f8dd: sourceStatusFor must closed-list known-good
+// availability values, not treat anything-not-explicitly-bad as ok -- a
+// genuinely unrecognized/corrupted value must read unknown.
+func TestSourceStatusForTreatsUnrecognizedAvailabilityAsUnknown(t *testing.T) {
+	status, reason := sourceStatusFor("SOME_FUTURE_VALUE_THIS_CODE_DOESNT_KNOW", false)
+	if status != sourceUnknown {
+		t.Fatalf("status = %s, want unknown for an unrecognized availability value", status)
+	}
+	if reason == "" {
+		t.Fatal("must still say why")
+	}
+	// The two actual known-good values still read ok.
+	for _, v := range []string{"AVAILABLE", "NO_OUTPUT_YET"} {
+		if status, _ := sourceStatusFor(v, false); status != sourceOK {
+			t.Fatalf("status for %q = %s, want ok", v, status)
+		}
+	}
+}
