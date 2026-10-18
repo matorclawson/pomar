@@ -293,6 +293,30 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		lines = lines[1:]
 	}
 	states := map[uint64]string{}
+	// council P3-3 on #138: a "completed" 2xx is this host's own write
+	// already having reported success on the wire before the copy ran; it
+	// was never proof the guest received every byte (docs/job-failure-
+	// diagnostics.md). shortRequests tracks which request IDs also logged
+	// a send_short, so such a request's "completed" line never counts as
+	// evidence of a clean transfer here, even though its status is still
+	// 2xx. send_short always precedes its request's completed line within
+	// the SAME window (the relay writes it from inside serve(), before
+	// Handler's own "completed" write).
+	//
+	// Two refinements (pomar's and council's own review of #139, round
+	// three): a reused request ID (the REQUEST_ID_REUSE_OBSERVED case
+	// below) must not let a stale entry from the id's PREVIOUS use poison
+	// its new one, so a fresh "received" clears it. And this is a bounded
+	// TAIL window, not the whole log (progressFile's own partial flag,
+	// and this function's own `lines = lines[1:]` above, which drops a
+	// possibly-truncated first fragment): a request whose own send_short
+	// fell in a dropped-or-never-retained part of the window, while its
+	// later completed line is still inside it, would otherwise look
+	// identical to one that never had a send_short at all. Any request
+	// first observed here via something other than "received" is one this
+	// window may have incomplete lifecycle for; treat it as possibly
+	// short rather than credit a transfer from an orphaned completion.
+	shortRequests := map[uint64]bool{}
 	for _, line := range lines {
 		if len(line) > 4096 {
 			continue
@@ -314,10 +338,12 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		}
 		t = t.UTC()
 		switch ev.Event {
-		case "received", "cache", "upstream_started", "upstream_connect_started", "upstream_connected", "upstream_first_byte", "completed":
+		case "received", "cache", "upstream_started", "upstream_connect_started", "upstream_connected", "upstream_first_byte", "send_short", "completed":
 		default:
 			continue
 		}
+		_, hadPriorContext := states[ev.Request]
+		incompleteCoverage := ev.Event != "received" && !hadPriorContext
 		p.Events[ev.Event]++
 		if ev.Event == "cache" {
 			if ev.Cache == "hit" {
@@ -327,10 +353,13 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 				p.CacheMisses++
 			}
 		}
+		if ev.Event == "send_short" || incompleteCoverage {
+			shortRequests[ev.Request] = true
+		}
 		if p.LastEventAt == nil || t.After(*p.LastEventAt) {
 			p.LastEventAt = &t
 		}
-		if ev.Event == "upstream_first_byte" || (ev.Event == "completed" && ev.Status >= 200 && ev.Status < 300) {
+		if ev.Event == "upstream_first_byte" || (ev.Event == "completed" && ev.Status >= 200 && ev.Status < 300 && !shortRequests[ev.Request]) {
 			if p.LastTransferAt == nil || t.After(*p.LastTransferAt) {
 				p.LastTransferAt = &t
 			}
@@ -339,6 +368,7 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 			if _, seen := states[ev.Request]; seen {
 				p.Coverage = "REQUEST_ID_REUSE_OBSERVED"
 			}
+			delete(shortRequests, ev.Request) // a fresh use of a reused ID starts with a clean slate
 			states[ev.Request] = ev.Event
 			continue
 		}
