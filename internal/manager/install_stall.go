@@ -74,13 +74,16 @@ type InstallStallDiagnostic struct {
 	EventsOutOfOrder        int `json:"events_out_of_order"`
 	EventsInFuture          int `json:"events_in_future"`
 
-	// WindowEndUnknown (council N2): true exactly when windowEnd was nil
-	// -- a terminal attempt with no recorded Ended time. NO_STALL_IN_WINDOW
-	// must never be read when this is true: not knowing where the
-	// window even ends is not the same as having observed its full
-	// extent and found nothing.
-	WindowEndUnknown       bool   `json:"window_end_unknown"`
-	WindowEndUnknownReason string `json:"window_end_unknown_reason,omitempty"`
+	// AttemptIntervalUnknown (council N2, broadened per pomar's review of
+	// 909bf31): true whenever this attempt's own [created, windowEnd]
+	// interval isn't actually known -- windowEnd is nil (a terminal
+	// attempt with no recorded Ended time), Created itself is missing, or
+	// windowEnd precedes Created (an inconsistent pair, e.g. clock skew).
+	// NO_STALL_IN_WINDOW must never be read when this is true: not
+	// knowing the attempt's own interval is not the same as having
+	// observed its full extent and found nothing.
+	AttemptIntervalUnknown       bool   `json:"attempt_interval_unknown"`
+	AttemptIntervalUnknownReason string `json:"attempt_interval_unknown_reason,omitempty"`
 
 	SendShortCount    int                    `json:"send_short_count"`
 	SendShortRequests []ShortRequestEvidence `json:"send_short_requests,omitempty"`
@@ -171,16 +174,33 @@ func installStallDiagnostic(attempt string, reg RegistryProgress, log ProgressLo
 		ObservedAt:  now.UTC(),
 		ClockSource: "host",
 	}
+
+	// The attempt's own interval [created, windowEnd] is computed ONCE,
+	// here, as the single source of truth for every fact and trigger
+	// that depends on it -- pomar's review of 909bf31 found that the
+	// first version of this fix (WindowEndUnknown) only covered
+	// windowEnd==nil, while this same switch ALSO reports Elapsed/
+	// Trailing/GuestQuiet as unknown for a windowEnd that exists but
+	// precedes Created (or a missing Created) -- a second, distinct way
+	// the interval can be invalid that the overall Indication trigger
+	// never saw, so it could still read NO_STALL_IN_WINDOW from an
+	// attempt whose own interval isn't actually known.
+	var intervalUnknownReason string
 	switch {
 	case windowEnd == nil:
-		d.ElapsedUnknownReason = windowEndUnknownReason
+		intervalUnknownReason = windowEndUnknownReason
 	case created.IsZero():
-		d.ElapsedUnknownReason = "attempt has no recorded Created time"
+		intervalUnknownReason = "attempt has no recorded Created time"
 	case windowEnd.Before(created):
-		d.ElapsedUnknownReason = "window end precedes Created"
+		intervalUnknownReason = "window end precedes Created"
 	default:
 		seconds := int64(windowEnd.Sub(created) / time.Second)
 		d.ElapsedSeconds = &seconds
+	}
+	if intervalUnknownReason != "" {
+		d.ElapsedUnknownReason = intervalUnknownReason
+		d.AttemptIntervalUnknown = true
+		d.AttemptIntervalUnknownReason = intervalUnknownReason
 	}
 
 	d.ThresholdSeconds, d.ThresholdSource = int64(defaultFetchTimeoutSeconds), "default"
@@ -203,11 +223,6 @@ func installStallDiagnostic(attempt string, reg RegistryProgress, log ProgressLo
 	d.EventsAfterWindowEnd = reg.EventsAfterWindowEnd
 	d.EventsOutOfOrder = reg.EventsOutOfOrder
 	d.EventsInFuture = reg.EventsInFuture
-
-	if windowEnd == nil {
-		d.WindowEndUnknown = true
-		d.WindowEndUnknownReason = windowEndUnknownReason
-	}
 
 	d.SendShortCount = reg.Events["send_short"]
 	d.SendShortRequests = reg.ShortRequests // already bounded/sanitized at the source (registryProgress)
@@ -308,7 +323,7 @@ func enforceReportCap(d InstallStallDiagnostic) InstallStallDiagnostic {
 func indicationFor(d InstallStallDiagnostic) string {
 	anyUnknownSource := d.LogStatus != sourceOK || d.RegistryStatus != sourceOK
 	anyTruncated := d.LogWindowTruncated || d.RegistryWindowTruncated
-	anyUnbound := d.EventsBeforeWindowStart > 0 || d.EventsAfterWindowEnd > 0 || d.EventsOutOfOrder > 0 || d.EventsInFuture > 0 || d.WindowEndUnknown
+	anyUnbound := d.EventsBeforeWindowStart > 0 || d.EventsAfterWindowEnd > 0 || d.EventsOutOfOrder > 0 || d.EventsInFuture > 0 || d.AttemptIntervalUnknown
 	nearThreshold := false
 	if d.ThresholdSource == "default" {
 		for _, gap := range []*int64{d.LongestRegistryGapSeconds, d.TrailingRegistrySilenceSeconds} {

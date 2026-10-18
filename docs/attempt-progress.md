@@ -55,9 +55,13 @@ more than a short tolerance earlier than one already accepted: ordinary
 concurrent requests can legitimately land a few milliseconds out of
 strict timestamp order (the relay stamps its own clock before acquiring
 its log lock), and that alone is never treated as corrupted data.
-`window_end_unknown` is true exactly when a terminal attempt recorded no
-Ended time -- not knowing where the window ends is itself a trigger
-below, distinct from having observed the window's full extent.
+`attempt_interval_unknown` is true whenever the attempt's own
+`[created, window end]` interval isn't actually known or is internally
+invalid: a terminal attempt recorded no Ended time, the attempt recorded
+no Created time, or the two are inconsistent (window end precedes
+Created) -- not knowing, or not trusting, where the window begins and
+ends is itself a trigger below, distinct from having observed the
+window's full extent.
 
 `indication` is OPTIONAL: a one-word, evidential-named summary
 (`PROXY_SHORT_DELIVERY_OBSERVED`, `REGISTRY_GAP_OVER_THRESHOLD`,

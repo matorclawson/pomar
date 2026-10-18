@@ -260,8 +260,8 @@ func TestInstallStallFactsUnknownWhenWindowEndUnknown(t *testing.T) {
 	// council N2: a nil windowEnd must itself bar NO_STALL_IN_WINDOW --
 	// not knowing where the window even ends is not the same as having
 	// observed its full extent and found nothing.
-	if !d.WindowEndUnknown || d.WindowEndUnknownReason == "" {
-		t.Fatalf("WindowEndUnknown must be set, with its reason: %+v", d)
+	if !d.AttemptIntervalUnknown || d.AttemptIntervalUnknownReason == "" {
+		t.Fatalf("AttemptIntervalUnknown must be set, with its reason: %+v", d)
 	}
 	if d.Indication != indicationInsufficientEvidence {
 		t.Fatalf("indication = %s, want %s: a nil windowEnd must never read as a confident NO_STALL_IN_WINDOW: %+v", d.Indication, indicationInsufficientEvidence, d)
@@ -614,6 +614,42 @@ func TestInstallStallNearThresholdTriggersFromEitherGapField(t *testing.T) {
 		d := installStallDiagnostic("att-near-2", reg, ProgressLog{Availability: "AVAILABLE"}, base, we, "", *we, nil)
 		if d.Indication != indicationInsufficientEvidence {
 			t.Fatalf("indication = %s: %+v", d.Indication, d)
+		}
+	})
+}
+
+// pomar's review of 909bf31: the AttemptIntervalUnknown trigger (added
+// above for windowEnd==nil) must ALSO cover a non-nil but INVALID
+// interval -- windowEnd preceding Created, or Created itself missing --
+// not just the one case the first version of this fix happened to name.
+// Otherwise sources all read ok, nothing is unbound, yet the attempt's
+// own interval still isn't actually known, and NO_STALL_IN_WINDOW would
+// be read from it anyway.
+func TestInstallStallIntervalUnknownAlsoCoversAnInvalidNonNilWindowEnd(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	reg := RegistryProgress{Availability: "AVAILABLE", Events: map[string]int{}, Statuses: map[int]int{},
+		FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)}
+	log := ProgressLog{Availability: "AVAILABLE"}
+
+	t.Run("windowEnd precedes Created", func(t *testing.T) {
+		created := base.Add(10 * time.Second)
+		invalidEnd := base // before created
+		d := installStallDiagnostic("att-interval-1", reg, log, created, &invalidEnd, "", invalidEnd, nil)
+		if !d.AttemptIntervalUnknown || d.AttemptIntervalUnknownReason == "" {
+			t.Fatalf("AttemptIntervalUnknown must be set for a windowEnd preceding Created: %+v", d)
+		}
+		if d.Indication != indicationInsufficientEvidence {
+			t.Fatalf("indication = %s, want %s: an invalid interval must never read as a confident NO_STALL_IN_WINDOW: %+v", d.Indication, indicationInsufficientEvidence, d)
+		}
+	})
+	t.Run("Created itself missing", func(t *testing.T) {
+		we := end(base, time.Second)
+		d := installStallDiagnostic("att-interval-2", reg, log, time.Time{}, we, "", *we, nil)
+		if !d.AttemptIntervalUnknown {
+			t.Fatalf("AttemptIntervalUnknown must be set when Created is missing: %+v", d)
+		}
+		if d.Indication != indicationInsufficientEvidence {
+			t.Fatalf("indication = %s, want %s: %+v", d.Indication, indicationInsufficientEvidence, d)
 		}
 	})
 }
