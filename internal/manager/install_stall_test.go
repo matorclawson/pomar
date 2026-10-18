@@ -487,6 +487,26 @@ func TestProgressOfWiresInstallStallEndToEnd(t *testing.T) {
 	if obs.InstallStall.LogStatus != sourceOK {
 		t.Fatalf("the real log written for this attempt must flow through as LogStatus ok, not %s -- the wiring must pass THIS attempt's own p.Log, not a substitute: %+v", obs.InstallStall.LogStatus, obs.InstallStall)
 	}
+	// council C4/M05L (round 8 mutation re-run): LogStatus alone survives a
+	// mutant that swaps the real p.Log for a fake ProgressLog{Availability:
+	// "AVAILABLE"} at the installStallDiagnostic call site -- the fake has
+	// the same Availability, so LogStatus still reads ok. GuestQuietSeconds
+	// only comes out non-nil when the REAL p.Log.LastOutputAt (this
+	// attempt's actual log mtime) was passed through; a fake with no
+	// LastOutputAt would instead report GuestQuietUnknownReason "no output
+	// has been observed yet".
+	if obs.InstallStall.GuestQuietSeconds == nil || *obs.InstallStall.GuestQuietSeconds < 0 || *obs.InstallStall.GuestQuietSeconds > 10 {
+		t.Fatalf("GuestQuietSeconds must be a small, known value derived from THIS attempt's real log mtime, not unknown (a fake Log substitute would report it unknown): %+v", obs.InstallStall)
+	}
+	// council C4/M05q (round 8 mutation re-run): a mutant passing nil for
+	// guestQuietSince at registryProgress's call site (instead of the real
+	// p.Log.LastOutputAt) would leave EventsSinceGuestQuiet at 0 forever
+	// (registryProgress's own guard is `guestQuietSince != nil && ...`) --
+	// the real log here was written before the real registry events below
+	// it, so a correctly-wired guestQuietSince must count at least one.
+	if obs.InstallStall.EventsSinceGuestQuiet == 0 {
+		t.Fatalf("EventsSinceGuestQuiet must be > 0: the real log's LastOutputAt precedes the real registry events, so a correctly-wired guestQuietSince must count them: %+v", obs.InstallStall)
+	}
 	if obs.InstallStall.ElapsedSeconds == nil || *obs.InstallStall.ElapsedSeconds != 30 {
 		t.Fatalf("ElapsedSeconds must be exactly 30 (fixedNow - 30s == created, both from one time.Now() call): %+v", obs.InstallStall)
 	}

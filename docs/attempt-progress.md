@@ -31,6 +31,7 @@ The response includes a short `summary` and these structured fields:
 | `registry.pending_observed`, `completed_status_counts`, `last_transfer_at` | Observed requests without a completion, HTTP outcomes and last observed network transfer. A completed 2xx is excluded from `last_transfer_at` when its own request also logged a `send_short` (docs/job-failure-diagnostics.md: a 2xx status alone is never proof the guest received every byte), or when this window's own evidence for that request is incomplete (a bounded tail window can retain a completion while an earlier `send_short` for the same request fell outside it) |
 | `registry.window_truncated`, `changed_during_read`, `events_before_window_start`, `events_after_window_end`, `events_out_of_order`, `events_in_future` | The same truncation/mid-read-change/unbound-event facts as `log.*` above, but for the registry trace; these feed `install_stall`'s own source-status and trigger facts below, not just `registry.*` on its own |
 | `registry.first_event_at`, `last_event_at` | The first and last recognized, in-window, in-order event. `first_event_at` is the first such event encountered in arrival (line) order, not re-sorted to the lowest timestamp among accepted events: an accepted event can itself carry a timestamp a little behind the one right before it (ordinary concurrency jitter, within the 1-second tolerance), so a later line can in principle hold an earlier timestamp than the one that already set `first_event_at` |
+| `registry.longest_gap_seconds`, `longest_gap_from_event`, `longest_gap_from_at`, `longest_gap_to_event`, `longest_gap_to_at` | The registry trace's own single largest gap between two consecutive recognized events, with both endpoints named; empty when fewer than two were observed. `install_stall.longest_registry_gap_seconds` below is this same value, re-exposed with its own source status and unknown-reason when it isn't available |
 | `resources.observed_at`, `peaks`, `disk_scope` | Measurement time and historical VM peaks; the disk figure is a shared-filesystem delta, not per-job I/O |
 | `stall_assessment` | `NOT_DETERMINED`: silence, heartbeats and low CPU alone do not prove a stall or its cause |
 | `install_stall` | A fact-only diagnostic for PROFROD-SOW-330's install-stall question (POMAR-CC-SOW-37), computed on this same read. See below. |
@@ -131,10 +132,15 @@ establish a valid release.
 Each GET reads at most 16 KiB of guest output, 256 KiB of registry trace and
 64 KiB of helper status. It rejects symlinks and nonregular files without
 blocking on FIFOs. Class authorization applies before any progress read. The
-registry projection contains aggregates, not raw paths, request headers or
-upstream bodies. Its coverage is a trace window, not a complete request ledger;
-reused legacy request IDs are identified explicitly. Resource sample age can
-remain unknown after a manager restart.
+registry projection is mostly aggregates (counts, timestamps, gaps), never
+request headers or upstream bodies; its one exception is
+`send_short_requests`, whose `path` is a real, individual path from the
+log, not an aggregate -- but always bounded and sanitized at the source
+(council C9 on #141: this line previously read as if no paths at all were
+carried, which `send_short_requests` contradicts). Its coverage is a trace
+window, not a complete request ledger; reused legacy request IDs are
+identified explicitly. Resource sample age can remain unknown after a
+manager restart.
 
 The live tail is always **provisional**. This route does not change the existing
 final-log API, its byte cap/hash, result signature or verification. Use
