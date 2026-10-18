@@ -307,7 +307,7 @@ func TestRegistryProgressTreatsAnOrphanedCompletionInATruncatedWindowAsPossiblyS
 		`e":false,"status":200,"bytes":0,"want":1000,"reason":"write failed"}`, // the dropped, truncated fragment
 		`{"schema":"pomar.npm-request/v1","request":7,"event":"completed","time":"2026-10-17T11:59:59Z","status":200}`,
 	}, "\n") + "\n"
-	p := registryProgress([]byte(log), true, now)
+	p := registryProgress([]byte(log), true, now, nil)
 	if p.Completed != 1 || p.Statuses[200] != 1 {
 		t.Fatalf("the observed completion/status counters must still be preserved: %+v", p)
 	}
@@ -329,7 +329,7 @@ func TestRegistryProgressClearsShortRequestsOnAReusedRequestID(t *testing.T) {
 		`{"schema":"pomar.npm-request/v1","request":9,"event":"received","time":"2026-10-17T11:00:02Z"}`,
 		`{"schema":"pomar.npm-request/v1","request":9,"event":"completed","time":"2026-10-17T11:00:03Z","status":200}`,
 	}, "\n") + "\n"
-	p := registryProgress([]byte(log), false, now)
+	p := registryProgress([]byte(log), false, now, nil)
 	if p.Coverage != "REQUEST_ID_REUSE_OBSERVED" {
 		t.Fatalf("a reused request ID should be flagged: %+v", p)
 	}
@@ -355,7 +355,7 @@ func TestRegistryProgressNewFieldsForInstallStall(t *testing.T) {
 		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"2026-10-18T12:00:01Z"}`,
 		`{"schema":"pomar.npm-request/v1","request":2,"event":"send_short","time":"2026-10-18T12:00:02Z","path":"[redacted]","bytes":0,"reason":"write failed"}`,
 	}, "\n") + "\n"
-	p := registryProgress([]byte(log), false, now)
+	p := registryProgress([]byte(log), false, now, nil)
 
 	if p.FirstEventAt == nil || !p.FirstEventAt.Equal(time.Date(2026, 10, 18, 11, 59, 0, 0, time.UTC)) {
 		t.Fatalf("FirstEventAt wrong: %+v", p.FirstEventAt)
@@ -388,7 +388,7 @@ func TestRegistryProgressReportsItsOwnTruncation(t *testing.T) {
 		`garbage truncated fragment`,
 		`{"schema":"pomar.npm-request/v1","request":1,"event":"completed","time":"2026-10-18T11:59:59Z","status":200}`,
 	}, "\n") + "\n"
-	p := registryProgress([]byte(log), true, now)
+	p := registryProgress([]byte(log), true, now, nil)
 	if !p.WindowTruncated {
 		t.Fatalf("a partial read must say so: %+v", p)
 	}
@@ -405,7 +405,7 @@ func TestRegistryProgressBoundsShortRequestEvidence(t *testing.T) {
 		)
 	}
 	log := strings.Join(lines, "\n") + "\n"
-	p := registryProgress([]byte(log), false, now)
+	p := registryProgress([]byte(log), false, now, nil)
 	if len(p.ShortRequests) != maxShortRequestEvidence {
 		t.Fatalf("ShortRequests should be bounded at %d, got %d", maxShortRequestEvidence, len(p.ShortRequests))
 	}

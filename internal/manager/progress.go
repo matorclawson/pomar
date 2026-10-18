@@ -106,6 +106,11 @@ type RegistryProgress struct {
 	// enforces before any of this is written) and the byte/want/reason
 	// fields send_short itself carries.
 	ShortRequests []ShortRequestEvidence `json:"short_requests,omitempty"`
+	// EventsSinceGuestQuiet counts recognized events at or after the
+	// guestQuietSince cutoff passed to registryProgress (the guest log's
+	// own LastOutputAt) -- a fact a caller can read for itself, not a
+	// boolean conclusion this package draws about whose fault a stall is.
+	EventsSinceGuestQuiet int `json:"events_since_guest_quiet"`
 }
 
 // ShortRequestEvidence is one send_short event, bounded to the fields
@@ -241,7 +246,7 @@ func (m *Manager) progressOf(e Entry, now time.Time) *AttemptProgress {
 		p.Log.Availability = "NOT_CREATED"
 	}
 	if b, _, offset, _, err := progressFile(record, "npmproxy.log", progressRegistryWindow, true); err == nil {
-		p.Registry = registryProgress(b, offset > 0, now)
+		p.Registry = registryProgress(b, offset > 0, now, p.Log.LastOutputAt)
 	} else if os.IsNotExist(err) {
 		p.Registry.Availability = "NOT_CREATED"
 	}
@@ -329,7 +334,7 @@ func workloadPhase(b []byte, partial bool) *WorkloadPhase {
 	return latest
 }
 
-func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
+func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *time.Time) RegistryProgress {
 	p := RegistryProgress{Availability: "AVAILABLE", Coverage: "TAIL_WINDOW", Statuses: map[int]int{}, Events: map[string]int{}, WindowTruncated: partial}
 	lines := bytes.Split(b, []byte{'\n'})
 	if partial && len(lines) > 0 {
@@ -411,6 +416,9 @@ func registryProgress(b []byte, partial bool, now time.Time) RegistryProgress {
 		}
 		if p.FirstEventAt == nil {
 			p.FirstEventAt = &t
+		}
+		if guestQuietSince != nil && !t.Before(*guestQuietSince) {
+			p.EventsSinceGuestQuiet++
 		}
 		if !prevEventAt.IsZero() {
 			if gap := t.Sub(prevEventAt); gap > longestGap {

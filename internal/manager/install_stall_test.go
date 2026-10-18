@@ -13,16 +13,17 @@ func at(base time.Time, d time.Duration) *time.Time {
 	return &t
 }
 
-// council's design review (zc-pcc-collector-v1), amendment 1: a table test
-// per class, plus one where two classes are true at once and the fixed
-// precedence (PROXY_DELIVERY_SHORT > REGISTRY_GAP_EXCEEDS_FETCH_TIMEOUT >
-// GUEST_QUIET_NO_REGISTRY_ACTIVITY > INCONCLUSIVE_WINDOW_TRUNCATED >
-// NO_STALL_OBSERVED) decides Classification, while every class's own
-// boolean is still reported regardless of which one won. Each case's own
-// `now` sits close to its own last event, so only the condition under test
-// trips the end-edge gap, not an accident of a shared clock.
-func TestInstallStallClassification(t *testing.T) {
+// council's arbitration (zc-pcc-collector-v1 amendment 1, settling the
+// disagreement with pomar's review): a fixture per Indication, plus a
+// two-facts-true case asserting precedence while every underlying fact
+// still stands on its own regardless of which Indication it produced.
+func TestInstallStallIndications(t *testing.T) {
 	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	okLog := ProgressLog{Availability: "AVAILABLE"}
+	okReg := func(extra RegistryProgress) RegistryProgress {
+		extra.Availability = "AVAILABLE"
+		return extra
+	}
 
 	tests := []struct {
 		name  string
@@ -32,107 +33,146 @@ func TestInstallStallClassification(t *testing.T) {
 		check func(t *testing.T, d InstallStallDiagnostic)
 	}{
 		{
-			name: "proxy delivery short",
-			reg: RegistryProgress{Events: map[string]int{"send_short": 1}, Statuses: map[int]int{},
+			name: "proxy short delivery observed",
+			reg: okReg(RegistryProgress{Events: map[string]int{"send_short": 1}, Statuses: map[int]int{},
 				ShortRequests: []ShortRequestEvidence{{Request: 7, Path: "/left-pad/-/left-pad-1.3.0.tgz", Bytes: seconds(100), Want: seconds(10000), Reason: "write failed"}},
-				FirstEventAt:  at(base, time.Second), LastEventAt: at(base, 2*time.Second)},
-			log: ProgressLog{},
+				FirstEventAt:  at(base, time.Second), LastEventAt: at(base, 2*time.Second)}),
+			log: okLog,
 			now: base.Add(3 * time.Second),
 			check: func(t *testing.T, d InstallStallDiagnostic) {
-				if d.Classification != stallProxyDeliveryShort {
-					t.Fatalf("classification = %s, want %s: %+v", d.Classification, stallProxyDeliveryShort, d)
+				if d.Indication != indicationProxyShortDelivery {
+					t.Fatalf("indication = %s, want %s: %+v", d.Indication, indicationProxyShortDelivery, d)
 				}
-				if !d.ProxyDeliveryShort || d.SendShortCount != 1 || len(d.SendShortRequests) != 1 {
+				if d.SendShortCount != 1 || len(d.SendShortRequests) != 1 || d.SendShortRequests[0].Path != "/left-pad/-/left-pad-1.3.0.tgz" {
 					t.Fatalf("send-short evidence not carried through: %+v", d)
 				}
-				if d.SendShortRequests[0].Path != "/left-pad/-/left-pad-1.3.0.tgz" {
-					t.Fatalf("path not passed through unchanged: %+v", d.SendShortRequests[0])
-				}
 			},
 		},
 		{
-			name: "registry gap exceeds threshold",
-			reg: RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+			name: "registry gap over threshold",
+			reg: okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
 				FirstEventAt: at(base, time.Second), LastEventAt: at(base, 3*time.Second),
-				LongestGapSeconds: seconds(120), LongestGapFromEvent: "upstream_started", LongestGapFromAt: at(base, time.Second),
-				LongestGapToEvent: "upstream_connected", LongestGapToAt: at(base, 121*time.Second)},
-			log: ProgressLog{},
+				LongestGapSeconds: seconds(200), LongestGapFromEvent: "upstream_started", LongestGapFromAt: at(base, time.Second),
+				LongestGapToEvent: "upstream_connected", LongestGapToAt: at(base, 201*time.Second)}),
+			log: okLog,
 			now: base.Add(4 * time.Second),
 			check: func(t *testing.T, d InstallStallDiagnostic) {
-				if d.Classification != stallRegistryGap {
-					t.Fatalf("classification = %s, want %s: %+v", d.Classification, stallRegistryGap, d)
+				if d.Indication != indicationRegistryGapOver {
+					t.Fatalf("indication = %s, want %s: %+v", d.Indication, indicationRegistryGapOver, d)
 				}
-				if !d.RegistryGapExceedsThreshold || d.GapSeconds == nil || *d.GapSeconds != 120 {
-					t.Fatalf("gap not reported: %+v", d)
-				}
-				if d.GapFrom != "upstream_started" || d.GapTo != "upstream_connected" {
-					t.Fatalf("gap endpoints not named: %+v", d)
+				if d.LongestRegistryGapSeconds == nil || *d.LongestRegistryGapSeconds != 200 {
+					t.Fatalf("gap not reported as a fact: %+v", d)
 				}
 			},
 		},
 		{
-			name: "guest quiet, registry still active",
-			reg: RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
-				FirstEventAt: at(base, time.Second), LastEventAt: at(base, 70*time.Second)},
-			log: ProgressLog{LastOutputAt: at(base, 5*time.Second), QuietSeconds: seconds(70)},
-			now: base.Add(75 * time.Second), // now - LastOutputAt = 70s, matching QuietSeconds; end-edge (now-LastEventAt) stays a harmless 5s
+			name: "guest quiet while registry active",
+			reg: okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+				FirstEventAt: at(base, time.Second), LastEventAt: at(base, 70*time.Second), EventsSinceGuestQuiet: 2}),
+			log: ProgressLog{Availability: "AVAILABLE", LastOutputAt: at(base, 5*time.Second), QuietSeconds: seconds(70)},
+			now: base.Add(75 * time.Second),
 			check: func(t *testing.T, d InstallStallDiagnostic) {
-				if d.Classification != stallGuestQuiet {
-					t.Fatalf("classification = %s, want %s: %+v", d.Classification, stallGuestQuiet, d)
+				if d.Indication != indicationGuestQuietActive {
+					t.Fatalf("indication = %s, want %s: %+v", d.Indication, indicationGuestQuietActive, d)
 				}
-				if !d.GuestQuietNoRegistryActivity {
-					t.Fatal("guest-quiet boolean not set")
+				if d.EventsSinceGuestQuiet != 2 {
+					t.Fatalf("event count not carried through: %+v", d)
 				}
 			},
 		},
 		{
-			name: "window truncated, nothing else true",
-			reg:  RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{}, WindowTruncated: true},
-			log:  ProgressLog{},
+			// Same quiet duration, but zero registry events during it:
+			// GUEST_QUIET_WHILE_REGISTRY_ACTIVE requires actual activity
+			// during the quiet period, not just a long quiet period.
+			name: "guest quiet but registry equally silent: not guest-quiet-while-active",
+			reg: okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+				// LastEventAt kept close to `now` so the trailing silence
+				// (end - LastEventAt) stays small and never itself trips
+				// REGISTRY_GAP_OVER_THRESHOLD, isolating EventsSinceGuestQuiet
+				// as the only thing distinguishing this from the case above.
+				FirstEventAt: at(base, time.Second), LastEventAt: at(base, 73*time.Second), EventsSinceGuestQuiet: 0}),
+			log: ProgressLog{Availability: "AVAILABLE", LastOutputAt: at(base, 5*time.Second), QuietSeconds: seconds(70)},
+			now: base.Add(75 * time.Second),
+			check: func(t *testing.T, d InstallStallDiagnostic) {
+				if d.Indication != indicationNoStall {
+					t.Fatalf("indication = %s, want %s: zero registry activity during a quiet period must not read as guest-quiet-while-active: %+v", d.Indication, indicationNoStall, d)
+				}
+			},
+		},
+		{
+			name: "insufficient evidence: registry unavailable",
+			reg:  RegistryProgress{Availability: "NOT_CREATED", Events: map[string]int{}, Statuses: map[int]int{}},
+			log:  okLog,
 			now:  base.Add(300 * time.Second),
 			check: func(t *testing.T, d InstallStallDiagnostic) {
-				if d.Classification != stallWindowTruncated {
-					t.Fatalf("classification = %s, want %s: a truncated window must never read NO_STALL_OBSERVED", d.Classification, stallWindowTruncated)
+				if d.Indication != indicationInsufficientEvidence {
+					t.Fatalf("indication = %s, want %s: an unavailable source must never read as a clean NO_STALL_IN_WINDOW: %+v", d.Indication, indicationInsufficientEvidence, d)
 				}
-				if !d.WindowTruncated {
-					t.Fatal("truncated boolean not set")
+				if d.RegistryStatus != sourceUnavailable {
+					t.Fatalf("registry status not reported: %+v", d)
 				}
 			},
 		},
 		{
-			name: "no stall observed",
-			reg: RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
-				FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)},
-			log: ProgressLog{},
+			name: "insufficient evidence: window truncated",
+			reg:  okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{}, WindowTruncated: true}),
+			log:  okLog,
+			now:  base.Add(300 * time.Second),
+			check: func(t *testing.T, d InstallStallDiagnostic) {
+				if d.Indication != indicationInsufficientEvidence {
+					t.Fatalf("indication = %s, want %s: %+v", d.Indication, indicationInsufficientEvidence, d)
+				}
+				if !d.RegistryWindowTruncated {
+					t.Fatalf("truncation not reported: %+v", d)
+				}
+			},
+		},
+		{
+			name: "insufficient evidence: default threshold, gap near it",
+			reg: okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+				FirstEventAt: at(base, time.Second), LastEventAt: at(base, 3*time.Second),
+				LongestGapSeconds: seconds(65), LongestGapFromEvent: "a", LongestGapFromAt: at(base, time.Second),
+				LongestGapToEvent: "b", LongestGapToAt: at(base, 66*time.Second)}),
+			log: okLog,
+			now: base.Add(4 * time.Second),
+			check: func(t *testing.T, d InstallStallDiagnostic) {
+				if d.Indication != indicationInsufficientEvidence {
+					t.Fatalf("indication = %s, want %s: a 65s gap against an unrecorded 60s default is too close to call confidently over: %+v", d.Indication, indicationInsufficientEvidence, d)
+				}
+			},
+		},
+		{
+			name: "no stall in window",
+			reg: okReg(RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+				FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)}),
+			log: okLog,
 			now: base.Add(3 * time.Second),
 			check: func(t *testing.T, d InstallStallDiagnostic) {
-				if d.Classification != stallNoneObserved {
-					t.Fatalf("classification = %s, want %s: %+v", d.Classification, stallNoneObserved, d)
-				}
-				if d.ProxyDeliveryShort || d.RegistryGapExceedsThreshold || d.GuestQuietNoRegistryActivity || d.WindowTruncated {
-					t.Fatalf("a boolean is wrongly set on a clean attempt: %+v", d)
+				if d.Indication != indicationNoStall {
+					t.Fatalf("indication = %s, want %s: %+v", d.Indication, indicationNoStall, d)
 				}
 			},
 		},
 		{
-			// Two classes true at once: send_short AND a large registry
-			// gap. Precedence must choose PROXY_DELIVERY_SHORT, but the
-			// gap's own boolean must still be visible to a reader.
-			name: "two classes true: precedence picks the higher one, lower boolean still visible",
-			reg: RegistryProgress{Events: map[string]int{"send_short": 1}, Statuses: map[int]int{},
+			// Two facts true at once: send_short AND a large registry gap.
+			// Precedence picks PROXY_SHORT_DELIVERY_OBSERVED, but the gap
+			// fact itself is still reported, unaffected by which
+			// Indication won.
+			name: "two facts true: precedence picks the higher one, the other fact still stands",
+			reg: okReg(RegistryProgress{Events: map[string]int{"send_short": 1}, Statuses: map[int]int{},
 				ShortRequests:     []ShortRequestEvidence{{Request: 1, Bytes: seconds(0), Reason: "write failed"}},
 				FirstEventAt:      at(base, time.Second),
 				LastEventAt:       at(base, 200*time.Second),
 				LongestGapSeconds: seconds(150), LongestGapFromEvent: "received", LongestGapFromAt: at(base, 10*time.Second),
-				LongestGapToEvent: "completed", LongestGapToAt: at(base, 160*time.Second)},
-			log: ProgressLog{},
+				LongestGapToEvent: "completed", LongestGapToAt: at(base, 160*time.Second)}),
+			log: okLog,
 			now: base.Add(205 * time.Second),
 			check: func(t *testing.T, d InstallStallDiagnostic) {
-				if d.Classification != stallProxyDeliveryShort {
-					t.Fatalf("classification = %s, want %s (precedence)", d.Classification, stallProxyDeliveryShort)
+				if d.Indication != indicationProxyShortDelivery {
+					t.Fatalf("indication = %s, want %s (precedence)", d.Indication, indicationProxyShortDelivery)
 				}
-				if !d.ProxyDeliveryShort || !d.RegistryGapExceedsThreshold {
-					t.Fatalf("both booleans should be true even though only one became Classification: %+v", d)
+				if d.LongestRegistryGapSeconds == nil || *d.LongestRegistryGapSeconds != 150 {
+					t.Fatalf("the gap fact must still be reported even though it didn't win the indication: %+v", d)
 				}
 			},
 		},
@@ -160,107 +200,162 @@ func TestInstallStallClassification(t *testing.T) {
 func TestInstallStallThresholdSource(t *testing.T) {
 	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	recorded := int64(30)
-	reg := RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
+	reg := RegistryProgress{Availability: "AVAILABLE", Events: map[string]int{}, Statuses: map[int]int{},
 		FirstEventAt: at(base, time.Second), LastEventAt: at(base, 50*time.Second),
 		LongestGapSeconds: seconds(49), LongestGapFromEvent: "received", LongestGapFromAt: at(base, time.Second),
 		LongestGapToEvent: "completed", LongestGapToAt: at(base, 50*time.Second)}
-	now := base.Add(60 * time.Second) // end-edge gap stays a harmless 10s either way
-	withDefault := installStallDiagnostic("att-2", reg, ProgressLog{}, base, time.Time{}, false, now, nil)
-	if withDefault.RegistryGapExceedsThreshold {
-		t.Fatalf("a 49s gap must not exceed the 60s default: %+v", withDefault)
+	now := base.Add(60 * time.Second)
+	withDefault := installStallDiagnostic("att-2", reg, ProgressLog{Availability: "AVAILABLE"}, base, time.Time{}, false, now, nil)
+	if withDefault.Indication == indicationRegistryGapOver {
+		t.Fatalf("a 49s gap must not read as over the 60s default: %+v", withDefault)
 	}
-	withRecorded := installStallDiagnostic("att-2", reg, ProgressLog{}, base, time.Time{}, false, now, &recorded)
+	withRecorded := installStallDiagnostic("att-2", reg, ProgressLog{Availability: "AVAILABLE"}, base, time.Time{}, false, now, &recorded)
 	if withRecorded.ThresholdSource != "recorded" || withRecorded.ThresholdSeconds != 30 {
 		t.Fatalf("recorded threshold not used: %+v", withRecorded)
 	}
-	if !withRecorded.RegistryGapExceedsThreshold {
-		t.Fatalf("a recorded, lower threshold should change the outcome: the same 49s gap now exceeds 30s: %+v", withRecorded)
+	if withRecorded.Indication != indicationRegistryGapOver {
+		t.Fatalf("a recorded, lower threshold should change the outcome: the same 49s gap now clearly exceeds 30s: %+v", withRecorded)
 	}
 }
 
-// council amendment 3: the edge gaps (Created -> first event, last event ->
-// Ended/now) must be covered, not just gaps between events.
-func TestInstallStallCoversEdgeGaps(t *testing.T) {
+// pomar's P2-3: a truncated registry window must exclude the START edge
+// (Created -> first retained event) from gap analysis -- the dropped
+// leading fragment may have held continuous activity, so this interval
+// was never actually observed as silent.
+func TestInstallStallExcludesStartEdgeWhenTruncated(t *testing.T) {
 	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
-	t.Run("start edge: a long silence before the first registry event", func(t *testing.T) {
-		reg := RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
-			FirstEventAt: at(base, 90*time.Second), LastEventAt: at(base, 91*time.Second)}
-		d := installStallDiagnostic("att-3", reg, ProgressLog{}, base, time.Time{}, false, base.Add(95*time.Second), nil)
-		if !d.RegistryGapExceedsThreshold || d.GapFrom != "attempt_created" {
-			t.Fatalf("start-edge gap not detected: %+v", d)
-		}
-	})
-	t.Run("end edge: a long silence after the last registry event, attempt still running", func(t *testing.T) {
-		reg := RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
-			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)}
-		d := installStallDiagnostic("att-4", reg, ProgressLog{}, base, time.Time{}, false, base.Add(200*time.Second), nil)
-		if !d.RegistryGapExceedsThreshold || d.GapTo != "observed_at" {
-			t.Fatalf("end-edge gap (running attempt) not detected: %+v", d)
-		}
-	})
-	t.Run("end edge: terminal attempt uses Ended, not observed_at", func(t *testing.T) {
-		reg := RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
-			FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)}
-		ended := base.Add(200 * time.Second)
-		// observed_at (now) is far later than Ended; a terminal attempt's
-		// own gap must be measured against Ended, not against now.
-		d := installStallDiagnostic("att-5", reg, ProgressLog{}, base, ended, true, base.Add(10000*time.Second), nil)
-		if !d.RegistryGapExceedsThreshold || d.GapTo != "attempt_ended" || d.GapToAt == nil || !d.GapToAt.Equal(ended) {
-			t.Fatalf("terminal attempt should measure the end edge against Ended, not now: %+v", d)
-		}
-	})
+	reg := RegistryProgress{Availability: "AVAILABLE", Events: map[string]int{}, Statuses: map[int]int{},
+		WindowTruncated: true,
+		FirstEventAt:    at(base, 90*time.Second), LastEventAt: at(base, 91*time.Second)}
+	d := installStallDiagnostic("att-3", reg, ProgressLog{Availability: "AVAILABLE"}, base, time.Time{}, false, base.Add(92*time.Second), nil)
+	if d.Indication != indicationInsufficientEvidence {
+		t.Fatalf("a truncated window should itself read INSUFFICIENT_EVIDENCE: %+v", d)
+	}
+	// Even setting truncation aside, nothing here should manufacture a
+	// 90s "observed" gap from Created to the first retained event.
+	if d.LongestRegistryGapSeconds != nil && *d.LongestRegistryGapSeconds >= 90 {
+		t.Fatalf("the truncated start edge must never be reported as an observed gap: %+v", d)
+	}
 }
 
-// pomar's review: ProgressLog.QuietSeconds is now.Sub(file mtime) -- right
-// for a running attempt, but for a terminal one it grows with wall-clock
-// time long after the install actually ended. Reading a terminal
-// attempt's progress days later must not manufacture a fresh
-// GUEST_QUIET_NO_REGISTRY_ACTIVITY from nothing but the passage of time.
-func TestInstallStallTerminalGuestQuietIsFrozenAtEnded(t *testing.T) {
+// pomar's P2-4: the terminal quiet-duration freeze must itself be
+// unknown, not fall back to a growing read-time value, when its own
+// inputs are inconsistent.
+func TestInstallStallGuestQuietUnknownOnInconsistentTerminalInputs(t *testing.T) {
 	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
-	ended := base.Add(50 * time.Second)
-	lastOutput := base.Add(5 * time.Second) // Ended - LastOutputAt = 45s, under the 60s default threshold
-	// log.QuietSeconds as progressOf would actually compute it for a read
-	// taken long after Ended: now (far later) minus LastOutputAt -- this
-	// stale value, on its own, would be far over any threshold.
-	readMuchLater := base.Add(10000 * time.Second)
-	staleQuiet := int64(readMuchLater.Sub(lastOutput) / time.Second)
-	log := ProgressLog{LastOutputAt: &lastOutput, QuietSeconds: &staleQuiet}
-	reg := RegistryProgress{Events: map[string]int{}, Statuses: map[int]int{},
-		FirstEventAt: at(base, time.Second), LastEventAt: at(base, 48*time.Second)}
+	reg := RegistryProgress{Availability: "AVAILABLE", Events: map[string]int{}, Statuses: map[int]int{},
+		FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)}
 
-	d := installStallDiagnostic("att-6", reg, log, base, ended, true, readMuchLater, nil)
-	if d.GuestQuietSeconds == nil || *d.GuestQuietSeconds != 45 {
-		t.Fatalf("a terminal attempt's guest-quiet duration must be frozen at Ended (45s: Ended-LastOutputAt), not the stale %ds a read taken long afterward would otherwise compute: %+v", staleQuiet, d)
+	t.Run("LastOutputAt after Ended", func(t *testing.T) {
+		ended := base.Add(10 * time.Second)
+		lastOutput := base.Add(20 * time.Second) // after Ended: inconsistent
+		readMuchLater := base.Add(10000 * time.Second)
+		staleQuiet := int64(readMuchLater.Sub(lastOutput) / time.Second)
+		log := ProgressLog{Availability: "AVAILABLE", LastOutputAt: &lastOutput, QuietSeconds: &staleQuiet}
+		d := installStallDiagnostic("att-4", reg, log, base, ended, true, readMuchLater, nil)
+		if d.GuestQuietSeconds != nil {
+			t.Fatalf("an inconsistent LastOutputAt/Ended pair must report unknown, not a stale fallback value: %+v", d)
+		}
+		if d.GuestQuietUnknownReason == "" {
+			t.Fatal("unknown guest-quiet must still say why")
+		}
+	})
+
+	t.Run("terminal with no Ended", func(t *testing.T) {
+		lastOutput := base.Add(5 * time.Second)
+		log := ProgressLog{Availability: "AVAILABLE", LastOutputAt: &lastOutput, QuietSeconds: seconds(9999)}
+		d := installStallDiagnostic("att-5", reg, log, base, time.Time{}, true, base.Add(10000*time.Second), nil)
+		if d.GuestQuietSeconds != nil {
+			t.Fatalf("a terminal attempt with no Ended must report unknown: %+v", d)
+		}
+	})
+
+	t.Run("consistent terminal inputs still freeze correctly", func(t *testing.T) {
+		ended := base.Add(50 * time.Second)
+		lastOutput := base.Add(5 * time.Second)
+		readMuchLater := base.Add(10000 * time.Second)
+		staleQuiet := int64(readMuchLater.Sub(lastOutput) / time.Second)
+		log := ProgressLog{Availability: "AVAILABLE", LastOutputAt: &lastOutput, QuietSeconds: &staleQuiet}
+		d := installStallDiagnostic("att-6", reg, log, base, ended, true, readMuchLater, nil)
+		if d.GuestQuietSeconds == nil || *d.GuestQuietSeconds != 45 {
+			t.Fatalf("a consistent terminal pair should freeze at Ended-LastOutputAt (45s), not the stale %ds: %+v", staleQuiet, d)
+		}
+	})
+}
+
+// pomar's P2-1: an unavailable or unknown source must never silently read
+// as a clean "nothing happened" observation.
+func TestInstallStallPerSourceStatus(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	reg := RegistryProgress{Availability: "AVAILABLE", Events: map[string]int{}, Statuses: map[int]int{},
+		FirstEventAt: at(base, time.Second), LastEventAt: at(base, 2*time.Second)}
+
+	t.Run("log not created", func(t *testing.T) {
+		d := installStallDiagnostic("att-7", reg, ProgressLog{Availability: "NOT_CREATED"}, base, time.Time{}, false, base.Add(3*time.Second), nil)
+		if d.LogStatus != sourceUnavailable {
+			t.Fatalf("LogStatus = %s, want unavailable: %+v", d.LogStatus, d)
+		}
+		if d.Indication != indicationInsufficientEvidence {
+			t.Fatalf("indication = %s, want insufficient evidence: %+v", d.Indication, d)
+		}
+	})
+	t.Run("log changed during read", func(t *testing.T) {
+		d := installStallDiagnostic("att-8", reg, ProgressLog{Availability: "AVAILABLE", ChangedDuringRead: true}, base, time.Time{}, false, base.Add(3*time.Second), nil)
+		if d.LogStatus != sourceUnknown {
+			t.Fatalf("LogStatus = %s, want unknown (a non-atomic read mid-write): %+v", d.LogStatus, d)
+		}
+	})
+	t.Run("registry has bytes but no recognized events", func(t *testing.T) {
+		noisy := RegistryProgress{Availability: "AVAILABLE", Coverage: "NO_STRUCTURED_EVENTS_OBSERVED", Events: map[string]int{}, Statuses: map[int]int{}}
+		d := installStallDiagnostic("att-9", noisy, ProgressLog{Availability: "AVAILABLE"}, base, time.Time{}, false, base.Add(3*time.Second), nil)
+		if d.RegistryStatus != sourceUnknown {
+			t.Fatalf("RegistryStatus = %s, want unknown: %+v", d.RegistryStatus, d)
+		}
+	})
+}
+
+// pomar's P2-2: each evidence entry's own Path/Reason must be explicitly
+// bounded here, not trusted to upstream redaction alone.
+func TestInstallStallBoundsEvidenceFields(t *testing.T) {
+	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	longPath := make([]byte, 3501)
+	for i := range longPath {
+		longPath[i] = 'a'
 	}
-	if d.GuestQuietNoRegistryActivity {
-		t.Fatalf("a correctly-frozen 45s quiet period, under the 60s threshold, must not false-positive just because a much later read's stale wall-clock quiet would have exceeded it: %+v", d)
+	reg := RegistryProgress{Availability: "AVAILABLE", Events: map[string]int{"send_short": 1}, Statuses: map[int]int{},
+		ShortRequests: []ShortRequestEvidence{{Request: 1, Path: string(longPath), Reason: "write failed", Bytes: seconds(0)}},
+		FirstEventAt:  at(base, time.Second), LastEventAt: at(base, 2*time.Second)}
+	d := installStallDiagnostic("att-10", reg, ProgressLog{Availability: "AVAILABLE"}, base, time.Time{}, false, base.Add(3*time.Second), nil)
+	if len(d.SendShortRequests) != 1 {
+		t.Fatalf("evidence dropped entirely, not just bounded: %+v", d)
+	}
+	if len(d.SendShortRequests[0].Path) > maxEvidencePathLen+20 {
+		t.Fatalf("a 3501-byte path must be bounded, not passed through: got %d bytes", len(d.SendShortRequests[0].Path))
 	}
 }
 
-// council amendment 6 / pomar's review point 6: the report must actually
-// fit its own documented 4 KiB cap under worst-case population, not just
-// be assumed small because its fields look fixed-shape.
+// council amendment 6 / pomar's P2-2 counterexample: the report must
+// actually fit its own documented 4 KiB cap under worst-case population,
+// including pomar's exact 3-entries-of-3650-bytes-each construction.
 func TestInstallStallFitsItsDocumentedCap(t *testing.T) {
 	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	longPath := make([]byte, 3501)
+	for i := range longPath {
+		longPath[i] = 'a'
+	}
 	var evidence []ShortRequestEvidence
 	for i := uint64(1); i <= maxShortRequestEvidence; i++ {
 		evidence = append(evidence, ShortRequestEvidence{
-			Request: i,
-			// A worst-case-length, but still npmproxy-redaction-shaped, path.
-			Path:   "/@a-very-long-scope-name-for-worst-case/a-very-long-package-name-for-worst-case/-/a-very-long-package-name-for-worst-case-99.99.99-worst-case-build-metadata.tgz",
-			Bytes:  seconds(9999999999),
-			Want:   seconds(9999999999),
-			Reason: "connection reset",
+			Request: i, Path: string(longPath), Bytes: seconds(9999999999), Want: seconds(9999999999), Reason: "connection reset",
 		})
 	}
-	reg := RegistryProgress{Events: map[string]int{"send_short": maxShortRequestEvidence}, Statuses: map[int]int{},
+	reg := RegistryProgress{Availability: "AVAILABLE", Events: map[string]int{"send_short": maxShortRequestEvidence}, Statuses: map[int]int{},
 		ShortRequests:     evidence,
 		FirstEventAt:      at(base, time.Second),
 		LastEventAt:       at(base, 2*time.Second),
 		LongestGapSeconds: seconds(9999999999), LongestGapFromEvent: "upstream_connect_started", LongestGapFromAt: at(base, time.Second),
 		LongestGapToEvent: "upstream_connected", LongestGapToAt: at(base, 2*time.Second)}
-	log := ProgressLog{LastOutputAt: at(base, time.Second), QuietSeconds: seconds(9999999999)}
+	log := ProgressLog{Availability: "AVAILABLE", LastOutputAt: at(base, time.Second), QuietSeconds: seconds(9999999999)}
 	d := installStallDiagnostic("a-worst-case-attempt-id-of-realistic-maximum-length-0123456789", reg, log, base, base.Add(3*time.Second), true, base.Add(4*time.Second), seconds(30))
 
 	b, err := json.Marshal(d)
@@ -269,6 +364,6 @@ func TestInstallStallFitsItsDocumentedCap(t *testing.T) {
 	}
 	const capBytes = 4 << 10
 	if len(b) > capBytes {
-		t.Fatalf("worst-case InstallStallDiagnostic is %d bytes, over the documented %d-byte cap: %s", len(b), capBytes, b)
+		t.Fatalf("worst-case InstallStallDiagnostic is %d bytes, over the documented %d-byte cap", len(b), capBytes)
 	}
 }
