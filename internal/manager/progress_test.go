@@ -307,7 +307,7 @@ func TestRegistryProgressTreatsAnOrphanedCompletionInATruncatedWindowAsPossiblyS
 		`e":false,"status":200,"bytes":0,"want":1000,"reason":"write failed"}`, // the dropped, truncated fragment
 		`{"schema":"pomar.npm-request/v1","request":7,"event":"completed","time":"2026-10-17T11:59:59Z","status":200}`,
 	}, "\n") + "\n"
-	p := registryProgress([]byte(log), true, now, nil)
+	p := registryProgress([]byte(log), true, now, nil, false, time.Time{}, nil)
 	if p.Completed != 1 || p.Statuses[200] != 1 {
 		t.Fatalf("the observed completion/status counters must still be preserved: %+v", p)
 	}
@@ -329,7 +329,7 @@ func TestRegistryProgressClearsShortRequestsOnAReusedRequestID(t *testing.T) {
 		`{"schema":"pomar.npm-request/v1","request":9,"event":"received","time":"2026-10-17T11:00:02Z"}`,
 		`{"schema":"pomar.npm-request/v1","request":9,"event":"completed","time":"2026-10-17T11:00:03Z","status":200}`,
 	}, "\n") + "\n"
-	p := registryProgress([]byte(log), false, now, nil)
+	p := registryProgress([]byte(log), false, now, nil, false, time.Time{}, nil)
 	if p.Coverage != "REQUEST_ID_REUSE_OBSERVED" {
 		t.Fatalf("a reused request ID should be flagged: %+v", p)
 	}
@@ -355,7 +355,7 @@ func TestRegistryProgressNewFieldsForInstallStall(t *testing.T) {
 		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"2026-10-18T12:00:01Z"}`,
 		`{"schema":"pomar.npm-request/v1","request":2,"event":"send_short","time":"2026-10-18T12:00:02Z","path":"[redacted]","bytes":0,"reason":"write failed"}`,
 	}, "\n") + "\n"
-	p := registryProgress([]byte(log), false, now, nil)
+	p := registryProgress([]byte(log), false, now, nil, false, time.Time{}, nil)
 
 	if p.FirstEventAt == nil || !p.FirstEventAt.Equal(time.Date(2026, 10, 18, 11, 59, 0, 0, time.UTC)) {
 		t.Fatalf("FirstEventAt wrong: %+v", p.FirstEventAt)
@@ -388,7 +388,7 @@ func TestRegistryProgressReportsItsOwnTruncation(t *testing.T) {
 		`garbage truncated fragment`,
 		`{"schema":"pomar.npm-request/v1","request":1,"event":"completed","time":"2026-10-18T11:59:59Z","status":200}`,
 	}, "\n") + "\n"
-	p := registryProgress([]byte(log), true, now, nil)
+	p := registryProgress([]byte(log), true, now, nil, false, time.Time{}, nil)
 	if !p.WindowTruncated {
 		t.Fatalf("a partial read must say so: %+v", p)
 	}
@@ -405,8 +405,176 @@ func TestRegistryProgressBoundsShortRequestEvidence(t *testing.T) {
 		)
 	}
 	log := strings.Join(lines, "\n") + "\n"
-	p := registryProgress([]byte(log), false, now, nil)
+	p := registryProgress([]byte(log), false, now, nil, false, time.Time{}, nil)
 	if len(p.ShortRequests) != maxShortRequestEvidence {
 		t.Fatalf("ShortRequests should be bounded at %d, got %d", maxShortRequestEvidence, len(p.ShortRequests))
+	}
+}
+
+// council P2-2 on #141: events outside [windowStart, windowEnd] or out of
+// chronological order must be counted as their own facts and excluded
+// from FirstEventAt/LastEventAt/gap tracking/EventsSinceGuestQuiet --
+// never silently widen or narrow an "observed" interval.
+func TestRegistryProgressBindsEventsToTheirWindow(t *testing.T) {
+	now := time.Date(2026, 10, 18, 13, 0, 0, 0, time.UTC)
+	windowStart := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	windowEnd := windowStart.Add(10 * time.Second)
+	log := strings.Join([]string{
+		// Before windowStart: must be excluded from FirstEventAt/gaps.
+		`{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"2026-10-18T11:59:00Z"}`,
+		// In-window, in order: the real first/last events.
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"received","time":"2026-10-18T12:00:01Z"}`,
+		`{"schema":"pomar.npm-request/v1","request":2,"event":"completed","time":"2026-10-18T12:00:02Z","status":200}`,
+		// After windowEnd: must be excluded.
+		`{"schema":"pomar.npm-request/v1","request":3,"event":"received","time":"2026-10-18T12:00:20Z"}`,
+		// Out of order (earlier than the previous accepted event, but
+		// itself inside [windowStart, windowEnd]).
+		`{"schema":"pomar.npm-request/v1","request":4,"event":"received","time":"2026-10-18T12:00:01.5Z"}`,
+	}, "\n") + "\n"
+	p := registryProgress([]byte(log), false, now, nil, false, windowStart, &windowEnd)
+
+	if p.EventsBeforeWindowStart != 1 {
+		t.Fatalf("EventsBeforeWindowStart = %d, want 1: %+v", p.EventsBeforeWindowStart, p)
+	}
+	if p.EventsAfterWindowEnd != 1 {
+		t.Fatalf("EventsAfterWindowEnd = %d, want 1: %+v", p.EventsAfterWindowEnd, p)
+	}
+	if p.EventsOutOfOrder != 1 {
+		t.Fatalf("EventsOutOfOrder = %d, want 1: %+v", p.EventsOutOfOrder, p)
+	}
+	if p.FirstEventAt == nil || !p.FirstEventAt.Equal(time.Date(2026, 10, 18, 12, 0, 1, 0, time.UTC)) {
+		t.Fatalf("FirstEventAt must be the real in-window first event (12:00:01), not the before-window one: %+v", p.FirstEventAt)
+	}
+	if p.LastEventAt == nil || !p.LastEventAt.Equal(time.Date(2026, 10, 18, 12, 0, 2, 0, time.UTC)) {
+		t.Fatalf("LastEventAt must be the real in-window last event (12:00:02), not the after-window one: %+v", p.LastEventAt)
+	}
+}
+
+// council P1-3 on #141 / pomar's review: bounds applied before JSON
+// escaping let adversarial content (control characters, '<') blow past
+// the documented cap once marshaled, since each such byte can expand to
+// a 6-character \u00XX escape. sanitizeEvidenceText/closedEvidence must
+// remove that risk at the source, not just bound raw byte length.
+func TestClosedEvidenceSanitizesAdversarialContent(t *testing.T) {
+	adversarial := "/\x01\x01\x01<<<pkg/-/pkg-1.0.0.tgz"
+	e := closedEvidence(ShortRequestEvidence{Request: 1, Path: adversarial, Reason: "some made-up reason that isn't in the closed set"})
+	if !e.Truncated {
+		t.Fatalf("sanitized/altered content must be flagged: %+v", e)
+	}
+	// Marshal the sanitized path alone and confirm it can't have been
+	// inflated by escaping: a plain '?' and '<'/ASCII text never escape
+	// to more than 6 bytes each, and this path is already short, but the
+	// real guarantee is no control character survives to be escaped.
+	for i := 0; i < len(e.Path); i++ {
+		if e.Path[i] < 0x20 || e.Path[i] == 0x7f || e.Path[i] > 0x7e {
+			t.Fatalf("a control or non-ASCII-printable byte survived sanitization: %q", e.Path)
+		}
+	}
+	if e.Reason != "other" {
+		t.Fatalf("a reason outside the closed set must map to \"other\", got %q", e.Reason)
+	}
+}
+
+// council P1-3: pomar's exact adversarial construction (3501-byte path,
+// at the log line's own 4096-byte parser maximum) must still come out
+// bounded and sanitized, not merely "shortened."
+func TestClosedEvidenceBoundsAtParserMaxima(t *testing.T) {
+	adversarial := make([]byte, 3501)
+	for i := range adversarial {
+		if i%7 == 0 {
+			adversarial[i] = 0x01 // control characters scattered through
+		} else if i%11 == 0 {
+			adversarial[i] = '<'
+		} else {
+			adversarial[i] = 'a'
+		}
+	}
+	e := closedEvidence(ShortRequestEvidence{Request: 1, Path: string(adversarial), Reason: "write failed"})
+	if len(e.Path) > maxEvidencePathLen {
+		t.Fatalf("path not bounded: got %d bytes, want <= %d", len(e.Path), maxEvidencePathLen)
+	}
+	if !e.Truncated {
+		t.Fatal("a 3501-byte input must be flagged truncated")
+	}
+}
+
+// Recognized Reason values pass through unchanged; everything else maps
+// to the closed "other" bucket.
+func TestClosedEvidenceReasonIsAClosedSet(t *testing.T) {
+	for reason := range evidenceReasons {
+		e := closedEvidence(ShortRequestEvidence{Request: 1, Reason: reason})
+		if e.Reason != reason {
+			t.Fatalf("a recognized reason must pass through unchanged: %q became %q", reason, e.Reason)
+		}
+	}
+	e := closedEvidence(ShortRequestEvidence{Request: 1, Reason: "<script>alert(1)</script>"})
+	if e.Reason != "other" {
+		t.Fatalf("an unrecognized reason must map to \"other\", got %q", e.Reason)
+	}
+}
+
+// council P1-3: pomar's exact end-to-end counterexample -- three real
+// send_short log lines, each with a ~3650-byte adversarial path, whose
+// unbounded evidence subset alone serialized to ~10803 bytes. Run through
+// the real registryProgress parser (not a direct struct literal), the
+// resulting ShortRequests must already be bounded and sanitized.
+func TestRegistryProgressBoundsAndSanitizesRealAdversarialLines(t *testing.T) {
+	now := time.Date(2026, 10, 18, 12, 1, 0, 0, time.UTC)
+	// Shorter than pomar's own 3501-byte construction: JSON-escaping (Go's
+	// Marshal escapes control bytes AND '<'/'>'/'&' by default, 6 bytes
+	// each) would otherwise push the marshaled LINE itself over
+	// registryProgress's own 4096-byte per-line bound, making this
+	// fixture fail to parse at all rather than exercise sanitization.
+	longPath := make([]byte, 500)
+	for i := range longPath {
+		switch {
+		case i%13 == 0:
+			longPath[i] = 0x01
+		case i%17 == 0:
+			longPath[i] = '<'
+		default:
+			longPath[i] = 'a'
+		}
+	}
+	type logLine struct {
+		Schema  string `json:"schema"`
+		Request uint64 `json:"request"`
+		Event   string `json:"event"`
+		Time    string `json:"time"`
+		Path    string `json:"path,omitempty"`
+		Reason  string `json:"reason,omitempty"`
+	}
+	var lines []string
+	for i := uint64(1); i <= 3; i++ {
+		received, err := json.Marshal(logLine{Schema: "pomar.npm-request/v1", Request: i, Event: "received", Time: "2026-10-18T12:00:00Z"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		short, err := json.Marshal(logLine{Schema: "pomar.npm-request/v1", Request: i, Event: "send_short", Time: "2026-10-18T12:00:00Z", Path: string(longPath), Reason: "some made up reason"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, string(received), string(short))
+	}
+	log := strings.Join(lines, "\n") + "\n"
+	p := registryProgress([]byte(log), false, now, nil, false, time.Time{}, nil)
+
+	if len(p.ShortRequests) != maxShortRequestEvidence {
+		t.Fatalf("expected the usual 3-entry bound: got %d", len(p.ShortRequests))
+	}
+	b, err := json.Marshal(p.ShortRequests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > 2000 {
+		t.Fatalf("the bounded+sanitized evidence subset is still %d bytes -- pomar's ~10803-byte counterexample must be eliminated by the time registryProgress returns", len(b))
+	}
+	for _, e := range p.ShortRequests {
+		if !e.Truncated {
+			t.Fatalf("adversarial evidence must be flagged truncated: %+v", e)
+		}
+		if e.Reason != "other" {
+			t.Fatalf("an unrecognized reason must map to \"other\": %+v", e)
+		}
 	}
 }

@@ -111,21 +111,103 @@ type RegistryProgress struct {
 	// own LastOutputAt) -- a fact a caller can read for itself, not a
 	// boolean conclusion this package draws about whose fault a stall is.
 	EventsSinceGuestQuiet int `json:"events_since_guest_quiet"`
+	// ChangedDuringRead mirrors ProgressLog.ChangedDuringRead for this
+	// same npmproxy.log read (council P1-2 on #141: previously computed
+	// by progressFile and silently discarded for this source) -- a
+	// non-atomic tail read, taken while the file was still being written.
+	ChangedDuringRead bool `json:"changed_during_read"`
+	// EventsBeforeWindowStart/EventsAfterWindowEnd/EventsOutOfOrder
+	// (council P2-2 on #141) count recognized events that fall outside
+	// [windowStart, windowEnd] or arrive with a timestamp earlier than an
+	// already-accepted one, when registryProgress was given a window to
+	// bind against. Such events are facts on their own (a non-zero count
+	// is itself worth surfacing) but are excluded from FirstEventAt,
+	// LastEventAt, the gap tracking and EventsSinceGuestQuiet -- an event
+	// that can't be trusted to belong to this attempt's own timeline
+	// must never silently widen or narrow an "observed" gap.
+	EventsBeforeWindowStart int `json:"events_before_window_start"`
+	EventsAfterWindowEnd    int `json:"events_after_window_end"`
+	EventsOutOfOrder        int `json:"events_out_of_order"`
 }
 
-// ShortRequestEvidence is one send_short event, bounded to the fields
-// npmproxy's own log line already carries -- nothing recomputed, nothing
-// added that line didn't already have.
+// ShortRequestEvidence is one send_short event. Path and Reason are
+// bounded and sanitized here, at the source, not trusted to upstream
+// redaction or left for a caller to bound -- docs/attempt-progress.md's
+// own promise ("the registry projection contains aggregates, not raw
+// paths") is enforced at the one place that builds this slice, not
+// re-derived downstream.
 type ShortRequestEvidence struct {
 	Request uint64 `json:"request"`
 	Path    string `json:"path,omitempty"`
 	Bytes   *int64 `json:"bytes,omitempty"`
 	Want    *int64 `json:"want,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	// Reason is always one of a closed set (shortReason's own classified
+	// buckets, plus sendFile's nil-error short-count message, plus
+	// "other" for anything else) -- never raw text passed through.
+	Reason string `json:"reason,omitempty"`
+	// Truncated is true when Path was shortened, or when Path/Reason
+	// contained characters outside a tarball path's own charset and were
+	// replaced -- an explicit signal that this entry isn't the log's
+	// exact bytes, rather than a silent, unflagged alteration.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // maxShortRequestEvidence bounds ShortRequests: evidence, not a full log replay.
 const maxShortRequestEvidence = 3
+
+// maxEvidencePathLen bounds ShortRequestEvidence's Path, applied to the
+// already-sanitized (ASCII-printable-only) string: pomar's review found
+// npmproxy's own Path has no length bound of its own beyond the log
+// line's 4096-byte cap, and a handful of such paths alone could blow past
+// this field's own small share of the attempt-progress response.
+const maxEvidencePathLen = 200
+
+// evidenceReasons is the closed set a send_short Reason is ever allowed
+// to report as: shortReason's own classified buckets (internal/npmproxy),
+// plus sendFile's nil-error short-count message, plus "other" for
+// anything that doesn't match (never raw text passed through).
+var evidenceReasons = map[string]bool{
+	"broken pipe": true, "connection reset": true, "connection closed": true,
+	"request canceled": true, "deadline exceeded": true, "write failed": true,
+	"copy ended with no error short of the file's stated size": true,
+}
+
+// sanitizeEvidenceText replaces anything outside printable ASCII with a
+// placeholder (so no amount of JSON-escaping-expansion can make a
+// bounded-byte-length string marshal larger than a small, predictable
+// multiple of its own length -- pomar's U+0001/'<' counterexample),
+// then bounds the result to maxLen. The returned bool is true if the
+// text was altered in either way.
+func sanitizeEvidenceText(s string, maxLen int) (string, bool) {
+	altered := false
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f || c > 0x7e {
+			out = append(out, '?')
+			altered = true
+			continue
+		}
+		out = append(out, c)
+	}
+	if len(out) > maxLen {
+		out = out[:maxLen]
+		altered = true
+	}
+	return string(out), altered
+}
+
+// closedEvidence sanitizes and bounds one send_short evidence entry,
+// before it's ever stored: the one place this slice is built.
+func closedEvidence(e ShortRequestEvidence) ShortRequestEvidence {
+	path, pathAltered := sanitizeEvidenceText(e.Path, maxEvidencePathLen)
+	e.Path = path
+	e.Truncated = pathAltered
+	if !evidenceReasons[e.Reason] {
+		e.Reason = "other"
+	}
+	return e
+}
 
 // progressFile never follows a record-file symlink or blocks on a FIFO.
 // The file is bounded before JSON or log interpretation; replacement and
@@ -245,8 +327,23 @@ func (m *Manager) progressOf(e Entry, now time.Time) *AttemptProgress {
 	} else if os.IsNotExist(err) {
 		p.Log.Availability = "NOT_CREATED"
 	}
-	if b, _, offset, _, err := progressFile(record, "npmproxy.log", progressRegistryWindow, true); err == nil {
-		p.Registry = registryProgress(b, offset > 0, now, p.Log.LastOutputAt)
+	// windowEnd is nil only when this attempt is terminal but never
+	// recorded an Ended time -- council P2-1 on #141: that must read as
+	// unknown everywhere it's used, never silently fall back to `now`
+	// and manufacture a growing fact out of wall-clock time.
+	var windowEnd *time.Time
+	var windowEndUnknownReason string
+	switch {
+	case e.Terminal() && e.Ended.IsZero():
+		windowEndUnknownReason = "attempt is terminal but recorded no Ended time"
+	case e.Terminal():
+		end := e.Ended
+		windowEnd = &end
+	default:
+		windowEnd = &now
+	}
+	if b, _, offset, changed, err := progressFile(record, "npmproxy.log", progressRegistryWindow, true); err == nil {
+		p.Registry = registryProgress(b, offset > 0, now, p.Log.LastOutputAt, changed, e.Created, windowEnd)
 	} else if os.IsNotExist(err) {
 		p.Registry.Availability = "NOT_CREATED"
 	}
@@ -266,7 +363,7 @@ func (m *Manager) progressOf(e Entry, now time.Time) *AttemptProgress {
 			p.Phase, p.Summary = "OUTCOME_UNCONFIRMED", "Helper status was lost; reconcile execution outcome before any retry."
 		}
 	}
-	p.InstallStall = installStallDiagnostic(e.Attempt, p.Registry, p.Log, e.Created, e.Ended, e.Terminal(), now, nil)
+	p.InstallStall = installStallDiagnostic(e.Attempt, p.Registry, p.Log, e.Created, windowEnd, windowEndUnknownReason, now, nil)
 	return p
 }
 
@@ -334,8 +431,12 @@ func workloadPhase(b []byte, partial bool) *WorkloadPhase {
 	return latest
 }
 
-func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *time.Time) RegistryProgress {
-	p := RegistryProgress{Availability: "AVAILABLE", Coverage: "TAIL_WINDOW", Statuses: map[int]int{}, Events: map[string]int{}, WindowTruncated: partial}
+// windowStart/windowEnd (council P2-2 on #141) bind recognized events to
+// the attempt's own timeline: windowEnd nil means the end of that
+// timeline isn't known for this read (a terminal attempt with no
+// recorded Ended), in which case only windowStart still applies.
+func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *time.Time, changedDuringRead bool, windowStart time.Time, windowEnd *time.Time) RegistryProgress {
+	p := RegistryProgress{Availability: "AVAILABLE", Coverage: "TAIL_WINDOW", Statuses: map[int]int{}, Events: map[string]int{}, WindowTruncated: partial, ChangedDuringRead: changedDuringRead}
 	lines := bytes.Split(b, []byte{'\n'})
 	if partial && len(lines) > 0 {
 		lines = lines[1:]
@@ -412,25 +513,47 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 			shortRequests[ev.Request] = true
 		}
 		if ev.Event == "send_short" && len(p.ShortRequests) < maxShortRequestEvidence {
-			p.ShortRequests = append(p.ShortRequests, ShortRequestEvidence{Request: ev.Request, Path: ev.Path, Bytes: ev.Bytes, Want: ev.Want, Reason: ev.Reason})
+			p.ShortRequests = append(p.ShortRequests, closedEvidence(ShortRequestEvidence{Request: ev.Request, Path: ev.Path, Bytes: ev.Bytes, Want: ev.Want, Reason: ev.Reason}))
 		}
-		if p.FirstEventAt == nil {
-			p.FirstEventAt = &t
+		// An event that can't be trusted to belong to this attempt's own
+		// timeline (before it started, after a known end, or arriving
+		// with an earlier timestamp than one already accepted) is still
+		// counted as its own fact, but excluded from every time-based
+		// one below it: FirstEventAt/LastEventAt/the gap tracking/
+		// EventsSinceGuestQuiet would otherwise silently narrow or widen
+		// an "observed" interval using a timestamp this function can't
+		// vouch for.
+		beforeStart := !windowStart.IsZero() && t.Before(windowStart)
+		afterEnd := windowEnd != nil && t.After(*windowEnd)
+		outOfOrder := !prevEventAt.IsZero() && t.Before(prevEventAt)
+		if beforeStart {
+			p.EventsBeforeWindowStart++
 		}
-		if guestQuietSince != nil && !t.Before(*guestQuietSince) {
-			p.EventsSinceGuestQuiet++
+		if afterEnd {
+			p.EventsAfterWindowEnd++
 		}
-		if !prevEventAt.IsZero() {
-			if gap := t.Sub(prevEventAt); gap > longestGap {
-				longestGap = gap
-				p.LongestGapFromEvent, p.LongestGapToEvent = prevEventName, ev.Event
-				from, to := prevEventAt, t
-				p.LongestGapFromAt, p.LongestGapToAt = &from, &to
+		if outOfOrder {
+			p.EventsOutOfOrder++
+		}
+		if !beforeStart && !afterEnd && !outOfOrder {
+			if p.FirstEventAt == nil {
+				p.FirstEventAt = &t
 			}
-		}
-		prevEventAt, prevEventName = t, ev.Event
-		if p.LastEventAt == nil || t.After(*p.LastEventAt) {
-			p.LastEventAt = &t
+			if guestQuietSince != nil && !t.Before(*guestQuietSince) {
+				p.EventsSinceGuestQuiet++
+			}
+			if !prevEventAt.IsZero() {
+				if gap := t.Sub(prevEventAt); gap > longestGap {
+					longestGap = gap
+					p.LongestGapFromEvent, p.LongestGapToEvent = prevEventName, ev.Event
+					from, to := prevEventAt, t
+					p.LongestGapFromAt, p.LongestGapToAt = &from, &to
+				}
+			}
+			prevEventAt, prevEventName = t, ev.Event
+			if p.LastEventAt == nil || t.After(*p.LastEventAt) {
+				p.LastEventAt = &t
+			}
 		}
 		if ev.Event == "upstream_first_byte" || (ev.Event == "completed" && ev.Status >= 200 && ev.Status < 300 && !shortRequests[ev.Request]) {
 			if p.LastTransferAt == nil || t.After(*p.LastTransferAt) {

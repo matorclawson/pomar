@@ -31,6 +31,44 @@ The response includes a short `summary` and these structured fields:
 | `registry.pending_observed`, `completed_status_counts`, `last_transfer_at` | Observed requests without a completion, HTTP outcomes and last observed network transfer. A completed 2xx is excluded from `last_transfer_at` when its own request also logged a `send_short` (docs/job-failure-diagnostics.md: a 2xx status alone is never proof the guest received every byte), or when this window's own evidence for that request is incomplete (a bounded tail window can retain a completion while an earlier `send_short` for the same request fell outside it) |
 | `resources.observed_at`, `peaks`, `disk_scope` | Measurement time and historical VM peaks; the disk figure is a shared-filesystem delta, not per-job I/O |
 | `stall_assessment` | `NOT_DETERMINED`: silence, heartbeats and low CPU alone do not prove a stall or its cause |
+| `install_stall` | A fact-only diagnostic for PROFROD-SOW-330's install-stall question (POMAR-CC-SOW-37), computed on this same read. See below. |
+
+### `install_stall`: fact-only, never a verified cause
+
+Every value is reported as a measured fact with its own source status
+(`log_status`/`registry_status`: `ok`, `unknown` or `unavailable`, with a
+reason when not `ok`), never a bare conclusion. Every optional numeric fact
+(`elapsed_seconds`, `longest_registry_gap_seconds`,
+`trailing_registry_silence_seconds`, `guest_quiet_seconds`) is still present
+as `null` when unknown, paired with its own `*_unknown_reason` field naming
+why -- an unknown fact is never indistinguishable from one simply omitted.
+`longest_registry_gap_seconds` never includes a "start edge" (attempt
+created to the first retained registry event): a truncated trace window's
+dropped leading fragment may have held continuous activity, so that
+interval is never reported as an observed silence.
+`events_before_window_start`/`events_after_window_end`/`events_out_of_order`
+count registry events this read can't bind to the attempt's own timeline;
+such events are excluded from every gap and first/last-event fact, and a
+non-zero count of any of them is itself a trigger below.
+
+`indication` is OPTIONAL: a one-word, evidential-named summary
+(`PROXY_SHORT_DELIVERY_OBSERVED`, `REGISTRY_GAP_OVER_THRESHOLD`,
+`GUEST_QUIET_WHILE_REGISTRY_ACTIVE`, `INSUFFICIENT_EVIDENCE`,
+`NO_STALL_IN_WINDOW`), by a fixed precedence used only to pick this one
+field -- every fact above still appears regardless of which indication it
+produced. `INSUFFICIENT_EVIDENCE` is checked first and wins outright
+whenever any source is less than fully known, a window is truncated, an
+unbound-event count is non-zero, or (with only an unrecorded default
+threshold) a gap sits within 20% of it either way: a confident
+evidential class is never read off evidence this uncertain.
+
+`send_short_requests` (at most 3 entries) are bounded and sanitized at
+the source, consistent with "the registry projection contains aggregates,
+not raw paths" above: `path`/`reason` are ASCII-printable-only and
+length-bounded, `reason` is always one of a closed set (never raw text),
+and `truncated` flags an entry that was altered from the log's own bytes.
+The whole `install_stall` object is itself capped at 4 KiB, enforced on
+the actual marshaled bytes.
 
 Helper phases distinguish guest creation, input/source preparation, command
 execution and result finalization when the helper reports them. Older helpers
