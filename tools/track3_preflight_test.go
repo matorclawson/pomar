@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // zeocoreFixture returns a minimal, self-contained directory shaped like
@@ -221,6 +222,55 @@ func TestTrack3PreflightFailsClosedOnMalformedTenByteStat(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "scratch_ancestry_status: NOT-CONFIGURED") || !strings.Contains(string(out), "could not read permission metadata") {
 		t.Fatalf("a malformed 10-byte stat output must fail the ancestor closed, not read VERIFIED: %s", out)
+	}
+}
+
+// A council/pomar review: the uv lock--check call may consult the network
+// or uv's own cache, so an unresponsive one must not hang a mandatory run
+// indefinitely, and the child process must actually be killed, not merely
+// abandoned. A fake `uv` that sleeps well past a short TRACK3_UV_TIMEOUT
+// proves both: the script returns promptly, and the fake uv never reaches
+// the point of writing its completion marker.
+func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
+	repo := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "uv-finished")
+	fakeUV := "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'uv 0.0.0-fake' ;;\n  lock) sleep 5; : > \"$MARKER\" ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", script, repo, filepath.Join(root, "scratch"), "3.11")
+	cmd.Env = append([]string{
+		"PATH=" + fakeBin + ":/usr/bin:/bin",
+		"TZ=UTC",
+		"MARKER=" + marker,
+		"TRACK3_UV_TIMEOUT=1",
+	}, filteredEnv("PATH", "TZ", "MARKER", "TRACK3_UV_TIMEOUT")...)
+
+	start := time.Now()
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, out)
+	}
+	if elapsed > 4*time.Second {
+		t.Fatalf("script took %s, well over the ~1s timeout, want well under the fake uv's 5s sleep: %s", elapsed, out)
+	}
+	if !strings.Contains(string(out), "uv_lock_consistency_with_pyproject") || !strings.Contains(string(out), "NOT-CONFIGURED (timed out after 1s, killed)") {
+		t.Fatalf("expected a timed-out, killed, NOT-CONFIGURED report: %s", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("fake uv's completion marker exists -- its child process was not actually killed before completing")
 	}
 }
 
