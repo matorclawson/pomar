@@ -1,0 +1,119 @@
+--- a/guest-e667-entry-v2.py
++++ b/guest-e667-entry-v2.py
+@@ -189,0 +190,3 @@
++            # Once Popen succeeds, no fallible evidence operation may release
++            # custody before positive reap AND descendant quiescence.
++            result['retention_required'] = True
+@@ -191,0 +195,6 @@
++            observation_unknown = False
++            custody_unknown = True
++            io_failed = False
++            signals = []
++            live = []
++            pending = None
+@@ -197,5 +206,19 @@
+-                    live = scope.scan(DEADLINE)
+-                    usage = guard.budget(kernel, live, supervisors, SOURCE.parent, DEADLINE,
+-                                         RESOURCES['memory_bytes'], RESOURCES['scratch_bytes'])
+-                    usage['scratch_allocated_bytes'] += guard.disk_usage(
+-                        HERE, DEADLINE, RESOURCES['scratch_bytes'])
++                    try:
++                        live = scope.scan(DEADLINE)
++                        usage = guard.budget(kernel, live, supervisors, SOURCE.parent, DEADLINE,
++                                             RESOURCES['memory_bytes'], RESOURCES['scratch_bytes'])
++                        usage['scratch_allocated_bytes'] += guard.disk_usage(
++                            HERE, DEADLINE, RESOURCES['scratch_bytes'])
++                    except guard.Unknown:
++                        observation_unknown = True
++                        raise
++                    except RuntimeError as exc:
++                        # Only positively observed resource ceilings are known
++                        # failures; other failed observations remain UNKNOWN.
++                        observation_unknown = str(exc) not in (
++                            'whole-job RSS ceiling exceeded',
++                            'whole-job scratch ceiling exceeded')
++                        raise
++                    except Exception:
++                        observation_unknown = True
++                        raise
+@@ -210,5 +233,7 @@
+-                if child.stdin and not child.stdin.closed:
+-                    child.stdin.close()
+-                row.update(ended=utc().isoformat(), exit=child.poll(),
+-                           deadline_or_interrupt=timed_out,
+-                           log_sha256=digest(logpath), log_bytes=logpath.stat().st_size)
++                # A close/flush error must not skip identity-safe cleanup.
++                try:
++                    if child.stdin and not child.stdin.closed:
++                        child.stdin.close()
++                except Exception as exc:
++                    io_failed = True
++                    row['stdin_close_error_type'] = type(exc).__name__
+@@ -216,2 +241 @@
+-                    result['retention_required'] = True
+-                    row.update(quiescent=False, custody='ROOT_IDENTITY_UNKNOWN_NO_PID_SIGNAL')
++                    row['custody'] = 'ROOT_IDENTITY_UNKNOWN_NO_PID_SIGNAL'
+@@ -219,5 +242,0 @@
+-                    # Any exception in observation/cleanup remains a held claim.
+-                    result['retention_required'] = True
+-                    row.update(owned_births=list(scope.known.values()), unresolved=scope.gap,
+-                               quiescent=False)
+-                    clean, signals = scope.cleanup(cleanup_end)
+@@ -224,0 +244 @@
++                        clean, signals = scope.cleanup(cleanup_end)
+@@ -226,15 +246,26 @@
+-                    except subprocess.TimeoutExpired:
+-                        clean = False
+-                    live = scope.scan(cleanup_end)
+-                    survivors = live
+-                    pending = scope.gap
+-                    result['retention_required'] = not clean or bool(live) or bool(pending)
+-                    row.update(cleanup_signals=signals, quiescent=not result['retention_required'],
+-                               survivors=live, unresolved=pending, exit=child.poll())
+-        row.update(ended=utc().isoformat(), exit=child.poll(), deadline_or_interrupt=timed_out,
+-                   log_sha256=digest(logpath), log_bytes=logpath.stat().st_size,
+-                   owned_births=list(scope.known.values()), cleanup_signals=signals,
+-                   quiescent=clean and not live and not pending, survivors=survivors, unresolved=pending)
+-        result['retention_required'] = not row['quiescent']
+-        require(not result['retention_required'] and not timed_out and child.returncode == 0, name + ' failed/held')
+-
++                        live = scope.scan(cleanup_end)
++                        pending = scope.gap
++                        custody_unknown = not clean or bool(live) or bool(pending)
++                    except Exception as exc:
++                        custody_unknown = True
++                        row['cleanup_error_type'] = type(exc).__name__
++                # Physical cleanup and observation validity are distinct. An
++                # empty cleanup cannot clear an earlier failed RSS observation.
++                result['observation_unknown'] = (
++                    result.get('observation_unknown', False) or observation_unknown)
++                result['retention_required'] = (
++                    result['observation_unknown'] or custody_unknown)
++                row.update(quiescent=not custody_unknown, cleanup_signals=signals,
++                           survivors=live, unresolved=pending,
++                           observation_unknown=observation_unknown)
++                # Read evidence only after bounded cleanup has been attempted.
++                try:
++                    row.update(log_sha256=digest(logpath), log_bytes=logpath.stat().st_size)
++                except Exception as exc:
++                    io_failed = True
++                    row['log_evidence_error_type'] = type(exc).__name__
++        row.update(ended=utc().isoformat(), exit=child.poll(), deadline_or_interrupt=timed_out)
++        require(not result['retention_required'] and not timed_out and not io_failed
++                and child.returncode == 0, name + ' failed/held')
++
++    result_write_failed = False
+@@ -272,4 +303,9 @@
+-        with (OUT / 'result.json').open('x') as out:
+-            json.dump(result, out, indent=2)
+-            out.write('\n')
+-    return 3 if result['retention_required'] else result['exit']
++        try:
++            with (OUT / 'result.json').open('x') as out:
++                json.dump(result, out, indent=2)
++                out.write('\n')
++        except Exception:
++            # Missing evidence is never PASS. In particular, preserve the
++            # reserved UNKNOWN exit even when retain was not acknowledged.
++            result_write_failed = True
++    return 3 if result['retention_required'] else (2 if result_write_failed else result['exit'])
