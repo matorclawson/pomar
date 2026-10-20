@@ -128,7 +128,7 @@ func TestGoproxyCacheKeptWhileAttemptsAreLive(t *testing.T) {
 	}
 	m.cfg.Budgets = []cache.Budget{{Name: "goproxy", Prefix: "goproxy", Bytes: 1 << 20, Evict: true, Class: venue.ClassCache, KeepWhileLive: true}}
 	m.mu.Lock()
-	m.t.entries["live"] = &Entry{Attempt: "live", State: StateRunning}
+	m.t.entries["live"] = &Entry{Attempt: "live", State: StateRunning, ResultPolicy: m.resultPolicy()}
 	m.mu.Unlock()
 	rep, err := m.Caches(true)
 	if err != nil {
@@ -139,7 +139,18 @@ func TestGoproxyCacheKeptWhileAttemptsAreLive(t *testing.T) {
 	}
 	m.mu.Lock()
 	m.t.entries["live"].State = StateExited
+	m.freezeResult(m.t.entries["live"])
 	m.mu.Unlock()
+	// Terminal but unpublished evidence also pins the supporting cache.
+	rep, err = m.Caches(true)
+	if err != nil || len(rep.Evicted) != 0 {
+		t.Fatal("pending publication lost supporting cache", err)
+	}
+	if err := os.MkdirAll(filepath.Join(v.Root(), attemptsDir, "live"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	m.recoverResults(time.Now())
+
 	rep, err = m.Caches(true)
 	if err != nil {
 		t.Fatal(err)
