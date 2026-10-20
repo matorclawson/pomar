@@ -540,3 +540,69 @@ func TestCompletionRestartReacknowledgesIntentBeforePublication(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+func TestPublishedCompletionRestartRequiresDurableReacknowledgment(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	e, _ := prepareCompletion(t, m, "published-restart-reack")
+	m.recoverResults(time.Now())
+	if w := publicationRequest(m, e.Attempt); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	loaded, err := loadTable(m.t.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.t = loaded
+	if err := os.Mkdir(m.t.path+".tmp", 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Check the reader before and after the published branch attempts its save:
+	// each guard is independently necessary, even for an already complete pair.
+	if w := publicationRequest(m, e.Attempt); w.Code != 503 {
+		t.Fatalf("reader before reack: %d %s", w.Code, w.Body.String())
+	}
+	m.recoverResults(time.Now())
+	if w := publicationRequest(m, e.Attempt); w.Code != 503 {
+		t.Fatalf("reader after refused reack: %d %s", w.Code, w.Body.String())
+	}
+	if m.resultDisposable(*m.t.entries[e.Attempt]) {
+		t.Fatal("unacknowledged original became disposable")
+	}
+	if err := os.Remove(m.t.path + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	m.recoverResults(time.Now())
+	if w := publicationRequest(m, e.Attempt); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+func TestCompletionInRecordSymlinkIsCorruptAndRetained(t *testing.T) {
+	for _, name := range []string{result.DocName, result.SigName} {
+		t.Run(name, func(t *testing.T) {
+			m, _, _ := openSigning(t, true)
+			e, dir := prepareCompletion(t, m, "in-record-link")
+			doc := e.Publication.Intent.Document
+			if err := result.Publish(dir, doc, m.cfg.Signer.Sign(doc)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "planted")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("planted", filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+			m.recoverResults(time.Now())
+			if w := publicationRequest(m, e.Attempt); w.Code != 409 {
+				t.Fatalf("symlink must be corrupt: %d %s", w.Code, w.Body.String())
+			}
+			retained := *m.t.entries[e.Attempt]
+			if retained.Publication.State != "corrupt" || m.resultDisposable(retained) {
+				t.Fatal("symlink released custody", retained.Publication.State)
+			}
+			if err := m.Remove(e.Attempt); err == nil {
+				t.Fatal("corrupt evidence removed")
+			}
+		})
+	}
+}

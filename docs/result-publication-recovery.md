@@ -53,3 +53,18 @@ that descriptor. Table visibility after process restart is not treated as proof
 of a successful directory sync: retained completion intent is re-acknowledged
 before new publication or a successful modern-result response. A storage refusal
 keeps that original pending; it cannot be bypassed by loading the table again.
+
+Final result names must themselves be regular files naming the opened inode.
+An in-record symlink is conflicting evidence even when it currently resolves to
+identical bytes. The directory-scoped Go API can follow such links; containment
+alone is insufficient. The record directory identity check also rejects a
+mismatch between the non-following open and the rooted descriptor. Parents of
+the configured data root remain trusted host-owned configuration; this slice
+does not qualify arbitrary symlinked parent paths or physical power loss.
+
+Adoption requires draining attempts admitted by the previous manager before the
+upgrade: an empty legacy admission policy cannot be retroactively pinned.
+Legacy unsigned results without an admission-bound policy remain unknown (409).
+Do not downgrade while completion intents are unresolved: an older binary does
+not preserve the new recovery contract. Publication and admission policy must be
+included in the upgrade/rollback compatibility review.

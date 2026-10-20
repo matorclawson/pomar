@@ -207,12 +207,22 @@ func openRecord(dir string) (*os.Root, error) {
 	if err != nil {
 		return nil, err
 	}
-	after, err := root.Stat(".")
-	if err != nil || !os.SameFile(before, after) {
+	if err := recordIdentity(root, before); err != nil {
 		root.Close()
-		return nil, ErrConflict
+		return nil, err
 	}
 	return root, nil
+}
+
+// Verify that the rooted descriptor pins the same directory opened without
+// following its final component. Kept separate to exercise an actual mismatch
+// deterministically rather than claiming a probabilistic swap race proves it.
+func recordIdentity(root *os.Root, before fs.FileInfo) error {
+	after, err := root.Stat(".")
+	if err != nil || !os.SameFile(before, after) {
+		return ErrConflict
+	}
+	return nil
 }
 
 func syncRecord(root *os.Root) error {
@@ -314,7 +324,11 @@ func readRegular(root *os.Root, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !st.Mode().IsRegular() || st.Size() > 4<<20 {
+	// os.Root resolves in-root symlinks even with O_NOFOLLOW. Require the
+	// final directory entry itself to be regular and to name this opened inode;
+	// otherwise identical planted bytes could authorize a mutable symlink.
+	named, nameErr := root.Lstat(name)
+	if nameErr != nil || !named.Mode().IsRegular() || !os.SameFile(st, named) || !st.Mode().IsRegular() || st.Size() > 4<<20 {
 		return nil, ErrConflict
 	}
 	b, err := io.ReadAll(io.LimitReader(f, 4<<20+1))
