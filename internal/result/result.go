@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -168,28 +169,119 @@ func Write(dir string, doc, sig []byte) error {
 	return nil
 }
 
-func writeOnce(p string, b []byte) error {
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400)
-	if errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("%w: %s", ErrExists, p)
+// ErrConflict means retained bytes disagree. Never overwrite or retry as success.
+var ErrConflict = errors.New("result: conflicting evidence")
+
+// SyncDir makes namespace changes durable before publication can be acknowledged.
+func SyncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+// immutable installs a fully written and synced inode without replacing a name.
+// A lost acknowledgment is idempotent only when the retained bytes are identical.
+func immutable(p string, b []byte, identicalOK bool) error {
+	f, err := os.CreateTemp(filepath.Dir(p), ".result-pending-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err = f.Chmod(0400); err == nil {
+		_, err = f.Write(b)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
 	}
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(b)
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if err = os.Link(f.Name(), p); errors.Is(err, fs.ErrExist) {
+		if !identicalOK {
+			return fmt.Errorf("%w: %s", ErrExists, p)
+		}
+		old, readErr := readRegular(p)
+		if readErr != nil {
+			return readErr
+		}
+		if !bytes.Equal(old, b) {
+			return ErrConflict
+		}
+	} else if err != nil {
+		return err
 	}
-	return err
+	return SyncDir(filepath.Dir(p))
+}
+
+func writeOnce(p string, b []byte) error { return immutable(p, b, false) }
+
+// Publish completes the original exact document/signature, including recovery
+// after document-only publication or a lost reply. Caller supplies trusted frozen
+// bytes, not an imported manifest. Conflicts and foreign partials are preserved.
+func Publish(dir string, doc, sig []byte) error {
+	// Inspect BOTH names before publishing either; a conflicting signature must
+	// not cause an otherwise absent document to be installed.
+	for _, item := range []struct {
+		name string
+		data []byte
+	}{{DocName, doc}, {SigName, sig}} {
+		old, err := readRegular(filepath.Join(dir, item.name))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if item.data == nil || !bytes.Equal(old, item.data) {
+			return ErrConflict
+		}
+	}
+	if err := immutable(filepath.Join(dir, DocName), doc, true); err != nil {
+		return err
+	}
+	if sig != nil {
+		return immutable(filepath.Join(dir, SigName), sig, true)
+	}
+	return nil
+}
+
+// Bounded descriptor reads never follow a symlink or accept a FIFO/device.
+func readRegular(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, ErrConflict
+		}
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() || st.Size() > 4<<20 {
+		return nil, ErrConflict
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 4<<20+1))
+	if len(b) > 4<<20 {
+		return nil, ErrConflict
+	}
+	return b, err
 }
 
 // Read returns an attempt's document and signature (nil when unsigned).
 func Read(dir string) (doc, sig []byte, err error) {
-	doc, err = os.ReadFile(filepath.Join(dir, DocName))
+	doc, err = readRegular(filepath.Join(dir, DocName))
 	if err != nil {
 		return nil, nil, err
 	}
-	sig, err = os.ReadFile(filepath.Join(dir, SigName))
+	sig, err = readRegular(filepath.Join(dir, SigName))
 	if errors.Is(err, fs.ErrNotExist) {
 		return doc, nil, nil
 	}

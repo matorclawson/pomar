@@ -91,9 +91,16 @@ func TestCachesEvictOldestFirstThroughTheLedger(t *testing.T) {
 		{Attempt: "live", State: StateRunning},
 		{Attempt: "done2", State: StateFailed},
 	} {
+		e.ResultPolicy = m.resultPolicy()
+		if e.Terminal() {
+			m.freezeResult(e)
+		}
 		m.t.entries[e.Attempt] = e
 	}
 	m.mu.Unlock()
+	// Only completed, published records are eligible. Unresolved terminal records
+	// are now deliberately protected; this fixture supplies real completion intent.
+	m.recoverResults(time.Now())
 
 	dry, err := m.Caches(false)
 	if err != nil {

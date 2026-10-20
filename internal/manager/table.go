@@ -15,6 +15,7 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
+	"github.com/zeroemployeeorg/pomar/internal/result"
 )
 
 // State is an attempt's state as the manager knows it.
@@ -33,6 +34,11 @@ const (
 
 // Entry is one attempt.
 type Entry struct {
+	// ResultPolicy is frozen at admission; Publication is trusted completion intent.
+	ResultPolicy    ResultPolicy `json:"result_policy,omitzero"`
+	Publication     Publication  `json:"publication,omitzero"`
+	completionSaved bool
+
 	Attempt string   `json:"attempt"`
 	Command []string `json:"command"`
 	PID     int      `json:"pid"`
@@ -147,6 +153,7 @@ func loadTable(path string) (*table, error) {
 			e.HostCondition = capacity.ReasonHostDiskFull
 		}
 		e.DiskFull = false
+		e.completionSaved = e.Publication.Intent != nil
 		t.entries[e.Attempt] = e
 	}
 	return t, nil
@@ -178,7 +185,7 @@ func (t *table) save() error {
 	if err := os.Rename(tmp, t.path); err != nil {
 		return fmt.Errorf("manager: %w", err)
 	}
-	return nil
+	return result.SyncDir(filepath.Dir(t.path))
 }
 
 func (t *table) list() []Entry {

@@ -39,7 +39,7 @@ func (m *Manager) cachesLocked(apply bool) (CacheReport, error) {
 	}
 	anyLive := false
 	for _, e := range m.t.entries {
-		if !e.Terminal() {
+		if !e.Terminal() || !m.resultDisposable(*e) {
 			anyLive = true
 			break
 		}
@@ -67,6 +67,8 @@ func (m *Manager) cachesLocked(apply bool) (CacheReport, error) {
 				it.Keep = "not in the attempt table"
 			} else if !e.Terminal() {
 				it.Keep = "attempt is live"
+			} else if !m.resultDisposable(*e) {
+				it.Keep = "unresolved result publication"
 			}
 		case cache.Contains(o, open):
 			it.Keep = "holds an open object"

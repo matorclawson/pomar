@@ -5,10 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
-	"io/fs"
 	"net/http"
-	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/result"
@@ -110,25 +108,22 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 	return doc
 }
 
-// writeResult writes a terminal attempt's result document once, and signs it
-// when the manager has a key. A failure is an event, not a crash: the entry in
-// the table stays the record of the attempt.
+// writeResult is the in-process completion helper; it cannot import a caller
+// manifest. Production finish persists its own terminal observation and intent.
 func (m *Manager) writeResult(e Entry) {
-	dir := filepath.Join(m.cfg.Venue.Root(), attemptsDir, e.Attempt)
-	doc, err := result.Canonical(m.resultDoc(e))
-	if err == nil {
-		var sig []byte
-		if m.cfg.Signer != nil {
-			sig = m.cfg.Signer.Sign(doc)
+	m.mu.Lock()
+	if old := m.t.entries[e.Attempt]; old == nil {
+		m.freezeResult(&e)
+		m.t.entries[e.Attempt] = &e
+		if m.t.save() == nil {
+			e.completionSaved = true
 		}
-		err = result.Write(dir, doc, sig)
 	}
-	if err != nil {
-		m.event("result-error", e.Attempt, e.PID, err.Error())
-		return
-	}
-	m.event("result-written", e.Attempt, e.PID, map[bool]string{true: "signed", false: "unsigned"}[m.cfg.Signer != nil])
+	m.mu.Unlock()
+	m.recoverResults(time.Now())
 }
+
+func encodeSignature(sig []byte) string { return base64.StdEncoding.EncodeToString(sig) }
 
 // ResultReply is the body of GET /v1/attempts/{id}/result: the document as
 // written (verify these exact bytes), its signature, and the key's id.
@@ -152,21 +147,35 @@ func (m *Manager) resultRoutes(mux *http.ServeMux) {
 			reply(w, http.StatusBadRequest, map[string]string{"error": "invalid attempt id"})
 			return
 		}
-		doc, sig, err := result.Read(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id))
-		if errors.Is(err, fs.ErrNotExist) {
-			reply(w, http.StatusNotFound, map[string]string{"error": "no result for " + id})
+		m.mu.Lock()
+		e := m.t.entries[id]
+		if e == nil {
+			m.mu.Unlock()
+			reply(w, http.StatusNotFound, map[string]string{"error": "no_result"})
 			return
 		}
-		if err != nil {
-			reply(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		out := ResultReply{Result: doc}
-		if sig != nil {
-			out.Signature = base64.StdEncoding.EncodeToString(sig)
-			if m.cfg.Signer != nil {
-				out.KeyID = m.cfg.Signer.ID
+		out, status, code := m.publicationRead(*e)
+		publicationState, publicationError := e.Publication.State, e.Publication.Error
+		nextRetry := e.Publication.NextRetry
+		m.mu.Unlock()
+		if status != http.StatusOK {
+			retryable := status == http.StatusServiceUnavailable
+			if retryable {
+				delay := min(60, max(1, int((time.Until(nextRetry)+time.Second-1)/time.Second)))
+				w.Header().Set("Retry-After", strconv.Itoa(delay))
 			}
+			state := publicationState
+			if state == "" {
+				state = "unknown"
+			}
+			if retryable {
+				state = "pending"
+			}
+			if publicationError == "" {
+				publicationError = code
+			}
+			reply(w, status, map[string]any{"error": code, "result_state": state, "retryable": retryable, "reason_code": publicationError})
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

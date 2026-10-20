@@ -59,13 +59,14 @@ func TestFinishRecordsAndServesTheLog(t *testing.T) {
 	os.MkdirAll(rec, 0o700)
 	os.WriteFile(filepath.Join(rec, logName), []byte("line one\nline two\n"), 0o600)
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State, e.ExitCode = StateRunning, nil
 	m.mu.Lock()
 	m.t.entries[id] = &e
 	m.mu.Unlock()
 
 	// Live: no result yet, so nothing to check a log against.
-	if _, _, _, err := ctl.Log(id, nil); err == nil || !strings.Contains(err.Error(), "no result for "+id) {
+	if _, _, _, err := ctl.Log(id, nil); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("a live attempt's log: %v", err)
 	}
 	code := 0
@@ -105,6 +106,7 @@ func TestLogIsCheckedAgainstTheSignedResult(t *testing.T) {
 	os.MkdirAll(rec, 0o700)
 	os.WriteFile(filepath.Join(rec, logName), []byte("green\n"), 0o600)
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State, e.ExitCode = StateRunning, nil
 	m.mu.Lock()
 	m.t.entries[id] = &e
@@ -134,7 +136,7 @@ func TestLogIsCheckedAgainstTheSignedResult(t *testing.T) {
 	m.t.entries[id].Log.SHA256 = sha("red!!\n")
 	m.mu.Unlock()
 	for _, key := range [][]byte{pub, nil} {
-		if _, _, _, err := ctl.Log(id, key); err == nil || !strings.Contains(err.Error(), "its result records") {
+		if _, _, _, err := ctl.Log(id, key); err == nil || !strings.Contains(err.Error(), "result_corrupt") {
 			t.Fatalf("a log that matches its header but not its result (key %v): %v", key != nil, err)
 		}
 	}
