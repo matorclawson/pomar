@@ -281,7 +281,19 @@ func (h *SessionHost) Stop(operation, principal, id string) (StopReport, error) 
 			// Architect's review of #128's stack, M1): confirm the group
 			// this PTY's own slave side currently has is still exactly
 			// this one before ever signalling it.
-			if pg, err := foregroundPgrp(s.master); err == nil && pg == pgid {
+			//
+			// s.reaped closing and pump's own EIO (host.go) are two
+			// independent observers of the same process death, racing with
+			// no order between them: pump can already be closing s.master
+			// here. s.mu (also guarding pump's own close below) serializes
+			// the two; a closed fd still answers with an error here, which
+			// the existing err == nil check already treats as "don't
+			// signal" -- the lock only removes the data race, not the
+			// logic, which was already correct for a closed master.
+			s.mu.Lock()
+			pg, pgErr := foregroundPgrp(s.master)
+			s.mu.Unlock()
+			if pgErr == nil && pg == pgid {
 				syscall.Kill(-pgid, sig)
 			}
 		default:
@@ -394,14 +406,19 @@ type TermSession struct {
 	ID, Name, Kind string
 	Program, Dir   string // the program's path and working directory: metadata, never its arguments or environment
 	host           *SessionHost
-	master         *os.File
-	tty            string
-	cmd            *exec.Cmd
-	writes         chan pendingWrite
-	done           chan struct{} // closed once the program has exited and its output is drained
-	reaped         chan struct{} // closed once the program's leader is reaped: its pid is free from then on
-	waitErr        error         // the leader's wait, set before reaped closes
-	groupSurvived  bool          // a group member outlived the leader and was killed for it; set before reaped closes
+	// master's own Read/Write calls are confined to pump/writer and need no
+	// lock; its close (pump) and its Fd()-based use after s.reaped (Stop's
+	// signal closure, via foregroundPgrp) are independent observers of the
+	// same process-death event with no order between them otherwise, so
+	// those two sites take mu.
+	master        *os.File
+	tty           string
+	cmd           *exec.Cmd
+	writes        chan pendingWrite
+	done          chan struct{} // closed once the program has exited and its output is drained
+	reaped        chan struct{} // closed once the program's leader is reaped: its pid is free from then on
+	waitErr       error         // the leader's wait, set before reaped closes
+	groupSurvived bool          // a group member outlived the leader and was killed for it; set before reaped closes
 
 	mu         sync.Mutex
 	fence      *sync.Cond          // signalled when an in-flight write ends
@@ -531,7 +548,13 @@ func (s *TermSession) pump() {
 	}
 	s.mu.Unlock()
 	close(s.writes)
+	// s.mu here pairs with Stop's own signal closure reading s.master.Fd()
+	// (via foregroundPgrp) once s.reaped closes: both are independent
+	// observers of this same process death, with no order between them
+	// otherwise.
+	s.mu.Lock()
 	s.master.Close()
+	s.mu.Unlock()
 	s.host.forget(s.ID) // an exited session no longer counts against the live bound
 	s.host.record(AuditRecord{Operation: newID(), Action: "exit", Phase: "outcome", Session: s.ID, Outcome: "ok", Reason: fmt.Sprintf("exit %d", code)})
 	close(s.done) // after the exit is journaled, so whoever sees Done finds it
