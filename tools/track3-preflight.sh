@@ -123,13 +123,33 @@ preflight() {
     echo "uv on PATH: $uv_path ($("$uv_path" --version 2>&1))"
     required_python=$(awk -F'"' '/^requires-python/{print $2; exit}' "$repo/pyproject.toml" 2>/dev/null || echo NOT-INSPECTED)
     echo "zeocore requires-python: $required_python"
+    # pomar's review: this check may consult the network or uv's own cache,
+    # so an unresponsive network/registry must not hang this (or any caller's
+    # mandatory) run indefinitely. Bounded to uv_timeout seconds, with the
+    # child process killed (not merely abandoned) on timeout; the `exec`
+    # inside the subshell replaces it with uv itself, so `$!` names the
+    # actual child to kill, never an already-exited wrapper shell.
+    uv_timeout=${TRACK3_UV_TIMEOUT:-30}
     lockcheck=$(mktemp)
-    if (cd "$repo" && "$uv_path" lock --check >"$lockcheck" 2>&1); then
+    (cd "$repo" && exec "$uv_path" lock --check >"$lockcheck" 2>&1) &
+    uv_pid=$!
+    uv_waited=0
+    while kill -0 "$uv_pid" 2>/dev/null && [ "$uv_waited" -lt "$uv_timeout" ]; do
+      sleep 1
+      uv_waited=$((uv_waited + 1))
+    done
+    lock_reason=""
+    if kill -0 "$uv_pid" 2>/dev/null; then
+      kill "$uv_pid" 2>/dev/null || true
+      wait "$uv_pid" 2>/dev/null || true
+      lock_consistency=NOT-CONFIGURED
+      lock_reason=" (timed out after ${uv_timeout}s, killed)"
+    elif wait "$uv_pid"; then
       lock_consistency=VERIFIED
     else
       lock_consistency=NOT-CONFIGURED
     fi
-    echo "uv_lock_consistency_with_pyproject (uv lock --check; may consult network/cache, not a bounded offline check, and does not prove an installed environment): $lock_consistency"
+    echo "uv_lock_consistency_with_pyproject (uv lock --check; may consult network/cache, not a bounded offline check, bounded to ${uv_timeout}s, and does not prove an installed environment): $lock_consistency$lock_reason"
     rm -f "$lockcheck"
   fi
 
