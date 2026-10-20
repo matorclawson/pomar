@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 )
@@ -145,6 +146,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			reply(w, http.StatusNotFound, map[string]string{"error": "no attempt " + id})
 			return
 		}
+		e.Progress = m.progressOf(e, time.Now())
 		reply(w, http.StatusOK, e)
 	}))
 	mux.HandleFunc("POST /v1/attempts", func(w http.ResponseWriter, r *http.Request) {

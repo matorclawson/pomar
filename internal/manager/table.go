@@ -82,6 +82,9 @@ type Entry struct {
 	// Peaks is what the attempt was measured to use.
 	Peaks Peaks `json:"peaks,omitzero"`
 
+	// Progress is populated only on the existing authorized GET response.
+	Progress *AttemptProgress `json:"progress,omitempty"`
+
 	freeAtStart int64     // the data root's free space when first sampled
 	lastSample  time.Time // the last footprint reading
 }
