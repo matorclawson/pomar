@@ -163,3 +163,114 @@ func TestRecordIdentityRejectsDifferentOpenedDirectory(t *testing.T) {
 		t.Fatal("matching identity refused", err)
 	}
 }
+
+func TestOpenRecordRefusesDirectorySubstitutedBetweenOpens(t *testing.T) {
+	parent := t.TempDir()
+	dir, saved, replacement := filepath.Join(parent, "record"), filepath.Join(parent, "saved"), filepath.Join(parent, "replacement")
+	for _, name := range []string{dir, replacement} {
+		if err := os.Mkdir(name, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := openRecordAfterGuard(dir, func() {
+		if err := os.Rename(dir, saved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, dir); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if root != nil {
+		root.Close()
+	}
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("substituted directory passed actual two-open sequence: %v", err)
+	}
+	for _, name := range []string{dir, saved} {
+		entries, err := os.ReadDir(name)
+		if err != nil || len(entries) != 0 {
+			t.Fatal("substitution wrote publication bytes", err)
+		}
+	}
+}
+
+func TestReadRegularRejectsSubstitutionBetweenOpenAndValidation(t *testing.T) {
+	for _, name := range []string{DocName, SigName} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			approved, planted := []byte("frozen approved bytes"), []byte("planted bytes")
+			if err := os.WriteFile(filepath.Join(dir, "approved"), approved, 0400); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "planted"), planted, 0400); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("planted", filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			got, err := readRegularAfterOpen(root, name, func() {
+				// os.Root opened the in-record symlink's target. Before validation,
+				// restore a regular approved final name: IsRegular alone now passes.
+				if err := root.Remove(name); err != nil {
+					t.Fatal(err)
+				}
+				if err := root.Rename("approved", name); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if !errors.Is(err, ErrConflict) || len(got) != 0 {
+				t.Fatalf("opened planted inode escaped validation: %q %v", got, err)
+			}
+			retained, err := root.ReadFile(name)
+			if err != nil || !bytes.Equal(retained, approved) {
+				t.Fatal("approved final name changed", err)
+			}
+		})
+	}
+}
+
+func TestReadRegularRetainsTransientNamedStatError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, DocName), []byte("frozen"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	defer os.Chmod(dir, 0700)
+	_, err = readRegularAfterOpen(root, DocName, func() {
+		if err := os.Chmod(dir, 0000); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !errors.Is(err, os.ErrPermission) || errors.Is(err, ErrConflict) {
+		t.Fatalf("transient Lstat refusal became conflicting evidence: %v", err)
+	}
+}
+
+func TestReadRegularRefusesFinalNameRemovedAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, DocName), []byte("frozen"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	got, err := readRegularAfterOpen(root, DocName, func() {
+		if err := root.Remove(DocName); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !errors.Is(err, ErrConflict) || len(got) != 0 {
+		t.Fatalf("missing final name yielded a publication: %q %v", got, err)
+	}
+}

@@ -191,6 +191,12 @@ func SyncDir(dir string) error {
 // File-only O_NOFOLLOW is insufficient when the record directory is a symlink.
 // Compare the two opened identities so a replaced path fails closed.
 func openRecord(dir string) (*os.Root, error) {
+	return openRecordAfterGuard(dir, nil)
+}
+
+// The local callback exposes only a deterministic filesystem fault boundary to
+// package tests. Production always supplies nil; no mutable global or API knob.
+func openRecordAfterGuard(dir string, afterGuard func()) (*os.Root, error) {
 	guard, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
@@ -202,6 +208,9 @@ func openRecord(dir string) (*os.Root, error) {
 	before, err := guard.Stat()
 	if err != nil {
 		return nil, err
+	}
+	if afterGuard != nil {
+		afterGuard()
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -309,6 +318,10 @@ func Publish(dir string, doc, sig []byte) error {
 
 // Bounded descriptor reads never follow a symlink or accept a FIFO/device.
 func readRegular(root *os.Root, name string) ([]byte, error) {
+	return readRegularAfterOpen(root, name, nil)
+}
+
+func readRegularAfterOpen(root *os.Root, name string, afterOpen func()) ([]byte, error) {
 	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
@@ -320,6 +333,9 @@ func readRegular(root *os.Root, name string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
+	if afterOpen != nil {
+		afterOpen()
+	}
 	st, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -328,7 +344,15 @@ func readRegular(root *os.Root, name string) ([]byte, error) {
 	// final directory entry itself to be regular and to name this opened inode;
 	// otherwise identical planted bytes could authorize a mutable symlink.
 	named, nameErr := root.Lstat(name)
-	if nameErr != nil || !named.Mode().IsRegular() || !os.SameFile(st, named) || !st.Mode().IsRegular() || st.Size() > 4<<20 {
+	if nameErr != nil {
+		if errors.Is(nameErr, fs.ErrNotExist) {
+			// A name disappearing after its successful open is a conflicting
+			// final-entry observation. Other failures can be transient storage.
+			return nil, ErrConflict
+		}
+		return nil, nameErr
+	}
+	if !named.Mode().IsRegular() || !os.SameFile(st, named) || !st.Mode().IsRegular() || st.Size() > 4<<20 {
 		return nil, ErrConflict
 	}
 	b, err := io.ReadAll(io.LimitReader(f, 4<<20+1))
