@@ -310,10 +310,7 @@ func (m *Manager) recoverResults(now time.Time) {
 			p.State, p.Error = "published", ""
 		}
 		if p.State == "published" {
-			_, status, _ := m.publicationRead(*e)
-			if status != http.StatusOK {
-				p.State, p.Error = "corrupt", "publication_readback_failed"
-			}
+			m.checkPublicationReadback(e)
 		}
 		p.Attempts++
 		delay := time.Second << min(p.Attempts-1, 6)
@@ -334,5 +331,18 @@ func (m *Manager) recoverResults(now time.Time) {
 			m.event("result-written", e.Attempt, e.PID, p.Intent.Policy.Mode)
 			m.teardownVM(e.Attempt)
 		}
+	}
+}
+
+// checkPublicationReadback classifies the actual existing authorized reader,
+// after publication and before any custody release.
+func (m *Manager) checkPublicationReadback(e *Entry) {
+	_, status, _ := m.publicationRead(*e)
+	if status == http.StatusConflict {
+		e.Publication.State, e.Publication.Error = "corrupt", "publication_readback_failed"
+	} else if status != http.StatusOK {
+		// A transient reader/storage refusal is not evidence of conflicting
+		// bytes. Preserve the original intent and custody for later retry.
+		e.Publication.State, e.Publication.Error = "pending", "storage_unavailable"
 	}
 }

@@ -606,3 +606,80 @@ func TestCompletionInRecordSymlinkIsCorruptAndRetained(t *testing.T) {
 		})
 	}
 }
+
+func TestPublicationReadbackStorageFailureRemainsRetryable(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	e, dir := prepareCompletion(t, m, "readback-storage-refusal")
+	m.recoverResults(time.Now())
+	retained := m.t.entries[e.Attempt]
+	if retained.Publication.State != "published" {
+		t.Fatal(retained.Publication.State)
+	}
+	// Actual EACCES during the final publication readback, not conflicting bytes.
+	// Run through the same classifier called before publication custody release.
+	name := filepath.Join(dir, result.DocName)
+	if err := os.Chmod(name, 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(name, 0400)
+	m.checkPublicationReadback(retained)
+	if retained.Publication.State != "pending" || retained.Publication.Error != "storage_unavailable" {
+		t.Fatalf("transient storage refusal became permanent: %s %s", retained.Publication.State, retained.Publication.Error)
+	}
+	if w := publicationRequest(m, e.Attempt); w.Code != 503 {
+		t.Fatalf("storage failure must be public503: %d %s", w.Code, w.Body.String())
+	}
+	if m.resultDisposable(*retained) {
+		t.Fatal("storage-inaccessible result became disposable")
+	}
+	if err := m.t.save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadTable(m.t.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.t = loaded
+	if err := os.Chmod(name, 0400); err != nil {
+		t.Fatal(err)
+	}
+	// Already-complete original reconciles after restart without private signer.
+	m.cfg.Signer = nil
+	m.recoverResults(time.Now().Add(2 * time.Second))
+	if w := publicationRequest(m, e.Attempt); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if len(m.List()) != 1 {
+		t.Fatal("recovery created another execution")
+	}
+}
+
+func TestPublicationReadbackConflictNeverBecomesRetryable(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	e, dir := prepareCompletion(t, m, "readback-corrupt-proof")
+	m.recoverResults(time.Now())
+	name := filepath.Join(dir, result.SigName)
+	if err := os.Chmod(name, 0600); err != nil {
+		t.Fatal(err)
+	}
+	bad := []byte("malformed retained signature")
+	if err := os.WriteFile(name, bad, 0400); err != nil {
+		t.Fatal(err)
+	}
+	retained := m.t.entries[e.Attempt]
+	m.checkPublicationReadback(retained)
+	if retained.Publication.State != "corrupt" {
+		t.Fatal("conflicting proof became retryable", retained.Publication.State)
+	}
+	if w := publicationRequest(m, e.Attempt); w.Code != 409 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	m.recoverResults(time.Now().Add(time.Minute))
+	got, err := os.ReadFile(name)
+	if err != nil || !bytes.Equal(got, bad) {
+		t.Fatal("corrupt proof overwritten", err)
+	}
+	if m.resultDisposable(*retained) {
+		t.Fatal("corrupt proof released custody")
+	}
+}
