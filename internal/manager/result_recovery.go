@@ -188,6 +188,9 @@ func (m *Manager) publicationRead(e Entry) (ResultReply, int, string) {
 	} else if p.Intent == nil || policy.Mode != "unsigned-development" || len(sig) != 0 {
 		return out, http.StatusConflict, "result_corrupt"
 	}
+	if p.Intent != nil && !e.completionSaved {
+		return ResultReply{}, http.StatusServiceUnavailable, "result_pending"
+	}
 	out.Result = doc
 	return out, http.StatusOK, ""
 }
@@ -228,6 +231,17 @@ func (m *Manager) recoverResults(now time.Time) {
 		m.resultCursor = (index + 1) % len(entries)
 		if p.State == "published" {
 			count++
+			if !validIntent(*e) {
+				p.State, p.Error = "corrupt", "completion_intent_invalid"
+				_ = m.t.save()
+				continue
+			}
+			if !e.completionSaved {
+				if m.t.save() != nil {
+					continue
+				}
+				e.completionSaved = true
+			}
 			_, status, _ := m.publicationRead(*e)
 			if status == http.StatusConflict {
 				p.State, p.Error = "corrupt", "published_evidence_changed"
@@ -237,12 +251,7 @@ func (m *Manager) recoverResults(now time.Time) {
 			if status != http.StatusOK {
 				continue
 			}
-			if !e.completionSaved {
-				if m.t.save() != nil {
-					continue
-				}
-				e.completionSaved = true
-			}
+
 			m.teardownVM(e.Attempt)
 			continue
 		}

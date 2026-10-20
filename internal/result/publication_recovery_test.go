@@ -79,3 +79,19 @@ func TestPublicationRefusesSymlinkWithoutChangingTarget(t *testing.T) {
 		t.Fatal("target changed")
 	}
 }
+
+func TestPublicationRefusesSymlinkRecordDirectory(t *testing.T) {
+	outside := t.TempDir()
+	link := filepath.Join(t.TempDir(), "record")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	err := Publish(link, []byte(`{"attempt":"original"}`), []byte("proof"))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("symlink record accepted: %v", err)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("publication wrote outside its record", err)
+	}
+}

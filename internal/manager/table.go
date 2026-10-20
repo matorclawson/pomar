@@ -153,7 +153,9 @@ func loadTable(path string) (*table, error) {
 			e.HostCondition = capacity.ReasonHostDiskFull
 		}
 		e.DiskFull = false
-		e.completionSaved = e.Publication.Intent != nil
+		// Visibility after restart is not proof that a prior directory sync succeeded.
+		// Re-acknowledge retained intent before publishing or serving a new proof.
+		e.completionSaved = false
 		t.entries[e.Attempt] = e
 	}
 	return t, nil

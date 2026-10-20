@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"github.com/zeroemployeeorg/pomar/internal/cache"
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
@@ -483,5 +484,59 @@ func TestCompletionRoundRobinDoesNotStarveLaterOriginal(t *testing.T) {
 	}
 	if w := publicationRequest(m, "publication-19"); w.Code != 200 {
 		t.Fatal("later original starved", w.Code, w.Body.String())
+	}
+}
+
+func TestCompletionRestartReacknowledgesIntentBeforePublication(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	e, dir := prepareCompletion(t, m, "rename-before-dir-sync")
+	// Model a process cut after the fsynced table inode is renamed but BEFORE
+	// its parent directory is synced. Visibility on process restart does not prove
+	// that namespace transition survived a storage/power fault. No power-loss
+	// claim is made by this fixture.
+	body, err := json.Marshal(m.t.list())
+	if err != nil {
+		t.Fatal(err)
+	}
+	temp := m.t.path + ".before-dir-sync"
+	f, err := os.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(temp, m.t.path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadTable(m.t.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.t = loaded
+	// A real storage refusal prevents re-acknowledgment. Publication must remain
+	// pending even though the newly renamed table was visible to the reader.
+	if err := os.Mkdir(m.t.path+".tmp", 0700); err != nil {
+		t.Fatal(err)
+	}
+	m.recoverResults(time.Now())
+	if w := publicationRequest(m, e.Attempt); w.Code != 503 {
+		t.Fatalf("unacknowledged restart must stay pending, got%d:%s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, result.DocName)); !os.IsNotExist(err) {
+		t.Fatal("published before durable restart acknowledgment")
+	}
+	if err := os.Remove(m.t.path + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	m.recoverResults(time.Now())
+	if w := publicationRequest(m, e.Attempt); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }

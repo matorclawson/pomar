@@ -46,3 +46,10 @@ After successful durable publication, the existing record-retention rules apply.
 Manual administrator deletion outside the supported APIs cannot be prevented by
 this mechanism. Release authorization and deployment receipts remain consumer
 responsibilities.
+
+The opened record directory is checked without following its final symlink and
+pinned by descriptor; staging, reads and no-overwrite links stay relative to
+that descriptor. Table visibility after process restart is not treated as proof
+of a successful directory sync: retained completion intent is re-acknowledged
+before new publication or a successful modern-result response. A storage refusal
+keeps that original pending; it cannot be bypassed by loading the table again.

@@ -160,11 +160,16 @@ func Verify(pub ed25519.PublicKey, doc, sig []byte) bool {
 // Write puts the document, and its signature when there is one, into dir, each
 // at mode 0400 and each only if it does not exist yet.
 func Write(dir string, doc, sig []byte) error {
-	if err := writeOnce(filepath.Join(dir, DocName), doc); err != nil {
+	root, err := openRecord(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := immutable(root, DocName, doc, false); err != nil {
 		return err
 	}
 	if sig != nil {
-		return writeOnce(filepath.Join(dir, SigName), sig)
+		return immutable(root, SigName, sig, false)
 	}
 	return nil
 }
@@ -182,17 +187,57 @@ func SyncDir(dir string) error {
 	return f.Sync()
 }
 
-// immutable installs a fully written and synced inode without replacing a name.
-// A lost acknowledgment is idempotent only when the retained bytes are identical.
-func immutable(p string, b []byte, identicalOK bool) error {
-	f, err := os.CreateTemp(filepath.Dir(p), ".result-pending-")
+// Pin the record directory itself before touching any final or staging path.
+// File-only O_NOFOLLOW is insufficient when the record directory is a symlink.
+// Compare the two opened identities so a replaced path fails closed.
+func openRecord(dir string) (*os.Root, error) {
+	guard, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
+			return nil, ErrConflict
+		}
+		return nil, err
+	}
+	defer guard.Close()
+	before, err := guard.Stat()
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	after, err := root.Stat(".")
+	if err != nil || !os.SameFile(before, after) {
+		root.Close()
+		return nil, ErrConflict
+	}
+	return root, nil
+}
+
+func syncRecord(root *os.Root) error {
+	f, err := root.Open(".")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(f.Name())
-	if err = f.Chmod(0400); err == nil {
-		_, err = f.Write(b)
+	defer f.Close()
+	return f.Sync()
+}
+
+// A random exclusive staging name and all subsequent operations remain relative
+// to the pinned directory descriptor, even if its pathname is replaced.
+func immutable(root *os.Root, name string, b []byte, identicalOK bool) error {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
 	}
+	temp := ".result-pending-" + hex.EncodeToString(nonce[:])
+	f, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0400)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(temp)
+	_, err = f.Write(b)
 	if err == nil {
 		err = f.Sync()
 	}
@@ -202,11 +247,11 @@ func immutable(p string, b []byte, identicalOK bool) error {
 	if err != nil {
 		return err
 	}
-	if err = os.Link(f.Name(), p); errors.Is(err, fs.ErrExist) {
+	if err = root.Link(temp, name); errors.Is(err, fs.ErrExist) {
 		if !identicalOK {
-			return fmt.Errorf("%w: %s", ErrExists, p)
+			return fmt.Errorf("%w: %s", ErrExists, name)
 		}
-		old, readErr := readRegular(p)
+		old, readErr := readRegular(root, name)
 		if readErr != nil {
 			return readErr
 		}
@@ -216,22 +261,23 @@ func immutable(p string, b []byte, identicalOK bool) error {
 	} else if err != nil {
 		return err
 	}
-	return SyncDir(filepath.Dir(p))
+	return syncRecord(root)
 }
-
-func writeOnce(p string, b []byte) error { return immutable(p, b, false) }
 
 // Publish completes the original exact document/signature, including recovery
 // after document-only publication or a lost reply. Caller supplies trusted frozen
 // bytes, not an imported manifest. Conflicts and foreign partials are preserved.
 func Publish(dir string, doc, sig []byte) error {
-	// Inspect BOTH names before publishing either; a conflicting signature must
-	// not cause an otherwise absent document to be installed.
+	root, err := openRecord(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for _, item := range []struct {
 		name string
 		data []byte
 	}{{DocName, doc}, {SigName, sig}} {
-		old, err := readRegular(filepath.Join(dir, item.name))
+		old, err := readRegular(root, item.name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -242,20 +288,23 @@ func Publish(dir string, doc, sig []byte) error {
 			return ErrConflict
 		}
 	}
-	if err := immutable(filepath.Join(dir, DocName), doc, true); err != nil {
+	if err := immutable(root, DocName, doc, true); err != nil {
 		return err
 	}
 	if sig != nil {
-		return immutable(filepath.Join(dir, SigName), sig, true)
+		return immutable(root, SigName, sig, true)
 	}
 	return nil
 }
 
 // Bounded descriptor reads never follow a symlink or accept a FIFO/device.
-func readRegular(p string) ([]byte, error) {
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+func readRegular(root *os.Root, name string) ([]byte, error) {
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
+			return nil, ErrConflict
+		}
+		if fi, statErr := root.Lstat(name); statErr == nil && fi.Mode()&fs.ModeSymlink != 0 {
 			return nil, ErrConflict
 		}
 		return nil, err
@@ -277,11 +326,16 @@ func readRegular(p string) ([]byte, error) {
 
 // Read returns an attempt's document and signature (nil when unsigned).
 func Read(dir string) (doc, sig []byte, err error) {
-	doc, err = readRegular(filepath.Join(dir, DocName))
+	root, err := openRecord(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	sig, err = readRegular(filepath.Join(dir, SigName))
+	defer root.Close()
+	doc, err = readRegular(root, DocName)
+	if err != nil {
+		return nil, nil, err
+	}
+	sig, err = readRegular(root, SigName)
 	if errors.Is(err, fs.ErrNotExist) {
 		return doc, nil, nil
 	}
