@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import PomarHostCore
 
@@ -98,7 +99,7 @@ import Foundation
         + "mkdir -p /etc/profile.d; printf '%s\\n' 'export PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' > /etc/profile.d/pomar-agent.sh; chmod 644 /etc/profile.d/pomar-agent.sh; "
         + "chmod 700 /var/lib/pomar-agent /run/pomar; rm -f /run/pomar/agent.sock; "
         + "if [ ! -e /var/lib/pomar-agent/workspace-created ]; then "
-        + "git init -q /work; git -C /work fetch -q --tags /pomar/source.bundle HEAD; "
+        + "git init -q /work; git -C /work fetch -q --tags /pomar/source.bundle 'refs/heads/*:refs/remotes/origin/*'; "
         + "git -C /work -c advice.detachedHead=false checkout -q --detach " + sha + "; "
         + "test \"$(git -C /work rev-parse HEAD)\" = " + sha + "; "
         + "chown -R 1000:1000 /work /pomar/job; touch /var/lib/pomar-agent/workspace-created; fi; "
@@ -187,4 +188,91 @@ import Foundation
     #expect(seat.contains("test \"$(getent group 1001)\" = 'pomar-terminal:x:1001:'"))
     #expect(!AgentEnvironment.setupCommand(sourceSHA: sha)[2].contains("pomar-terminal"))
     #expect(!AgentEnvironment.setupCommand(sourceSHA: sha, agent: "claude", codexSeat: true)[2].contains("pomar-terminal"))
+}
+
+// POMAR-CC-SOW-37: a real, not just string-level, regression for the
+// missing-HEAD bundle bug. internal/mirror.Bundle records a bundle's ref
+// under its own branch name, never a literal "HEAD" -- the real guest's
+// setup script ("git fetch ... HEAD") failed against exactly that shape
+// with "couldn't find remote ref HEAD" (confirmed directly against a live
+// guest this session, vm.log). This test takes the ACTUAL generated setup
+// script from AgentEnvironment.setupCommand -- not a hand-typed stand-in
+// -- redirects its hardcoded /work and /pomar/source.bundle paths into a
+// real temp sandbox, and runs the real init/fetch/checkout sequence
+// against a real branch-only bundle. If the fetch line in the real source
+// regresses to the literal "HEAD" form, this test fails for real, because
+// it executes whatever setupCommand actually emits, not a copy of it.
+@Test func bundleFetchSurvivesABranchOnlyBundleWithoutALiteralHEAD() throws {
+    func run(_ args: [String], cwd: String) throws -> Int32 {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["git"] + args
+        p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        p.waitUntilExit()
+        return p.terminationStatus
+    }
+    func shell(_ command: String, cwd: String) throws -> (Int32, String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", command]
+        p.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        try p.run()
+        p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+    }
+
+    let root = NSTemporaryDirectory() + "pcc-bundle-regress-\(UUID().uuidString)"
+    try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: root) }
+
+    let source = root + "/source"
+    try FileManager.default.createDirectory(atPath: source, withIntermediateDirectories: true)
+    #expect(try run(["init", "-q", "-b", "feature/pcc-bundle-test"], cwd: source) == 0)
+    #expect(try run(["config", "user.email", "t@example.com"], cwd: source) == 0)
+    #expect(try run(["config", "user.name", "t"], cwd: source) == 0)
+    try "x".write(toFile: source + "/f", atomically: true, encoding: .utf8)
+    #expect(try run(["add", "f"], cwd: source) == 0)
+    #expect(try run(["commit", "-q", "-m", "c1"], cwd: source) == 0)
+    let head = try {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        p.arguments = ["git", "rev-parse", "HEAD"]
+        p.currentDirectoryURL = URL(fileURLWithPath: source)
+        let pipe = Pipe(); p.standardOutput = pipe
+        try p.run(); p.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)!.trimmingCharacters(in: .whitespacesAndNewlines)
+    }()
+
+    // Exactly what internal/mirror.Bundle produces: a bundle whose only ref
+    // is the branch name, never a literal HEAD.
+    let bundle = root + "/source.bundle"
+    #expect(try run(["bundle", "create", "-q", bundle, "refs/heads/feature/pcc-bundle-test"], cwd: source) == 0)
+
+    // The REAL generated script, not a hand-typed copy: if the source
+    // regresses, this string -- and therefore this test -- changes with it.
+    let fullScript = AgentEnvironment.setupCommand(sourceSHA: head)[2]
+    guard let startRange = fullScript.range(of: "git init -q /work;"),
+          let endRange = fullScript.range(of: "; chown -R 1000:1000")
+    else {
+        Issue.record("could not locate the workspace-setup segment in the real generated script")
+        return
+    }
+    var segment = String(fullScript[startRange.lowerBound..<endRange.lowerBound])
+    let work = root + "/work"
+    try FileManager.default.createDirectory(atPath: work, withIntermediateDirectories: true)
+    segment = segment.replacingOccurrences(of: "/work", with: work)
+    segment = segment.replacingOccurrences(of: "/pomar/source.bundle", with: bundle)
+
+    let (status, output) = try shell(segment, cwd: root)
+    #expect(status == 0, "the real generated setup script must succeed against a real branch-only bundle: \(output)")
+    let (rev, _) = try shell("git -C \(work) rev-parse HEAD", cwd: root)
+    #expect(rev == 0)
 }
