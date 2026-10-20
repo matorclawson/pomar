@@ -164,11 +164,20 @@ preflight() {
   scratch_reason=""
   while [ -n "$walk" ]; do
     perm=$(stat -L -f '%Sp' "$walk" 2>/dev/null) || perm=$(stat -L -c '%A' "$walk" 2>/dev/null) || perm=""
-    if [ -z "$perm" ] || [ ${#perm} -lt 10 ]; then
-      scratch_status=NOT-CONFIGURED
-      scratch_reason="$walk: could not read permission metadata (stat unavailable or unparseable)"
-      break
-    fi
+    # pomar's re-review of pr#142 round 2: length alone is not parse
+    # validation -- a 10-byte stream of e.g. "??????????" passes the old
+    # `${#perm} -lt 10` check while carrying no real permission bits. Match
+    # the actual ls-style grammar (file-type char, then three rwx triads,
+    # each tolerating the usual s/S/t/T special-bit substitutions) before
+    # trusting any character position below.
+    case "$perm" in
+      [-dlpscbD][-r][-w][-xsS][-r][-w][-xsS][-r][-w][-xtT]) ;;
+      *)
+        scratch_status=NOT-CONFIGURED
+        scratch_reason="$walk: could not read permission metadata (stat unavailable or unparseable: $perm)"
+        break
+        ;;
+    esac
     group_write=$(printf '%s' "$perm" | cut -c6)
     other_write=$(printf '%s' "$perm" | cut -c9)
     other_exec=$(printf '%s' "$perm" | cut -c10)

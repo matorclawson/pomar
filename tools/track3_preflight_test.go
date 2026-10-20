@@ -191,6 +191,39 @@ func TestTrack3PreflightFailsClosedWhenStatIsUnavailable(t *testing.T) {
 	}
 }
 
+// pomar's re-review of pr#142 round 2: a stat that succeeds (exit 0) but
+// emits a malformed, non-permission 10-byte string (their counterexample:
+// "??????????") previously passed the old length-only check and read as
+// VERIFIED. The actual ls-style grammar must be validated, not just length.
+func TestTrack3PreflightFailsClosedOnMalformedTenByteStat(t *testing.T) {
+	repo := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Exactly 10 bytes, exit 0, but no real permission bits -- pomar's own
+	// counterexample.
+	if err := os.WriteFile(filepath.Join(fakeBin, "stat"), []byte("#!/bin/sh\nprintf '??????????'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", script, repo, filepath.Join(root, "future-leaf"), "3.11")
+	cmd.Env = append([]string{"PATH=" + fakeBin + ":/usr/bin:/bin", "TZ=UTC"}, filteredEnv("PATH", "TZ")...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "scratch_ancestry_status: NOT-CONFIGURED") || !strings.Contains(string(out), "could not read permission metadata") {
+		t.Fatalf("a malformed 10-byte stat output must fail the ancestor closed, not read VERIFIED: %s", out)
+	}
+}
+
 // filteredEnv returns the current environment with the given keys removed,
 // so a constructed PATH/TZ above is the only source of truth for them.
 func filteredEnv(exclude ...string) []string {
