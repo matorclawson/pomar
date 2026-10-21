@@ -39,7 +39,7 @@ func (m *Manager) cachesLocked(apply bool) (CacheReport, error) {
 	}
 	anyLive := false
 	for _, e := range m.t.entries {
-		if !e.Terminal() || !m.resultDisposable(*e) {
+		if !e.Terminal() {
 			anyLive = true
 			break
 		}

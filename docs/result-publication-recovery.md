@@ -68,3 +68,26 @@ Legacy unsigned results without an admission-bound policy remain unknown (409).
 Do not downgrade while completion intents are unresolved: an older binary does
 not preserve the new recovery contract. Publication and admission policy must be
 included in the upgrade/rollback compatibility review.
+
+
+Terminal VM cleanup does not depend on result publication. On completion and
+recovery, disposable VM objects are removed even when signing authority is
+unavailable or a result is pending, unknown or corrupt. The attempt record,
+frozen intent, output and log evidence remain protected. Only nonterminal
+execution pins caches whose policy is KeepWhileLive. A failed VM cleanup is
+retried and the record cannot be removed while its VM object is still open.
+VM removal runs outside the admission/status lock, with the original record
+reserved against deletion and same-name reuse until cleanup returns.
+
+Acknowledged published results do not consume the sixteen due-intent retry
+budget forever. A restarted manager still validates/acknowledges retained
+modern results in bounded passes; until that acknowledgment the reader can
+return pending. Every actual reader independently validates the retained bytes.
+Table directory-sync failures continue to fail closed, including admission;
+source qualification checks its own test filesystem, not the production data
+volume or physical power-loss behavior.
+
+These cleanup observations are not a client-verifiable closure receipt. A
+signed execution result alone does not certify teardown. A separately reviewed
+per-attempt closure statement and receiving policy remain required before a
+consumer can rely on explicit cleanup evidence.

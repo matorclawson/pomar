@@ -26,6 +26,23 @@ const (
 // resultDoc is the result document of the CI record design: what an attempt
 // ran, pinned at admission, and how it ended. Canonical JSON sorts its keys.
 func (m *Manager) resultDoc(e Entry) map[string]any {
+	return m.resultDocWithRepository(e, m.resultRepository(e))
+}
+
+// resultRepository can invoke git; callers must not hold m.mu.
+func (m *Manager) resultRepository(e Entry) string {
+	if e.Source == nil || m.cfg.Mirrors == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	url, _ := m.cfg.Mirrors.Remote(ctx, e.Source.Mirror)
+	return url
+}
+
+// resultDocWithRepository has no external-process lookup. Its successful wire
+// fields and canonical encoding are unchanged.
+func (m *Manager) resultDocWithRepository(e Entry, repository string) map[string]any {
 	doc := map[string]any{
 		"schema":         result.Schema,
 		"attempt":        e.Attempt,
@@ -70,12 +87,8 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 			// How the commits were reachable at the sync that admitted it.
 			doc["reach"] = s.Reach
 		}
-		if m.cfg.Mirrors != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if url, err := m.cfg.Mirrors.Remote(ctx, s.Mirror); err == nil {
-				doc["repo"] = url
-			}
-			cancel()
+		if repository != "" {
+			doc["repo"] = repository
 		}
 		env["uid"], env["gid"], env["HOME"] = jobUID, jobUID, jobHome
 		if e.GoProxy {
@@ -111,9 +124,9 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 // writeResult is the in-process completion helper; it cannot import a caller
 // manifest. Production finish persists its own terminal observation and intent.
 func (m *Manager) writeResult(e Entry) {
+	m.freezeResult(&e)
 	m.mu.Lock()
 	if old := m.t.entries[e.Attempt]; old == nil {
-		m.freezeResult(&e)
 		m.t.entries[e.Attempt] = &e
 		if m.t.save() == nil {
 			e.completionSaved = true

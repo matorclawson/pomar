@@ -58,8 +58,13 @@ func validPolicy(p ResultPolicy) bool {
 	return p.Mode == "signed" && len(p.PublicKey) == 32 && result.KeyID(p.PublicKey) == p.KeyID
 }
 
-// freezeResult is called only from the trusted completion path, under m.mu.
+// freezeResult prepares trusted completion metadata; do not hold m.mu because
+// mirror resolution may invoke git. Production finish supplies that metadata.
 func (m *Manager) freezeResult(e *Entry) {
+	m.freezeResultWithRepository(e, m.resultRepository(*e))
+}
+
+func (m *Manager) freezeResultWithRepository(e *Entry, repository string) {
 	if !e.Terminal() || e.Publication.Intent != nil {
 		return
 	}
@@ -67,7 +72,7 @@ func (m *Manager) freezeResult(e *Entry) {
 		e.Publication = Publication{State: "unknown", Error: "completion_policy_unknown"}
 		return
 	}
-	doc := m.resultDoc(*e)
+	doc := m.resultDocWithRepository(*e, repository)
 	doc["host"] = e.ResultPolicy.KeyID
 	b, err := result.Canonical(doc)
 	if err != nil || len(b) > 4<<20 {
@@ -214,7 +219,12 @@ func (m *Manager) resultDisposable(e Entry) bool {
 // due entries are attempted per tick; errors use persisted capped backoff.
 func (m *Manager) recoverResults(now time.Time) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		// VM custody is independent of publication, including corrupt/legacy
+		// records. Removal runs without the admission/status lock.
+		m.cleanupTerminalVMs()
+	}()
 	count := 0
 	entries := m.t.list()
 	start := m.resultCursor
@@ -223,6 +233,11 @@ func (m *Manager) recoverResults(now time.Time) {
 		e := m.t.entries[entries[index].Attempt]
 		p := &e.Publication
 		if !e.Terminal() || p.Intent == nil || p.State == "corrupt" || p.State == "unknown" {
+			continue
+		}
+		// Stable acknowledged publications are verified by each actual reader.
+		// They must not consume retry capacity on every subsequent tick.
+		if p.State == "published" && e.completionSaved {
 			continue
 		}
 		if count >= 16 {
@@ -252,7 +267,6 @@ func (m *Manager) recoverResults(now time.Time) {
 				continue
 			}
 
-			m.teardownVM(e.Attempt)
 			continue
 		}
 		if now.Before(p.NextRetry) || count >= 16 {
@@ -329,7 +343,6 @@ func (m *Manager) recoverResults(now time.Time) {
 		}
 		if p.State == "published" {
 			m.event("result-written", e.Attempt, e.PID, p.Intent.Policy.Mode)
-			m.teardownVM(e.Attempt)
 		}
 	}
 }

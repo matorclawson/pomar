@@ -2,13 +2,19 @@ package manager
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zeroemployeeorg/pomar/internal/result"
 )
 
 func TestRecordLog(t *testing.T) {
@@ -138,6 +144,42 @@ func TestLogIsCheckedAgainstTheSignedResult(t *testing.T) {
 	for _, key := range [][]byte{pub, nil} {
 		if _, _, _, err := ctl.Log(id, key); err == nil || !strings.Contains(err.Error(), "result_corrupt") {
 			t.Fatalf("a log that matches its header but not its result (key %v): %v", key != nil, err)
+		}
+	}
+}
+
+// Keep the client verification branch independent of the modern reader's
+// earlier rejection of a corrupt completion table. An untrusted endpoint can
+// serve mutually consistent log bytes/headers while its signed result differs.
+func TestLogClientRejectsBytesThatAgreeWithHeaderButNotSignedResult(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	doc, err := result.Canonical(map[string]any{"schema": result.Schema, "attempt": "client-log", "output_log": LogRecord{Bytes: 6, ServedBytes: 6, SHA256: sha("green\n")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := ResultReply{Result: doc, Signature: base64.StdEncoding.EncodeToString(m.cfg.Signer.Sign(doc)), KeyID: m.cfg.Signer.ID}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/attempts/client-log/result":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(proof)
+		case "/v1/attempts/client-log/log":
+			w.Header().Set(LogSHA256Header, sha("red!!\n"))
+			w.Header().Set("Content-Length", "6")
+			w.Write([]byte("red!!\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", server.Listener.Addr().String())
+	}}
+	defer transport.CloseIdleConnections()
+	client := &Client{http: &http.Client{Transport: transport}}
+	for _, key := range [][]byte{m.cfg.Signer.Public(), nil} {
+		if _, _, _, err := client.Log("client-log", key); err == nil || !strings.Contains(err.Error(), "its result records") {
+			t.Fatal("client trusted log/header instead of original result", err)
 		}
 	}
 }

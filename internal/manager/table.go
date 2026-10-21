@@ -38,6 +38,8 @@ type Entry struct {
 	ResultPolicy    ResultPolicy `json:"result_policy,omitzero"`
 	Publication     Publication  `json:"publication,omitzero"`
 	completionSaved bool
+	// terminalCleanup reserves this original while its VM data is removed outside m.mu.
+	terminalCleanup bool
 
 	Attempt string   `json:"attempt"`
 	Command []string `json:"command"`
