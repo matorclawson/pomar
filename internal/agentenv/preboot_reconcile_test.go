@@ -24,7 +24,13 @@ func prebootFixture(t *testing.T) (*Host, *Environment, ReconcileRequest) {
 	if err := os.WriteFile(filepath.Join(e.Spec.Directory, "vm-config-actor.json"), b, 0600); err != nil {
 		t.Fatal(err)
 	}
-	e.HelperExit = &HelperExit{Incarnation: "actor", PID: 42, ObservedAt: "2026-10-04T05:10:00+01:00", ExitCode: 2}
+	// Process.Start is a local ps timestamp; bind the exit to that same
+	// instant rather than assuming the test process runs in British time.
+	birth, err := time.ParseInLocation("Mon Jan _2 15:04:05 2006", e.Process.Start, time.Local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.HelperExit = &HelperExit{Incarnation: "actor", PID: 42, ObservedAt: birth.Add(3 * time.Second).Format(time.RFC3339Nano), ExitCode: 2}
 	h.probe = func(_ context.Context, p FenceProbeRequest) (FenceProbeEvidence, error) {
 		if !p.WorkspaceAbsent || p.Container != filepath.Join(e.Spec.Store, "containers", "agent-env-actor") {
 			t.Fatal("probe omitted the preboot disk/container binding")
@@ -149,6 +155,9 @@ func TestPrebootMachineUncertaintyKeepsHold(t *testing.T) {
 			}
 			reconcileCall(h, r)
 			a := e.Actions[r.OperationID]
+			if a.Reconciliation == nil {
+				t.Fatalf("missing uncertainty receipt: phase=%s action=%+v", e.Phase, a)
+			}
 			if e.Phase == "fenced" || a.Reconciliation.ReplacementEligible || (a.Fence != nil && a.Fence.TerminationConfirmed) {
 				t.Fatal("incomplete native/write observation cleared hold")
 			}
