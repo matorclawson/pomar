@@ -224,7 +224,15 @@ public enum AgentEnvironment {
             + "mkdir -p /etc/profile.d; printf '%s\\n' 'export PATH=" + path + ":/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' > /etc/profile.d/pomar-agent.sh; chmod 644 /etc/profile.d/pomar-agent.sh; "
             + "chmod 700 /var/lib/pomar-agent /run/pomar; rm -f /run/pomar/agent.sock; "
             + "if [ ! -e /var/lib/pomar-agent/workspace-created ]; then "
-            + "git init -q /work; git -C /work fetch -q --tags /pomar/source.bundle HEAD; "
+            // A bundle recorded under its own branch name (the common case:
+            // internal/mirror.Bundle names refs/heads/<branch>, never a
+            // literal HEAD) has no ref literally called "HEAD" -- fetching
+            // "HEAD" by name then fails with "couldn't find remote ref HEAD"
+            // (the real bug POMAR-CC-SOW-37 traced). The wildcard refspec
+            // already used by Helper.swift's own bundle unpack takes
+            // whatever ref the bundle actually has, by any name, and the
+            // checkout below pins the exact commit regardless.
+            + "git init -q /work; git -C /work fetch -q --tags /pomar/source.bundle 'refs/heads/*:refs/remotes/origin/*'; "
             + "git -C /work -c advice.detachedHead=false checkout -q --detach " + sourceSHA + "; "
             + "test \"$(git -C /work rev-parse HEAD)\" = " + sourceSHA + "; "
             + "chown -R 1000:1000 /work /pomar/job; touch /var/lib/pomar-agent/workspace-created; fi; "
