@@ -27,6 +27,7 @@ func TestLiveProgressOnAuthorizedGetDoesNotRequireOrModifyFinalLog(t *testing.T)
 	}
 	now := time.Now().UTC()
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State = StateRunning
 	e.ExitCode = nil
 	e.PID = 1234
@@ -112,6 +113,7 @@ func TestProgressDoesNotBroadenClassReaders(t *testing.T) {
 	m, _, v := openSigning(t, false)
 	id := "private-progress"
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State = StateRunning
 	m.mu.Lock()
 	m.t.entries[id] = &e

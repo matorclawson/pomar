@@ -73,6 +73,7 @@ func TestResultBindsAdmittedInputsAfterTableReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State, e.ExitCode, e.Inputs = StateRunning, nil, admitted
 	m.mu.Lock()
 	m.t.entries[id] = &e
@@ -149,6 +150,7 @@ func TestResultIsWrittenOnceSignedAndVerifiable(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	m.writeResult(e)
 	var r ResultReply
 	if err := ctl.Do("GET", "/v1/attempts/"+id+"/result", nil, &r); err != nil {
@@ -200,7 +202,9 @@ func TestUnsignedManagerWritesTheResultButServesNoKey(t *testing.T) {
 	m, ctl, v := openSigning(t, false)
 	id := "res-2"
 	os.MkdirAll(filepath.Join(v.Root(), attemptsDir, id), 0o700)
-	m.writeResult(terminalEntry(id))
+	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
+	m.writeResult(e)
 	var r ResultReply
 	if err := ctl.Do("GET", "/v1/attempts/"+id+"/result", nil, &r); err != nil {
 		t.Fatal(err)
@@ -225,6 +229,7 @@ func TestResultIsServedExactlyAsSigned(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.Command = []string{"/bin/sh", "-c", "make verify RELEASE_BASE=abc > out.log 2>&1 && echo 'déjà' < in"}
 	m.writeResult(e)
 	signed, sig, err := result.Read(filepath.Join(v.Root(), attemptsDir, id))

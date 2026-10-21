@@ -67,6 +67,8 @@ func (m *Manager) cachesLocked(apply bool) (CacheReport, error) {
 				it.Keep = "not in the attempt table"
 			} else if !e.Terminal() {
 				it.Keep = "attempt is live"
+			} else if !m.resultDisposable(*e) {
+				it.Keep = "unresolved result publication"
 			}
 		case cache.Contains(o, open):
 			it.Keep = "holds an open object"
