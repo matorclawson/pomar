@@ -5,8 +5,10 @@ sow: zeroemployee-SOW-180
 This source prepares the single Creator `59d423e0d2f0feadd2b7f96b934ade4fc85f7a14`
 `make verify`, then `make doctor` workload. It adds no manager, submission API,
 generic worker, account provisioning, source importer, guest boot, installation,
-signer or scheduler. It must not run on the authoring host. No tests, formatter,
-build or real workload have been executed for this source checkpoint.
+signer or scheduler. The real guest workload must not run on the authoring
+host. The initial source checkpoint was unexecuted; subsequent ordinary source
+formatting and focused synthetic tests passed under the standing Class1 rule.
+That source feedback does not qualify this runner's real guest execution.
 
 Coverage is SAME `zeroemployee-SOW-180` rev8, actual issuer commit
 `edcd89a7b516fe6b1d93b2ef77a0e9ecf597b49d`; the original cumulative body is
@@ -173,10 +175,21 @@ Fake executor tests do not spawn a workload, create accounts, boot a guest or
 prove OS isolation. The inherited-descriptor/escaped-descendant cases test only
 reporting logic; real process/guest controls are still required.
 
-Run formatting, focused tests and builds only at an actually admitted isolated
-venue under rev8. Use a private non-symlink scratch TMPDIR and bounded caches;
-the tests intentionally refuse symlinked input ancestors. Then run Pomar's
-unchanged full committed-head `make verify`, normal hooks, receiving review and
-independent Council C4 source review. Failed attempts remain evidence; no result
-transfers to changed source. Neither a source commit nor unit tests qualify an
-OS-deny boundary or complete Creator's still-pending full gate and delivery.
+The issuer's standing execution correction (715rev25, delivered2026-10-21)
+explicitly supersedes rev8's generic worker-only requirement for eligible
+ordinary own-repository source checks. Formatting, focused synthetic tests and
+ordinary native source gates may use Class1: under30minutes, at most4CPU/8GiB,
+scratch HOME/XDG and actual tool configuration, ZeoWork TMP/cache, disk check,
+exact source/log/time/exit evidence and parent-PID plus session descendant
+inspection/recorded cleanup. These are ordinary source checks, not guest or
+hostile-workload qualification. The real runner/OS-deny/escape controls retain
+their separately admitted isolated boundary; Class1 supplies no such authority.
+Longer work, excess resources or a campaign still require Scheduler Class2 fit.
+
+Use a private non-symlink scratch TMPDIR; tests intentionally refuse symlinked
+input ancestors. Required receiving still includes Pomar's unchanged full
+committed-head Apple `make verify`, normal hooks and independent Council C4
+source review. Record resource/output-location flags without dropping any gate
+step. Failed attempts remain evidence; no result transfers to changed source.
+Neither a source commit nor unit tests qualify an OS-deny boundary or complete
+Creator's still-pending full gate and delivery.
