@@ -176,14 +176,21 @@ prove OS isolation. The inherited-descriptor/escaped-descendant cases test only
 reporting logic; real process/guest controls are still required.
 
 The issuer's standing execution correction (715rev25, delivered2026-10-21)
-explicitly supersedes rev8's generic worker-only requirement for eligible
-ordinary own-repository source checks. Formatting, focused synthetic tests and
-ordinary native source gates may use Class1: under30minutes, at most4CPU/8GiB,
-scratch HOME/XDG and actual tool configuration, ZeoWork TMP/cache, disk check,
-exact source/log/time/exit evidence and parent-PID plus session descendant
-inspection/recorded cleanup. These are ordinary source checks, not guest or
-hostile-workload qualification. The real runner/OS-deny/escape controls retain
-their separately admitted isolated boundary; Class1 supplies no such authority.
+supersedes generic worker-only requirements for eligible ordinary source
+feedback. Native focused feedback was obtained under that rule. The subsequent
+specific Architect ruling `ans_fce1971215314f5f` binds required qualification as
+two distinct legs: **isolated Linux formatting/focused Go qualification and all
+genuine hostile/escape controls**, then the **unchanged committed-head full
+native Apple owning gate** through its accepted native source contract. Native
+focused feedback does not satisfy the isolated leg, which remains NOT_RUN.
+
+Eligible ordinary native source checks retain Class1 limits: under30minutes,
+at most4CPU/8GiB, scratch HOME/XDG and actual tool configuration, ZeoWork
+TMP/cache, disk check, exact source/log/time/exit evidence and parent-PID plus
+session descendant inspection/recorded cleanup. These are ordinary source
+checks, not required isolated qualification or guest/hostile-workload proof.
+The real runner/OS-deny/escape controls retain their separately admitted
+boundary; Class1 supplies no such authority.
 Longer work, excess resources or a campaign still require Scheduler Class2 fit.
 
 Use a private non-symlink scratch TMPDIR; tests intentionally refuse symlinked
