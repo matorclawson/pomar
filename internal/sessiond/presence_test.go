@@ -264,6 +264,7 @@ func TestAnAdaptersStateGatesWhenReadySends(t *testing.T) {
 	ad.report(t, AdapterReport{Accepted: "w-1"})
 	var v SessionView
 	for end := time.Now().Add(5 * time.Second); v.Agent.Accepted != "w-1" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		v = SessionView{}
 		c.Do("GET", "/v1/sessions/agent", nil, &v)
 	}
 	if v.Agent.Accepted != "w-1" || v.Agent.State != "waiting-input" || v.Agent.Detail != "" || v.Agent.Seq != 3 {
