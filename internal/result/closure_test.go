@@ -60,7 +60,10 @@ func TestClosureFinalSymlinkCannotAuthorizeOrModifyForeignEvidence(t *testing.T)
 }
 
 func TestClosureSignatureCannotBeUsedAsResultSignature(t *testing.T) {
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "keys")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	signer, err := LoadOrCreate(dir, os.Getuid())
 	if err != nil {
 		t.Fatal(err)
