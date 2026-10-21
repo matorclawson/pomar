@@ -1,17 +1,21 @@
-// Like HostInfoTests.swift, this file imports neither Foundation nor Containerization.
+import Foundation
 import Testing
 
 @testable import PomarHostCore
 
-// The file key (approach A) must round-trip on any Mac, as any user: written at
-// mode 0600, reloaded, and verifying against the original public key. The Secure
-// Enclave and keychain lines depend on the machine and the account, and are what
-// the B2 run measures, so they are only checked for being reported.
-@Test func keyProbeFileKeyRoundTrips() {
-    let r = KeyProbe.run(dir: ".build/key-probe-test")
-    #expect(r.lines.contains("file_key_mode=600"))
-    #expect(r.lines.contains("file_key_reload_verify=true"))
-    #expect(r.lines.contains { $0.hasPrefix("se_available=") })
-    #expect(r.lines.contains { $0.hasPrefix("keychain_add=") })
-    #expect(r.lines.last?.hasPrefix("probe_ok=") == true)
+// This unit exercises the real file-key primitive only. Secure Enclave and
+// keychain availability are account/platform observations from the separate
+// explicit B2 probe, not prerequisites for an unattended file-key unit test.
+@Test func keyProbeFileKeyRoundTrips() throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pomar-file-key-" + UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(
+        at: dir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: dir) }
+    var result = KeyProbe.Result()
+    KeyProbe.fileKey(dir, &result)
+    #expect(result.ok)
+    #expect(result.lines.contains("file_key_mode=600"))
+    #expect(result.lines.contains("file_key_reload_verify=true"))
+    #expect(result.lines.contains { $0.hasPrefix("file_public_key_sha256=") })
 }

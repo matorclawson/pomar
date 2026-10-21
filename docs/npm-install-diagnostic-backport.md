@@ -52,3 +52,9 @@ valid UTF-8 suffix. The optional `tail_text_truncated` flag reports additional
 display truncation; `tail_offset`, `tail_bytes` and `window_truncated` continue
 to describe the raw read window. Complete logs, phase classification and signed
 results are unaffected. This is a diagnostic bound, not an npm failure repair.
+
+The unattended source gate uses the already-qualified file-key unit fixture
+from the finalizer source: it calls the file-key primitive in private temporary
+storage and verifies mode, reload and signature behavior. It does not invoke
+the aggregate platform probe. Secure Enclave and keychain observations remain
+the separate explicit B2 operation; scratch HOME alone is not a keychain fence.
