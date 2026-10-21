@@ -105,8 +105,15 @@ The exact `pomar.result/v1` document and successful result wrapper are unchanged
 Only the manager assembles closure evidence; there is no manifest-import or
 arbitrary-signing endpoint.
 
-New admissions require closure evidence before retention may remove their
-records. The helper records successful stop and delete acknowledgments separately
+New admissions retain records until closure publication is acknowledged or
+missing observations receive a durable `unavailable` disposition. The latter
+returns HTTP409 `closure_unavailable` with the last observation reason; it is
+not positive closure evidence, quiescence, or authorization to release capacity.
+The five-minute observation window starts at the first failed observation and
+persists across restart. Once unavailable, observation retries stop; normal
+retention may remove the record only if result publication is independently
+complete. A frozen closure intent, missing signing key, storage failure or
+corrupt evidence never expires through this window. The helper records successful stop and delete acknowledgments separately
 using `pomar.vm-cleanup/v1`. Neither a successful job exit nor a missing pathname
 supplies either acknowledgment. Failed stop/delete remains explicit and does not
 change the actual job exit. The original pre-deletion disk observation remains
@@ -121,7 +128,8 @@ identified helper/VM departure observations and the venue's recorded removal of
 the owned VM object. This is a narrow VM lifecycle statement, not a claim about
 all native descendants, external actions or release authorization. Process
 absence alone cannot produce a closure. An unlinked VM or missing original
-identity is held, even if the filesystem happens to look empty.
+identity cannot produce a positive closure, even if the filesystem happens to
+look empty. After the observation window it is explicitly unavailable.
 
 The immutable closure intent is persisted before publication. Recovery signs
 only that original intent with its pinned original identity; an unavailable or

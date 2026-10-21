@@ -46,11 +46,18 @@ type ClosureDocument struct {
 	ObservedAt         time.Time      `json:"observed_at"`
 }
 
+// Missing observations are retried briefly, then recorded as unavailable.
+// This bound never expires an existing immutable publication intent.
+const closureObservationWindow = 5 * time.Minute
+
 func (m *Manager) closureObservation(e Entry, now time.Time) ([]byte, string) {
 	if !validIntent(e) || e.Pins == nil || e.Pins.HostBin == "" {
 		return nil, "original_binding_unknown"
 	}
 	status, err := result.ReadHelperStatus(filepath.Join(m.cfg.Venue.Root(), attemptsDir, e.Attempt))
+	if errors.Is(err, result.ErrConflict) {
+		return nil, "helper_cleanup_corrupt"
+	}
 	if err != nil {
 		return nil, "helper_cleanup_unavailable"
 	}
@@ -130,6 +137,15 @@ func (m *Manager) closurePair(e Entry) (ResultReply, int, string) {
 	if !e.ClosureRequired {
 		return ResultReply{}, 409, "closure_unknown"
 	}
+	if e.Closure.State == "unavailable" {
+		if !validUnavailableClosure(e) {
+			return ResultReply{}, 409, "closure_corrupt"
+		}
+		if !e.closureSaved {
+			return ResultReply{}, 503, "closure_pending"
+		}
+		return ResultReply{}, 409, "closure_unavailable"
+	}
 	if e.Closure.State == "corrupt" {
 		return ResultReply{}, 409, "closure_corrupt"
 	}
@@ -193,7 +209,7 @@ func (m *Manager) recoverClosures(now time.Time) {
 		if len(work) >= 16 {
 			break
 		}
-		if e.Terminal() && e.ClosureRequired && e.Closure.State != "corrupt" && !(e.Closure.State == "published" && e.closureSaved) && !now.Before(e.Closure.NextRetry) {
+		if e.Terminal() && e.ClosureRequired && e.Closure.State != "corrupt" && !((e.Closure.State == "published" || e.Closure.State == "unavailable") && e.closureSaved) && !now.Before(e.Closure.NextRetry) {
 			work = append(work, e)
 			m.closureCursor = (idx + 1) % len(entries)
 		}
@@ -202,8 +218,16 @@ func (m *Manager) recoverClosures(now time.Time) {
 	for _, snapshot := range work {
 		var doc []byte
 		var why string
-		if snapshot.Closure.Intent == nil {
+		if snapshot.Closure.Intent == nil && snapshot.Closure.State != "unavailable" {
 			doc, why = m.closureObservation(snapshot, now)
+			if why != "" {
+				// Unbound retained proof is conflict, not missing observations.
+				// Keep it visible rather than aging it into a removable record.
+				_, _, err := result.ReadClosure(filepath.Join(m.cfg.Venue.Root(), attemptsDir, snapshot.Attempt))
+				if err == nil || errors.Is(err, result.ErrConflict) {
+					why = "unbound_closure_evidence"
+				}
+			}
 		}
 		m.mu.Lock()
 		e := m.t.entries[snapshot.Attempt]
@@ -216,10 +240,34 @@ func (m *Manager) recoverClosures(now time.Time) {
 			m.mu.Unlock()
 			continue
 		}
+		if p.State == "unavailable" {
+			// On restart, acknowledge the same disposition; do not observe again
+			// or reset the deadline and hold the record forever.
+			if !validUnavailableClosure(*e) {
+				p.State, p.Error = "corrupt", "closure_disposition_invalid"
+			}
+			e.closureSaved = m.t.save() == nil
+			m.mu.Unlock()
+			continue
+		}
 		if p.Intent == nil && why != "" {
-			p.State, p.Error = "held", why
-			scheduleClosureRetry(p, now)
-			_ = m.t.save()
+			if why == "helper_cleanup_corrupt" || why == "unbound_closure_evidence" {
+				p.State, p.Error = "corrupt", why
+			} else {
+				if e.ClosureObservationDeadline.IsZero() {
+					e.ClosureObservationDeadline = now.Add(closureObservationWindow)
+				}
+				p.State, p.Error = "held", why
+				if !now.Before(e.ClosureObservationDeadline) {
+					// No positive evidence was frozen. Unavailable is a negative
+					// disposition, never a signed closure or custody release.
+					p.State = "unavailable"
+					p.NextRetry = time.Time{}
+				} else {
+					scheduleClosureRetry(p, now)
+				}
+			}
+			e.closureSaved = m.t.save() == nil
 			m.mu.Unlock()
 			continue
 		}
@@ -319,4 +367,11 @@ func scheduleClosureRetry(p *Publication, now time.Time) {
 		p.Attempts++
 	}
 	p.NextRetry = now.Add(min(60*time.Second, time.Second<<min(p.Attempts-1, 6)))
+}
+
+// Only absent observations may become unavailable. A frozen statement or a
+// conflicting proof must keep its independent publication/recovery obligation.
+func validUnavailableClosure(e Entry) bool {
+	return e.ClosureRequired && e.Terminal() && e.Closure.State == "unavailable" &&
+		e.Closure.Intent == nil && e.Closure.Error != "" && !e.ClosureObservationDeadline.IsZero()
 }

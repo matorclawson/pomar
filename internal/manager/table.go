@@ -41,8 +41,11 @@ type Entry struct {
 	// legacy attempts that lack trustworthy helper cleanup acknowledgments.
 	ClosureRequired bool        `json:"closure_required,omitempty"`
 	Closure         Publication `json:"closure,omitzero"`
-	closureSaved    bool
-	completionSaved bool
+	// ClosureObservationDeadline bounds attempts to obtain missing observations.
+	// Frozen signing/publication intents never expire through this deadline.
+	ClosureObservationDeadline time.Time `json:"closure_observation_deadline,omitzero"`
+	closureSaved               bool
+	completionSaved            bool
 	// terminalCleanup reserves this original while its VM data is removed outside m.mu.
 	terminalCleanup bool
 

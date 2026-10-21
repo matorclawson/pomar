@@ -208,7 +208,11 @@ func (m *Manager) resultDisposable(e Entry) bool {
 		return false
 	}
 	if e.ClosureRequired {
-		if _, status, _ := m.closureRead(e); status != http.StatusOK {
+		if validUnavailableClosure(e) {
+			if !e.closureSaved {
+				return false
+			}
+		} else if _, status, _ := m.closureRead(e); status != http.StatusOK {
 			return false
 		}
 	}

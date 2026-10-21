@@ -211,3 +211,88 @@ func TestHeldClosuresCannotStarveTheNextOriginal(t *testing.T) {
 		t.Fatal("held predecessors starved current closure", got)
 	}
 }
+
+func TestMissingClosureObservationHasDurableBoundedDisposition(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	e, dir := closureFixture(t, m, "closure-unavailable")
+	if err := os.Remove(filepath.Join(dir, "status.json")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	m.recoverResults(now)
+	deadline := m.t.entries[e.Attempt].ClosureObservationDeadline
+	if deadline != now.Add(closureObservationWindow) || m.resultDisposable(*m.t.entries[e.Attempt]) {
+		t.Fatal("missing observation not held for its bounded window")
+	}
+	loaded, err := loadTable(m.t.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.t = loaded
+	m.recoverResults(deadline.Add(time.Second))
+	got := m.t.entries[e.Attempt]
+	if got.Closure.State != "unavailable" || got.Closure.Error != "helper_cleanup_unavailable" || got.Closure.Intent != nil || !got.closureSaved || got.ClosureObservationDeadline != deadline {
+		t.Fatalf("deadline reset or missing durable negative disposition: %+v", got)
+	}
+	w := closureRequest(m, e.Attempt)
+	if w.Code != 409 || !bytes.Contains(w.Body.Bytes(), []byte(`"error":"closure_unavailable"`)) || bytes.Contains(w.Body.Bytes(), []byte(`"retryable":true`)) {
+		t.Fatal("unavailable exposed positive or retryable closure", w.Code, w.Body.String())
+	}
+	if !m.resultDisposable(*got) || publicationRequest(m, e.Attempt).Code != 200 {
+		t.Fatal("negative disposition pinned the completed result forever")
+	}
+	if _, _, err := result.ReadClosure(dir); !os.IsNotExist(err) {
+		t.Fatal("unavailable fabricated signed proof", err)
+	}
+	if got.PID != e.PID || got.State != e.State || len(m.t.entries) != 1 {
+		t.Fatal("execution identity changed")
+	}
+	m.recoverClosures(deadline.Add(24 * time.Hour))
+	if got.Closure.State != "unavailable" || !got.ClosureObservationDeadline.Equal(deadline) {
+		t.Fatal("terminal disposition restarted")
+	}
+}
+
+func TestUnavailableClosureCannotReleaseUnresolvedResult(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	e, dir := closureFixture(t, m, "closure-result-held")
+	os.Remove(filepath.Join(dir, "status.json"))
+	now := time.Now()
+	m.cfg.Signer = nil
+	m.recoverResults(now)
+	m.recoverResults(now.Add(closureObservationWindow + time.Second))
+	got := m.t.entries[e.Attempt]
+	if got.Closure.State != "unavailable" || got.Publication.State != "held" || m.resultDisposable(*got) {
+		t.Fatal("negative closure disposition released unresolved original result", got.Closure, got.Publication)
+	}
+}
+
+func TestClosureSigningIntentNeverExpiresWithObservationWindow(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	e, _ := closureFixture(t, m, "closure-key-held")
+	m.cfg.Signer = nil
+	now := time.Now()
+	m.recoverClosures(now)
+	original := bytes.Clone(m.t.entries[e.Attempt].Closure.Intent.Document)
+	m.recoverClosures(now.Add(24 * time.Hour))
+	got := m.t.entries[e.Attempt]
+	if got.Closure.State != "held" || got.Closure.Error != "key_unavailable" || !bytes.Equal(got.Closure.Intent.Document, original) || !got.ClosureObservationDeadline.IsZero() || m.resultDisposable(*got) {
+		t.Fatal("frozen signing obligation expired", got.Closure)
+	}
+}
+
+func TestUnboundClosureEvidenceCannotAgeIntoUnavailable(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	e, dir := closureFixture(t, m, "closure-unbound")
+	os.Remove(filepath.Join(dir, "status.json"))
+	if err := os.WriteFile(filepath.Join(dir, "closure.json"), []byte(`{"unbound":true}`), 0400); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	m.recoverClosures(now)
+	m.recoverClosures(now.Add(24 * time.Hour))
+	got := m.t.entries[e.Attempt]
+	if got.Closure.State != "corrupt" || got.Closure.Error != "unbound_closure_evidence" || m.resultDisposable(*got) {
+		t.Fatal("unbound proof became unavailable", got.Closure)
+	}
+}
