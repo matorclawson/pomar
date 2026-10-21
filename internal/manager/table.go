@@ -5,6 +5,7 @@
 package manager
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -140,6 +141,8 @@ func (e Entry) Terminal() bool {
 	return false
 }
 
+const tableSchema = "pomar.manager-table/v2"
+
 type table struct {
 	path    string
 	entries map[string]*Entry
@@ -154,11 +157,35 @@ func loadTable(path string) (*table, error) {
 	if err != nil {
 		return nil, fmt.Errorf("manager: %w", err)
 	}
+	// Legacy managers decode a top-level array. The v2 envelope is deliberately
+	// incompatible with that decoder: an older binary must refuse to load,
+	// rather than dropping frozen publication and closure fields on its save.
+	payload := bytes.TrimSpace(b)
+	if len(payload) > 0 && payload[0] == '{' {
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &envelope); err != nil {
+			return nil, fmt.Errorf("manager: table: %w", err)
+		}
+		var schema string
+		if err := json.Unmarshal(envelope["schema"], &schema); err != nil || schema != tableSchema || len(envelope) != 2 {
+			return nil, errors.New("manager: unsupported table format; refuse incompatible downgrade or migration")
+		}
+		payload = bytes.TrimSpace(envelope["entries"])
+		if len(payload) == 0 || payload[0] != '[' {
+			return nil, errors.New("manager: v2 table entries must be an array")
+		}
+	}
 	var list []*Entry
-	if err := json.Unmarshal(b, &list); err != nil {
+	if err := json.Unmarshal(payload, &list); err != nil {
 		return nil, fmt.Errorf("manager: table: %w", err)
 	}
 	for _, e := range list {
+		if e == nil || e.Attempt == "" {
+			return nil, errors.New("manager: invalid table entry")
+		}
+		if _, duplicate := t.entries[e.Attempt]; duplicate {
+			return nil, errors.New("manager: duplicate table attempt")
+		}
 		if e.DiskFull && e.HostCondition == "" {
 			e.HostCondition = capacity.ReasonHostDiskFull
 		}
@@ -174,7 +201,10 @@ func loadTable(path string) (*table, error) {
 // save writes the table atomically: a temp file in the same directory, synced,
 // then renamed over the old one.
 func (t *table) save() error {
-	b, err := json.MarshalIndent(t.list(), "", "  ")
+	b, err := json.MarshalIndent(struct {
+		Schema  string  `json:"schema"`
+		Entries []Entry `json:"entries"`
+	}{Schema: tableSchema, Entries: t.list()}, "", "  ")
 	if err != nil {
 		return err
 	}

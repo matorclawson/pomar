@@ -195,17 +195,24 @@ func TestClosureKeyRotationHoldsOriginalUntilItsSignerReturns(t *testing.T) {
 
 func TestHeldClosuresCannotStarveTheNextOriginal(t *testing.T) {
 	m, _, _ := openSigning(t, true)
+	base := time.Now().Add(-time.Hour)
 	for n := 0; n < 17; n++ {
 		id := fmt.Sprintf("closure-old-%02d", n)
 		e, dir := closureFixture(t, m, id)
 		os.Remove(filepath.Join(dir, "status.json"))
-		m.t.entries[e.Attempt].Created = time.Now().Add(-time.Hour + time.Duration(n)*time.Second)
+		m.t.entries[e.Attempt].Created = base.Add(time.Duration(n) * time.Second)
 		m.t.entries[e.Attempt].Publication = Publication{}
 		m.freezeResult(m.t.entries[e.Attempt])
 	}
 	e, _ := closureFixture(t, m, "closure-new")
+	m.t.entries[e.Attempt].Created = base.Add(18 * time.Second)
+	m.t.entries[e.Attempt].Publication = Publication{}
+	m.freezeResult(m.t.entries[e.Attempt])
 	now := time.Now()
 	m.recoverClosures(now)
+	if got := m.t.entries[e.Attempt].Closure.State; got == "published" {
+		t.Fatal("fixture did not put current original beyond first16 work budget")
+	}
 	m.recoverClosures(now.Add(2 * time.Second))
 	if got := m.t.entries[e.Attempt].Closure.State; got != "published" {
 		t.Fatal("held predecessors starved current closure", got)

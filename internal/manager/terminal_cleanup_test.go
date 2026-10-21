@@ -134,7 +134,7 @@ func TestTerminalCleanupDoesNotHoldManagerLockOrAllowOriginalReuse(t *testing.T)
 	put(t, v, venue.KindVM, venue.ClassAttempt, id, "store/containers/"+id, 16)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
-		m.cleanupTerminalVMsWith(func(attempt string) { close(entered); <-release; m.teardownVM(attempt) })
+		m.cleanupTerminalVMsWith(func(attempt string) { m.teardownVM(attempt); close(entered); <-release })
 		close(done)
 	}()
 	defer func() {
@@ -156,6 +156,9 @@ func TestTerminalCleanupDoesNotHoldManagerLockOrAllowOriginalReuse(t *testing.T)
 	case <-observed:
 	case <-time.After(time.Second):
 		t.Fatal("slow VM teardown holds the manager lock")
+	}
+	if v.IsOpen(venue.KindVM, id) {
+		t.Fatal("fixture must remove VM before testing the independent original reservation")
 	}
 	if err := m.Remove(id); err == nil || !strings.Contains(err.Error(), "cleanup pending") {
 		t.Fatal("record removable during VM cleanup", err)

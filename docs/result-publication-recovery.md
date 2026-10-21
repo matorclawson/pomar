@@ -148,3 +148,14 @@ custody, admissions drained for upgrade, preservation of all unresolved intents,
 and refusal of an incompatible downgrade. A manager upgrade with an old helper
 cannot produce the required acknowledgment and stays held. No candidate has been
 installed, and tests/real interruption acceptance must be reported separately.
+
+### Table compatibility boundary
+
+The first save uses a `pomar.manager-table/v2` envelope. The new manager reads
+legacy array tables and preserves their entries on migration. Legacy binaries
+expect a top-level array and fail to load this envelope, enforcing incompatible
+downgrade refusal before they can discard completion or closure fields. Unknown
+versions or incomplete envelopes are refused. Drain admissions and preserve the
+table, pending intents and original signing authority during adoption. Rollback
+requires a compatible manager; never flatten the envelope to make an old binary
+start or restore a stale table over unresolved original operations.

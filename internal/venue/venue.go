@@ -94,11 +94,12 @@ type Object struct {
 
 // Venue is an open data root.
 type Venue struct {
-	root string
-	mu   sync.Mutex
-	seq  int
-	objs map[string]*Object // key: kind/id
-	now  func() time.Time
+	root      string
+	mu        sync.Mutex
+	seq       int
+	objs      map[string]*Object // key: kind/id
+	teardowns map[string]string  // reserved object key -> relative path during removal
+	now       func() time.Time
 }
 
 const ledgerName = "ledger.jsonl"
@@ -239,6 +240,9 @@ func (v *Venue) Intent(k Kind, c Class, id, rel, note string) error {
 	if _, err := v.resolve(rel); err != nil {
 		return err
 	}
+	if err := v.removalConflict(key(k, id), rel); err != nil {
+		return err
+	}
 	if o, ok := v.objs[key(k, id)]; ok && o.Last != OpRemoved {
 		return fmt.Errorf("venue: %s is already open (%s)", key(k, id), o.Last)
 	}
@@ -254,6 +258,9 @@ func (v *Venue) Failed(k Kind, id, note string) error { return v.mark(k, id, OpF
 func (v *Venue) mark(k Kind, id string, op Op, note string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if _, busy := v.teardowns[key(k, id)]; busy {
+		return errors.New("venue: object removal in progress")
+	}
 	o, ok := v.objs[key(k, id)]
 	if !ok || o.Last == OpRemoved {
 		return fmt.Errorf("venue: %s has no open intent", key(k, id))
@@ -269,25 +276,62 @@ func (v *Venue) Teardown(k Kind, id string) error { return v.TeardownNote(k, id,
 // TeardownNote is Teardown with a reason recorded in the ledger, such as an
 // eviction's budget.
 func (v *Venue) TeardownNote(k Kind, id, note string) error {
+	return v.teardownNoteWith(k, id, note, os.RemoveAll)
+}
+
+// removalConflict runs under v.mu. Reservations protect both the original
+// object and overlapping paths while slow deletion runs outside the lock.
+func (v *Venue) removalConflict(objectKey, path string) error {
+	for reservedKey, reservedPath := range v.teardowns {
+		if reservedKey == objectKey || (path != "" && reservedPath != "" &&
+			(filepath.Clean(path) == filepath.Clean(reservedPath) ||
+				strings.HasPrefix(filepath.Clean(path), filepath.Clean(reservedPath)+string(filepath.Separator)) ||
+				strings.HasPrefix(filepath.Clean(reservedPath), filepath.Clean(path)+string(filepath.Separator)))) {
+			return errors.New("venue: overlapping object removal in progress")
+		}
+	}
+	return nil
+}
+
+// The local remover boundary permits a deterministic paused-removal test;
+// production always supplies os.RemoveAll, never an actor-controlled callback.
+func (v *Venue) teardownNoteWith(k Kind, id, note string, remove func(string) error) error {
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	o, ok := v.objs[key(k, id)]
 	if !ok || o.Last == OpRemoved {
+		v.mu.Unlock()
 		return fmt.Errorf("venue: %s is not an open ledgered object", key(k, id))
 	}
-	abs, err := v.resolve(o.Path)
+	original := *o
+	abs, err := v.resolve(original.Path)
+	if err == nil {
+		err = v.removalConflict(key(k, id), original.Path)
+	}
 	if err != nil {
+		v.mu.Unlock()
 		return err
 	}
+	if v.teardowns == nil {
+		v.teardowns = make(map[string]string)
+	}
+	v.teardowns[key(k, id)] = original.Path
+	v.mu.Unlock()
+	defer func() { v.mu.Lock(); delete(v.teardowns, key(k, id)); v.mu.Unlock() }()
 	if abs != "" {
 		if err := v.checkNoSymlinkParents(abs); err != nil {
 			return err
 		}
-		if err := os.RemoveAll(abs); err != nil {
-			return fmt.Errorf("venue: removing %s: %w", o.Path, err)
+		if err := remove(abs); err != nil {
+			return fmt.Errorf("venue: removing %s: %w", original.Path, err)
 		}
 	}
-	return v.append(Entry{Op: OpRemoved, Kind: k, Class: o.Class, ID: id, Path: o.Path, Note: note})
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	current, ok := v.objs[key(k, id)]
+	if !ok || *current != original {
+		return errors.New("venue: object changed during removal")
+	}
+	return v.append(Entry{Op: OpRemoved, Kind: k, Class: original.Class, ID: id, Path: original.Path, Note: note})
 }
 
 // checkNoSymlinkParents refuses paths whose parent directories, below the
@@ -428,6 +472,9 @@ func (v *Venue) CheckHeavy(maxPercent int) error {
 func (v *Venue) Classify(k Kind, id string, c Class) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if _, busy := v.teardowns[key(k, id)]; busy {
+		return errors.New("venue: object removal in progress")
+	}
 	if !c.valid() {
 		return fmt.Errorf("venue: invalid class %q", c)
 	}
@@ -527,9 +574,17 @@ func (v *Venue) ObjectState(k Kind, id string) (Object, bool) {
 
 // EnsureCache ledgers a long-lived cache directory once, before creating it.
 func (v *Venue) EnsureCache(k Kind, id, rel string) error {
-	if v.IsOpen(k, id) {
-		return os.MkdirAll(filepath.Join(v.root, rel), 0o700)
+	v.mu.Lock()
+	if err := v.removalConflict(key(k, id), rel); err != nil {
+		v.mu.Unlock()
+		return err
 	}
+	if o := v.objs[key(k, id)]; o != nil && o.Last != OpRemoved {
+		err := os.MkdirAll(filepath.Join(v.root, rel), 0700)
+		v.mu.Unlock()
+		return err
+	}
+	v.mu.Unlock()
 	if err := v.Intent(k, ClassCache, id, rel, ""); err != nil {
 		return err
 	}
