@@ -45,3 +45,10 @@ registry observations, result and evidence of the install step. Link the new
 execution to the historical failure without replaying or revising that failure.
 A failed attempt is useful if it localizes where progress stops; a successful
 cached install alone does not qualify the previously failing fresh path.
+
+The log tail display is bounded to 16 KiB for its serialized JSON string value,
+including quotes, control-character escaping and HTML escaping. It retains a
+valid UTF-8 suffix. The optional `tail_text_truncated` flag reports additional
+display truncation; `tail_offset`, `tail_bytes` and `window_truncated` continue
+to describe the raw read window. Complete logs, phase classification and signed
+results are unaffected. This is a diagnostic bound, not an npm failure repair.
