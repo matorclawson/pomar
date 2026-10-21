@@ -185,12 +185,17 @@ func (m *Manager) closureRead(e Entry) (ResultReply, int, string) {
 func (m *Manager) recoverClosures(now time.Time) {
 	m.mu.Lock()
 	var work []Entry
-	for _, e := range m.t.list() {
+	entries := m.t.list()
+	start := m.closureCursor
+	for off := 0; off < len(entries); off++ {
+		idx := (start + off) % len(entries)
+		e := entries[idx]
 		if len(work) >= 16 {
 			break
 		}
 		if e.Terminal() && e.ClosureRequired && e.Closure.State != "corrupt" && !(e.Closure.State == "published" && e.closureSaved) && !now.Before(e.Closure.NextRetry) {
 			work = append(work, e)
+			m.closureCursor = (idx + 1) % len(entries)
 		}
 	}
 	m.mu.Unlock()
@@ -213,7 +218,7 @@ func (m *Manager) recoverClosures(now time.Time) {
 		}
 		if p.Intent == nil && why != "" {
 			p.State, p.Error = "held", why
-			p.NextRetry = now.Add(time.Second)
+			scheduleClosureRetry(p, now)
 			_ = m.t.save()
 			m.mu.Unlock()
 			continue
@@ -249,7 +254,7 @@ func (m *Manager) recoverClosures(now time.Time) {
 				signer := m.cfg.Signer
 				if signer == nil || signer.ID != policy.KeyID || !bytes.Equal(signer.Public(), policy.PublicKey) {
 					p.State, p.Error = "held", "key_unavailable"
-					p.NextRetry = now.Add(time.Second)
+					scheduleClosureRetry(p, now)
 					_ = m.t.save()
 					m.mu.Unlock()
 					continue
@@ -265,8 +270,7 @@ func (m *Manager) recoverClosures(now time.Time) {
 		} else {
 			p.State, p.Error = "published", ""
 		}
-		p.Attempts++
-		p.NextRetry = now.Add(time.Second << min(p.Attempts-1, 6))
+		scheduleClosureRetry(p, now)
 		if p.State == "published" {
 			p.NextRetry = time.Time{}
 		}
@@ -307,3 +311,12 @@ func (m *Manager) closureRoutes(mux *http.ServeMux) {
 }
 
 func decodeClosureSignature(s string) []byte { b, _ := base64.StdEncoding.DecodeString(s); return b }
+
+// Repeated unavailable evidence is bounded work with capped backoff, rather
+// than an unbounded per-second table rewrite or starvation of newer originals.
+func scheduleClosureRetry(p *Publication, now time.Time) {
+	if p.Attempts < ^uint32(0) {
+		p.Attempts++
+	}
+	p.NextRetry = now.Add(min(60*time.Second, time.Second<<min(p.Attempts-1, 6)))
+}

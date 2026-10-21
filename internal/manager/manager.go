@@ -182,9 +182,10 @@ type Manager struct {
 	// npmProxies are the live attempts' npm registries (an npm class's).
 	npmProxies map[string]*proxyListener
 	// vmOrphans are the VM services no live attempt accounts for.
-	vmOrphans    map[int]*VMOrphan
-	lastSweep    time.Time
-	resultCursor int // round-robin bounded publication work; not execution authority
+	vmOrphans     map[int]*VMOrphan
+	lastSweep     time.Time
+	resultCursor  int // round-robin bounded publication work; not execution authority
+	closureCursor int // separate bounded maintenance; never dispatch authority
 	// syncMu serialises the manager's own mirror syncs: two fetches into one
 	// mirror would contend for git's locks.
 	syncMu sync.Mutex

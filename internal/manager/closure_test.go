@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -189,5 +190,24 @@ func TestClosureKeyRotationHoldsOriginalUntilItsSignerReturns(t *testing.T) {
 	doc, sig, err := result.ReadClosure(dir)
 	if err != nil || !bytes.Equal(doc, original) || !result.Verify(signer.Public(), doc, sig) {
 		t.Fatal("original key did not recover original", err)
+	}
+}
+
+func TestHeldClosuresCannotStarveTheNextOriginal(t *testing.T) {
+	m, _, _ := openSigning(t, true)
+	for n := 0; n < 17; n++ {
+		id := fmt.Sprintf("closure-old-%02d", n)
+		e, dir := closureFixture(t, m, id)
+		os.Remove(filepath.Join(dir, "status.json"))
+		m.t.entries[e.Attempt].Created = time.Now().Add(-time.Hour + time.Duration(n)*time.Second)
+		m.t.entries[e.Attempt].Publication = Publication{}
+		m.freezeResult(m.t.entries[e.Attempt])
+	}
+	e, _ := closureFixture(t, m, "closure-new")
+	now := time.Now()
+	m.recoverClosures(now)
+	m.recoverClosures(now.Add(2 * time.Second))
+	if got := m.t.entries[e.Attempt].Closure.State; got != "published" {
+		t.Fatal("held predecessors starved current closure", got)
 	}
 }
