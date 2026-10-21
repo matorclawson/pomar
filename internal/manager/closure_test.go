@@ -231,7 +231,7 @@ func TestMissingClosureObservationHasDurableBoundedDisposition(t *testing.T) {
 	m.t = loaded
 	m.recoverResults(deadline.Add(time.Second))
 	got := m.t.entries[e.Attempt]
-	if got.Closure.State != "unavailable" || got.Closure.Error != "helper_cleanup_unavailable" || got.Closure.Intent != nil || !got.closureSaved || got.ClosureObservationDeadline != deadline {
+	if got.Closure.State != "unavailable" || got.Closure.Error != "helper_cleanup_unavailable" || got.Closure.Intent != nil || !got.closureSaved || !got.ClosureObservationDeadline.Equal(deadline) {
 		t.Fatalf("deadline reset or missing durable negative disposition: %+v", got)
 	}
 	w := closureRequest(m, e.Attempt)
