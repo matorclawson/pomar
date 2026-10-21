@@ -35,8 +35,13 @@ const (
 // Entry is one attempt.
 type Entry struct {
 	// ResultPolicy is frozen at admission; Publication is trusted completion intent.
-	ResultPolicy    ResultPolicy `json:"result_policy,omitzero"`
-	Publication     Publication  `json:"publication,omitzero"`
+	ResultPolicy ResultPolicy `json:"result_policy,omitzero"`
+	Publication  Publication  `json:"publication,omitzero"`
+	// ClosureRequired is an admission fact, never retroactively assigned to
+	// legacy attempts that lack trustworthy helper cleanup acknowledgments.
+	ClosureRequired bool        `json:"closure_required,omitempty"`
+	Closure         Publication `json:"closure,omitzero"`
+	closureSaved    bool
 	completionSaved bool
 	// terminalCleanup reserves this original while its VM data is removed outside m.mu.
 	terminalCleanup bool

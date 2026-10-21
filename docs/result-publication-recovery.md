@@ -91,3 +91,48 @@ These cleanup observations are not a client-verifiable closure receipt. A
 signed execution result alone does not certify teardown. A separately reviewed
 per-attempt closure statement and receiving policy remain required before a
 consumer can rely on explicit cleanup evidence.
+
+## Per-attempt closure (source candidate; not installed)
+
+The separately signed `pomar.closure/v1` document is read at
+`GET /v1/attempts/{id}/closure`, with the same attempt/class authorization as
+result reads. Its successful wrapper has `closure`, `signature`, and `key_id`.
+The exact `pomar.result/v1` document and successful result wrapper are unchanged.
+Only the manager assembles closure evidence; there is no manifest-import or
+arbitrary-signing endpoint.
+
+New admissions require closure evidence before retention may remove their
+records. The helper records successful stop and delete acknowledgments separately
+using `pomar.vm-cleanup/v1`. Neither a successful job exit nor a missing pathname
+supplies either acknowledgment. Failed stop/delete remains explicit and does not
+change the actual job exit. The original pre-deletion disk observation remains
+intact. Failures before a container was successfully created provide no invented
+positive cleanup acknowledgment.
+
+The manager binds these acknowledgments to the original attempt, helper PID and
+birth identity, linked VM-service PID and birth identity, admission pins and
+class, original result digest and original public signing identity. It additionally
+records the closing manager's version and executable digest, observation time,
+identified helper/VM departure observations and the venue's recorded removal of
+the owned VM object. This is a narrow VM lifecycle statement, not a claim about
+all native descendants, external actions or release authorization. Process
+absence alone cannot produce a closure. An unlinked VM or missing original
+identity is held, even if the filesystem happens to look empty.
+
+The immutable closure intent is persisted before publication. Recovery signs
+only that original intent with its pinned original identity; an unavailable or
+rotated key stays held. A complete original proof can be re-acknowledged without
+its private key. Storage failures remain pending, conflicting or malformed
+proofs return HTTP409, and incomplete/unacknowledged publication returns HTTP503.
+Readers check the actual retained bytes and signature. Job execution is never
+repeated to repair publication. Unresolved closure evidence is retained alongside
+unresolved result evidence; disposable VM storage and live-only caches remain
+independent.
+
+Legacy attempts do not gain fabricated retrospective closure records. Their
+closure endpoint reports unknown. This candidate requires coordinated adoption
+of the qualified Go manager and matching Swift helper, original signing-key
+custody, admissions drained for upgrade, preservation of all unresolved intents,
+and refusal of an incompatible downgrade. A manager upgrade with an old helper
+cannot produce the required acknowledgment and stays held. No candidate has been
+installed, and tests/real interruption acceptance must be reported separately.

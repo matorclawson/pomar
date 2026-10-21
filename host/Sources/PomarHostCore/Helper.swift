@@ -544,12 +544,18 @@ public enum Helper {
                 metrics["extract_ms"] = String(t.extract)
             } catch {
                 metrics.merge(preserveBootLog(o)) { a, _ in a }
+                let freeAtFailure = String(Rootfs.freeBytes(o.store))
                 writeStatus(o.stateDir, [
                     "phase": "failed", "attempt": o.attempt, "error": "source copy-in: \(error)",
-                    "host_free_bytes": String(Rootfs.freeBytes(o.store)),
+                    "host_free_bytes": freeAtFailure,
                 ].merging(metrics) { a, _ in a })
-                try? await container.stop()
-                try? manager.delete(o.attempt)
+                let cleanup = await VMClosure.acknowledge(
+                    stop: { try await container.stop() },
+                    delete: { try manager.delete(o.attempt) })
+                writeStatus(o.stateDir, [
+                    "phase": "failed", "attempt": o.attempt, "error": "source copy-in: \(error)",
+                    "host_free_bytes": freeAtFailure,
+                ].merging(metrics) { a, _ in a }.merging(cleanup) { _, b in b })
                 return 1
             }
         }
@@ -566,12 +572,18 @@ public enum Helper {
             // Publish the failure before best-effort cleanup so the manager
             // can reconcile it without waiting for the class time limit.
             metrics.merge(preserveBootLog(o)) { a, _ in a }
+            let freeAtFailure = String(Rootfs.freeBytes(o.store))
             writeStatus(o.stateDir, [
                 "phase": "failed", "attempt": o.attempt, "error": "command wait: \(error)",
-                "host_free_bytes": String(Rootfs.freeBytes(o.store)),
+                "host_free_bytes": freeAtFailure,
             ].merging(metrics) { a, _ in a })
-            try? await container.stop()
-            try? manager.delete(o.attempt)
+            let cleanup = await VMClosure.acknowledge(
+                stop: { try await container.stop() },
+                delete: { try manager.delete(o.attempt) })
+            writeStatus(o.stateDir, [
+                "phase": "failed", "attempt": o.attempt, "error": "command wait: \(error)",
+                "host_free_bytes": freeAtFailure,
+            ].merging(metrics) { a, _ in a }.merging(cleanup) { _, b in b })
             return 1
         }
         let stopped = exitCode == nil
@@ -580,16 +592,21 @@ public enum Helper {
         if !stopped, !o.outputs.isEmpty, let dir = o.outputsDir {
             metrics["outputs_copied"] = String(await copyOutputs(container, names: o.outputs, to: dir))
         }
-        try? await container.stop()
-        metrics.merge(preserveBootLog(o)) { a, _ in a }
-        // Read before deleting the guest, which frees its clone's blocks.
-        let freeAtEnd = Rootfs.freeBytes(o.store)
-        metrics["host_free_bytes"] = String(freeAtEnd)
-        if freeBefore >= 0 {
-            // Approximate: other writers on the volume show up here too.
-            metrics["bytes_written_approx"] = String(freeBefore - freeAtEnd)
-        }
-        try? manager.delete(o.attempt)
+        // Keep execution outcome independent of acknowledged cleanup. Failed
+        // stop/delete stays visible; it must never become a signed "closed" fact.
+        let cleanup = await VMClosure.acknowledge(
+            stop: { try await container.stop() },
+            delete: {
+                metrics.merge(preserveBootLog(o)) { a, _ in a }
+                // Preserve the original observation before deleting the clone.
+                let freeAtEnd = Rootfs.freeBytes(o.store)
+                metrics["host_free_bytes"] = String(freeAtEnd)
+                if freeBefore >= 0 {
+                    metrics["bytes_written_approx"] = String(freeBefore - freeAtEnd)
+                }
+                try manager.delete(o.attempt)
+            })
+        metrics.merge(cleanup) { _, b in b }
         if stopped {
             writeStatus(o.stateDir, ["phase": "stopped", "attempt": o.attempt].merging(metrics) { a, _ in a })
             return 143

@@ -287,6 +287,11 @@ func immutable(root *os.Root, name string, b []byte, identicalOK bool) error {
 // after document-only publication or a lost reply. Caller supplies trusted frozen
 // bytes, not an imported manifest. Conflicts and foreign partials are preserved.
 func Publish(dir string, doc, sig []byte) error {
+	return publishPair(dir, DocName, SigName, doc, sig)
+}
+
+// Fixed internal names only; no client-selected publication path.
+func publishPair(dir, docName, sigName string, doc, sig []byte) error {
 	root, err := openRecord(dir)
 	if err != nil {
 		return err
@@ -295,7 +300,7 @@ func Publish(dir string, doc, sig []byte) error {
 	for _, item := range []struct {
 		name string
 		data []byte
-	}{{DocName, doc}, {SigName, sig}} {
+	}{{docName, doc}, {sigName, sig}} {
 		old, err := readRegular(root, item.name)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -307,11 +312,11 @@ func Publish(dir string, doc, sig []byte) error {
 			return ErrConflict
 		}
 	}
-	if err := immutable(root, DocName, doc, true); err != nil {
+	if err := immutable(root, docName, doc, true); err != nil {
 		return err
 	}
 	if sig != nil {
-		return immutable(root, SigName, sig, true)
+		return immutable(root, sigName, sig, true)
 	}
 	return nil
 }
@@ -364,16 +369,20 @@ func readRegularAfterOpen(root *os.Root, name string, afterOpen func()) ([]byte,
 
 // Read returns an attempt's document and signature (nil when unsigned).
 func Read(dir string) (doc, sig []byte, err error) {
+	return readPair(dir, DocName, SigName)
+}
+
+func readPair(dir, docName, sigName string) (doc, sig []byte, err error) {
 	root, err := openRecord(dir)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer root.Close()
-	doc, err = readRegular(root, DocName)
+	doc, err = readRegular(root, docName)
 	if err != nil {
 		return nil, nil, err
 	}
-	sig, err = readRegular(root, SigName)
+	sig, err = readRegular(root, sigName)
 	if errors.Is(err, fs.ErrNotExist) {
 		return doc, nil, nil
 	}

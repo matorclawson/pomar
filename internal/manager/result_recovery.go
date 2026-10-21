@@ -207,6 +207,11 @@ func (m *Manager) resultDisposable(e Entry) bool {
 	if !e.Terminal() {
 		return false
 	}
+	if e.ClosureRequired {
+		if _, status, _ := m.closureRead(e); status != http.StatusOK {
+			return false
+		}
+	}
 	if e.Publication.Intent != nil && (!e.completionSaved || e.Publication.State != "published") {
 		return false
 	}
@@ -224,6 +229,7 @@ func (m *Manager) recoverResults(now time.Time) {
 		// VM custody is independent of publication, including corrupt/legacy
 		// records. Removal runs without the admission/status lock.
 		m.cleanupTerminalVMs()
+		m.recoverClosures(now)
 	}()
 	count := 0
 	entries := m.t.list()

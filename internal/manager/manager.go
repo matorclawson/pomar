@@ -708,6 +708,7 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 		e.Source.Reach = reach
 	}
 	e.ResultPolicy = m.resultPolicy()
+	e.ClosureRequired = true
 	m.t.entries[id] = e
 	if err := m.t.save(); err != nil {
 		return Entry{}, err

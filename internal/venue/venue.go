@@ -513,6 +513,18 @@ func (v *Venue) IsOpen(k Kind, id string) bool {
 	return ok && o.Last != OpRemoved
 }
 
+// ObjectState returns a copy, including a recorded removal. A missing pathname
+// or IsOpen=false alone is not positive evidence that an owned object closed.
+func (v *Venue) ObjectState(k Kind, id string) (Object, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	o, ok := v.objs[key(k, id)]
+	if !ok {
+		return Object{}, false
+	}
+	return *o, true
+}
+
 // EnsureCache ledgers a long-lived cache directory once, before creating it.
 func (v *Venue) EnsureCache(k Kind, id, rel string) error {
 	if v.IsOpen(k, id) {

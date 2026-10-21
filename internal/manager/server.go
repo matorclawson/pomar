@@ -206,6 +206,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 		})
 	}
 	m.resultRoutes(mux) // reads: on both sockets
+	m.closureRoutes(mux) // authorized evidence read, never an imported signing request
 	m.outputRoutes(mux) // reads: on both sockets
 	m.pinsRoutes(mux)   // reads: on both sockets
 	m.logRoutes(mux)    // reads: on both sockets
