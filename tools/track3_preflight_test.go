@@ -274,6 +274,145 @@ func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
 	}
 }
 
+// pomar's review of the previous fix (9098c0b8): "The present test only
+// checks a cooperative shell and immediately absent marker; it does not
+// prove later work cannot complete or descendants are gone." This fake uv
+// explicitly ignores TERM (trap ” TERM), so the only way the script's
+// bounded_run can actually stop it within budget is by escalating to the
+// unmaskable KILL -- proving termination is genuinely bounded, not merely
+// dependent on the child's cooperation, and that the script never falsely
+// reports "killed" by trusting an ignorable signal alone.
+func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *testing.T) {
+	repo := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "uv-finished")
+	fakeUV := "#!/bin/sh\ntrap '' TERM\ncase \"$1\" in\n  --version) echo 'uv 0.0.0-fake' ;;\n  lock) sleep 20; : > \"$MARKER\" ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", script, repo, filepath.Join(root, "scratch"), "3.11")
+	cmd.Env = append([]string{
+		"PATH=" + fakeBin + ":/usr/bin:/bin",
+		"TZ=UTC",
+		"MARKER=" + marker,
+		"TRACK3_UV_TIMEOUT=1",
+	}, filteredEnv("PATH", "TZ", "MARKER", "TRACK3_UV_TIMEOUT")...)
+
+	start := time.Now()
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, out)
+	}
+	// Bounded by the 1s timeout plus the fixed TERM grace (5s) plus a KILL
+	// grace margin -- well under the fake uv's own 20s sleep, which is the
+	// whole point: a TERM-ignoring child must not be able to outlast the
+	// configured budget.
+	if elapsed > 10*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep (TERM-ignoring child must still be bounded): %s", elapsed, out)
+	}
+	if !strings.Contains(string(out), "uv_lock_consistency_with_pyproject") || !strings.Contains(string(out), "NOT-CONFIGURED (timed out after 1s, killed)") {
+		t.Fatalf("expected a timed-out, killed, NOT-CONFIGURED report even though the child ignored TERM: %s", out)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatalf("fake uv's completion marker exists -- a TERM-ignoring child was not actually force-killed before completing")
+	}
+}
+
+// Complementary to the above: a child that outlives TERM but happens to
+// finish on its own, within the fixed TERM grace window and before KILL
+// would otherwise fire, must be reported honestly -- it timed out (ran past
+// budget) but was not actually killed by this check, and the script must
+// say so rather than claim "killed" for a termination it didn't cause.
+func TestTrack3PreflightReportsHonestlyWhenChildCompletesDuringTermGraceWithoutBeingKilled(t *testing.T) {
+	repo := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "uv-finished")
+	// Ignores TERM, but finishes on its own in ~2s -- inside the fixed 5s
+	// TERM grace window, so KILL should never need to fire.
+	fakeUV := "#!/bin/sh\ntrap '' TERM\ncase \"$1\" in\n  --version) echo 'uv 0.0.0-fake' ;;\n  lock) sleep 2; : > \"$MARKER\"; exit 0 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", script, repo, filepath.Join(root, "scratch"), "3.11")
+	cmd.Env = append([]string{
+		"PATH=" + fakeBin + ":/usr/bin:/bin",
+		"TZ=UTC",
+		"MARKER=" + marker,
+		"TRACK3_UV_TIMEOUT=1",
+	}, filteredEnv("PATH", "TZ", "MARKER", "TRACK3_UV_TIMEOUT")...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "completed on its own before termination was confirmed -- not killed by this check") {
+		t.Fatalf("expected an honest not-killed-by-this-check report for a child that outlived TERM but finished before KILL: %s", out)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("the child's own marker should exist in this case (it really did complete on its own): %v", statErr)
+	}
+}
+
+// pomar's review: TRACK3_UV_TIMEOUT must be validated as a positive, bounded
+// integer -- not trusted blindly, which would otherwise make the arithmetic
+// comparisons error out (non-numeric) or let an absurd value function as
+// "no timeout" in practice.
+func TestTrack3PreflightRejectsInvalidUvTimeout(t *testing.T) {
+	repo := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte("#!/bin/sh\necho 'uv 0.0.0-fake'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"0", "-1", "not-a-number", "999999"} {
+		t.Run(bad, func(t *testing.T) {
+			cmd := exec.Command("sh", script, repo, filepath.Join(root, "scratch-"+bad), "3.11")
+			cmd.Env = append([]string{
+				"PATH=" + fakeBin + ":/usr/bin:/bin",
+				"TZ=UTC",
+				"TRACK3_UV_TIMEOUT=" + bad,
+			}, filteredEnv("PATH", "TZ", "TRACK3_UV_TIMEOUT")...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("script failed: %v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), "TRACK3_UV_TIMEOUT invalid") {
+				t.Fatalf("expected an explicit invalid-timeout report for %q: %s", bad, out)
+			}
+			if strings.Contains(string(out), "uv_lock_consistency_with_pyproject") {
+				t.Fatalf("an invalid timeout must not proceed to run the lock check at all: %s", out)
+			}
+		})
+	}
+}
+
 // filteredEnv returns the current environment with the given keys removed,
 // so a constructed PATH/TZ above is the only source of truth for them.
 func filteredEnv(exclude ...string) []string {
