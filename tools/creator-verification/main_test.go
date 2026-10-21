@@ -22,15 +22,21 @@ func sampleManifest() manifest {
 func sampleBytes(t *testing.T) []byte {
 	t.Helper()
 	b, err := json.Marshal(sampleManifest())
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	return b
 }
 
 func TestCanonicalManifestAndEscapedCanonicalKey(t *testing.T) {
 	b := sampleBytes(t)
-	if _, err := parseManifest(b); err != nil { t.Fatalf("canonical refused: %v", err) }
+	if _, err := parseManifest(b); err != nil {
+		t.Fatalf("canonical refused: %v", err)
+	}
 	b = bytes.Replace(b, []byte(`"source_mode"`), []byte(`"\u0073ource_mode"`), 1)
-	if _, err := parseManifest(b); err != nil { t.Fatalf("decoded canonical key refused: %v", err) }
+	if _, err := parseManifest(b); err != nil {
+		t.Fatalf("decoded canonical key refused: %v", err)
+	}
 }
 
 func TestCanonicalKeysAtEveryObject(t *testing.T) {
@@ -51,7 +57,9 @@ func TestCanonicalKeysAtEveryObject(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := bytes.Replace(sampleBytes(t), []byte(tc.from), []byte(tc.to), 1)
-			if _, err := parseManifest(b); err == nil { t.Fatal("noncanonical or duplicate key accepted") }
+			if _, err := parseManifest(b); err == nil {
+				t.Fatal("noncanonical or duplicate key accepted")
+			}
 		})
 	}
 }
@@ -61,7 +69,10 @@ func TestCanonicalKeysAtEveryObject(t *testing.T) {
 func TestLiteralSourceAndKelvinFoldControls(t *testing.T) {
 	objectKeys["fold-control"] = keys("source", "kind")
 	defer delete(objectKeys, "fold-control")
-	for _, tc := range []struct{ body string; allowed bool }{
+	for _, tc := range []struct {
+		body    string
+		allowed bool
+	}{
 		{`{"source":"x","kind":"k"}`, true},
 		{`{"Source":"x","kind":"k"}`, false},
 		{`{"SOURCE":"x","kind":"k"}`, false},
@@ -73,7 +84,9 @@ func TestLiteralSourceAndKelvinFoldControls(t *testing.T) {
 		d := json.NewDecoder(strings.NewReader(tc.body))
 		d.UseNumber()
 		err := exactObject(d, "fold-control")
-		if (err == nil) != tc.allowed { t.Fatalf("unexpected key verdict for %q: %v", tc.body, err) }
+		if (err == nil) != tc.allowed {
+			t.Fatalf("unexpected key verdict for %q: %v", tc.body, err)
+		}
 	}
 }
 
@@ -86,14 +99,19 @@ func TestMalformedNonfiniteTrailingAndSizeRefused(t *testing.T) {
 		bytes.Replace(sampleBytes(t), []byte(`"stdout_bytes":8388608`), []byte(`"stdout_bytes":1e9999999`), 1),
 		bytes.Replace(sampleBytes(t), []byte(`"limits":{`), []byte(`"limits":null,"extra":{`), 1),
 		[]byte(strings.Repeat(" ", manifestLimit+1)),
-		[]byte(`{"schema":`+strings.Repeat("[", 10000)),
+		[]byte(`{"schema":` + strings.Repeat("[", 10000)),
 	} {
-		if _, err := parseManifest(b); err == nil { t.Fatal("invalid JSON or bound accepted") }
+		if _, err := parseManifest(b); err == nil {
+			t.Fatal("invalid JSON or bound accepted")
+		}
 	}
 }
 
 func TestIdentityClosureAndInventoryRefusals(t *testing.T) {
-	for _, tc := range []struct{ name string; change func(*manifest) }{
+	for _, tc := range []struct {
+		name   string
+		change func(*manifest)
+	}{
 		{"wrong-head", func(m *manifest) { m.SourceCommit = strings.Repeat("0", 40) }},
 		{"wrong-mode", func(m *manifest) { m.SourceMode = "readonly-running-checkout" }},
 		{"unbound-closure", func(m *manifest) { m.ClosureSHA256 = strings.Repeat("0", 64) }},
@@ -113,8 +131,12 @@ func TestIdentityClosureAndInventoryRefusals(t *testing.T) {
 			m := sampleManifest()
 			tc.change(&m)
 			b, err := json.Marshal(m)
-			if err != nil { t.Fatal(err) }
-			if _, err := parseManifest(b); err == nil { t.Fatal("invalid binding accepted") }
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := parseManifest(b); err == nil {
+				t.Fatal("invalid binding accepted")
+			}
 		})
 	}
 }
@@ -122,65 +144,121 @@ func TestIdentityClosureAndInventoryRefusals(t *testing.T) {
 func TestInventoryBindsBytesAndRejectsExtraSymlinkAndSpecialOutput(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "input")
-	if err := os.WriteFile(path, []byte("abc"), 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(path, []byte("abc"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	pins, err := inventory(ctx, root, 3, 1, false)
-	if err != nil || len(pins) != 1 || pins[0].SHA256 != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" { t.Fatalf("wrong inventory: %v", err) }
-	if err := verifyInventory(ctx, root, pins, false); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(path, []byte("abd"), 0600); err != nil { t.Fatal(err) }
-	if err := verifyInventory(ctx, root, pins, false); err == nil { t.Fatal("changed bytes accepted") }
-	if err := os.WriteFile(filepath.Join(root, "extra"), []byte("x"), 0600); err != nil { t.Fatal(err) }
-	if err := outputWithin(ctx, root, 3, 2); err == nil { t.Fatal("byte overflow accepted") }
-	if err := outputWithin(ctx, root, 10, 1); err == nil { t.Fatal("file overflow accepted") }
-	if err := os.Symlink(path, filepath.Join(root, "link")); err != nil { t.Fatal(err) }
-	if _, err := inventory(ctx, root, 100, 10, false); err == nil { t.Fatal("symlink input accepted") }
-	if err := outputWithin(ctx, root, 100, 10); err == nil { t.Fatal("symlink output accepted") }
-	if err := noLinks(filepath.Join(root, "link")); err == nil { t.Fatal("symlink path accepted") }
+	if err != nil || len(pins) != 1 || pins[0].SHA256 != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Fatalf("wrong inventory: %v", err)
+	}
+	if err := verifyInventory(ctx, root, pins, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("abd"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyInventory(ctx, root, pins, false); err == nil {
+		t.Fatal("changed bytes accepted")
+	}
+	if err := os.WriteFile(filepath.Join(root, "extra"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := outputWithin(ctx, root, 3, 2); err == nil {
+		t.Fatal("byte overflow accepted")
+	}
+	if err := outputWithin(ctx, root, 10, 1); err == nil {
+		t.Fatal("file overflow accepted")
+	}
+	if err := os.Symlink(path, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inventory(ctx, root, 100, 10, false); err == nil {
+		t.Fatal("symlink input accepted")
+	}
+	if err := outputWithin(ctx, root, 100, 10); err == nil {
+		t.Fatal("symlink output accepted")
+	}
+	if err := noLinks(filepath.Join(root, "link")); err == nil {
+		t.Fatal("symlink path accepted")
+	}
 }
 
 func TestInventoryDeadlineAndAncestorEscape(t *testing.T) {
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := inventory(ctx, root, 100, 10, false); err == nil { t.Fatal("expired observation accepted") }
-	if err := os.Symlink(root, filepath.Join(root, "alias")); err != nil { t.Fatal(err) }
-	if err := noLinks(filepath.Join(root, "alias", "nested")); err == nil { t.Fatal("linked ancestor accepted") }
+	if _, err := inventory(ctx, root, 100, 10, false); err == nil {
+		t.Fatal("expired observation accepted")
+	}
+	if err := os.Symlink(root, filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := noLinks(filepath.Join(root, "alias", "nested")); err == nil {
+		t.Fatal("linked ancestor accepted")
+	}
 	for _, name := range []string{"", ".", "..", "a/../b", "/abs", "../x", "a\\b", ".git/config", "a\x00b"} {
-		if relative(name) { t.Fatalf("unsafe name %q", name) }
+		if relative(name) {
+			t.Fatalf("unsafe name %q", name)
+		}
 	}
 }
 
 func TestPinnedCreatorNodeLinkIsLiteralSourceOnly(t *testing.T) {
 	root := t.TempDir()
 	target := "packages/publication-core/.node-version"
-	if err := os.MkdirAll(filepath.Join(root, "packages/publication-core"), 0700); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(root, target), []byte("24\n"), 0600); err != nil { t.Fatal(err) }
+	if err := os.MkdirAll(filepath.Join(root, "packages/publication-core"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, target), []byte("24\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	link := filepath.Join(root, ".node-version")
-	if err := os.Symlink(target, link); err != nil { t.Fatal(err) }
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
 	pins, err := inventory(context.Background(), root, 1000, 10, true)
-	if err != nil || len(pins) != 2 || pins[0].Path != ".node-version" || pins[0].Bytes != int64(len(target)) { t.Fatalf("pinned link not bound literally: %v", err) }
-	if _, err := inventory(context.Background(), root, 1000, 10, false); err == nil { t.Fatal("source-only link exception leaked to cache/tool inventory") }
-	if err := os.Remove(link); err != nil { t.Fatal(err) }
-	if err := os.Symlink("../outside", link); err != nil { t.Fatal(err) }
-	if _, err := inventory(context.Background(), root, 1000, 10, true); err == nil { t.Fatal("escaped source link accepted") }
+	if err != nil || len(pins) != 2 || pins[0].Path != ".node-version" || pins[0].Bytes != int64(len(target)) {
+		t.Fatalf("pinned link not bound literally: %v", err)
+	}
+	if _, err := inventory(context.Background(), root, 1000, 10, false); err == nil {
+		t.Fatal("source-only link exception leaked to cache/tool inventory")
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../outside", link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inventory(context.Background(), root, 1000, 10, true); err == nil {
+		t.Fatal("escaped source link accepted")
+	}
 }
 
 func TestWorkloadCloneRefusesSharedRegularInodes(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "one")
-	if err := os.WriteFile(path, []byte("sample"), 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(path, []byte("sample"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	uid := uint32(os.Geteuid())
-	if err := workloadOwned(context.Background(), root, uid); err != nil { t.Fatalf("independent own file refused: %v", err) }
-	if err := os.Link(path, filepath.Join(root, "two")); err != nil { t.Fatal(err) }
-	if err := workloadOwned(context.Background(), root, uid); err == nil { t.Fatal("shared regular inode accepted") }
+	if err := workloadOwned(context.Background(), root, uid); err != nil {
+		t.Fatalf("independent own file refused: %v", err)
+	}
+	if err := os.Link(path, filepath.Join(root, "two")); err != nil {
+		t.Fatal(err)
+	}
+	if err := workloadOwned(context.Background(), root, uid); err == nil {
+		t.Fatal("shared regular inode accepted")
+	}
 }
 
 type fakeExecutor struct {
-	results []stepResult
-	names []string
+	results    []stepResult
+	names      []string
 	outBudgets []int64
 	errBudgets []int64
-	deadlines []time.Duration
+	deadlines  []time.Duration
 }
 
 func (e *fakeExecutor) Step(_ context.Context, name string, duration time.Duration, out, errout int64) stepResult {
@@ -203,11 +281,21 @@ func TestFixedSequenceAggregateLimitsAndUnknownCleanup(t *testing.T) {
 	l := sampleManifest().Limits
 	l.StdoutBytes, l.StderrBytes = 10, 8
 	r := sequence(context.Background(), l, e)
-	if strings.Join(e.names, ",") != "verify,doctor" { t.Fatal("wrong fixed commands") }
-	if e.outBudgets[1] != 2 || e.errBudgets[1] != 3 { t.Fatal("step reset the aggregate limits") }
-	if e.deadlines[0] != 600*time.Second || e.deadlines[1] != 60*time.Second { t.Fatal("wrong deadlines") }
-	if r.Outcome != "UNKNOWN" || r.Quiescence != "UNKNOWN" || r.Cleanup != "GUEST_TEARDOWN_REQUIRED" || r.Evidence != "SELF_REPORTED" { t.Fatal("two zero exits promoted to trusted cleanup/pass") }
-	if r.SourceMode != "disposable-copy-of-readonly-input" || !strings.Contains(r.Limitations, "transient") || !strings.Contains(r.Limitations, "escaped") { t.Fatal("missing report limitations") }
+	if strings.Join(e.names, ",") != "verify,doctor" {
+		t.Fatal("wrong fixed commands")
+	}
+	if e.outBudgets[1] != 2 || e.errBudgets[1] != 3 {
+		t.Fatal("step reset the aggregate limits")
+	}
+	if e.deadlines[0] != 600*time.Second || e.deadlines[1] != 60*time.Second {
+		t.Fatal("wrong deadlines")
+	}
+	if r.Outcome != "UNKNOWN" || r.Quiescence != "UNKNOWN" || r.Cleanup != "GUEST_TEARDOWN_REQUIRED" || r.Evidence != "SELF_REPORTED" {
+		t.Fatal("two zero exits promoted to trusted cleanup/pass")
+	}
+	if r.SourceMode != "disposable-copy-of-readonly-input" || !strings.Contains(r.Limitations, "transient") || !strings.Contains(r.Limitations, "escaped") {
+		t.Fatal("missing report limitations")
+	}
 }
 
 func TestFailureShortCircuitAndLogOverflowNeverPass(t *testing.T) {
@@ -221,8 +309,12 @@ func TestFailureShortCircuitAndLogOverflowNeverPass(t *testing.T) {
 	} {
 		e := &fakeExecutor{results: []stepResult{s}}
 		r := sequence(context.Background(), sampleManifest().Limits, e)
-		if len(e.names) != 1 || r.Outcome != "FAILURE" || r.Quiescence != "UNKNOWN" { t.Fatal("failure ran doctor or claimed cleanup/pass") }
-		if r.Steps[0].Failure != s.Failure { t.Fatal("original failure discarded") }
+		if len(e.names) != 1 || r.Outcome != "FAILURE" || r.Quiescence != "UNKNOWN" {
+			t.Fatal("failure ran doctor or claimed cleanup/pass")
+		}
+		if r.Steps[0].Failure != s.Failure {
+			t.Fatal("original failure discarded")
+		}
 	}
 }
 
@@ -233,7 +325,9 @@ func TestInheritedDescriptorsAndEscapedDescendantStayUnknown(t *testing.T) {
 		t.Run(observation, func(t *testing.T) {
 			e := &fakeExecutor{results: []stepResult{result(0, 0, 0), result(0, 0, 0)}}
 			r := sequence(context.Background(), sampleManifest().Limits, e)
-			if r.Outcome != "UNKNOWN" || r.Quiescence != "UNKNOWN" { t.Fatal("unknown descendant custody became clean") }
+			if r.Outcome != "UNKNOWN" || r.Quiescence != "UNKNOWN" {
+				t.Fatal("unknown descendant custody became clean")
+			}
 		})
 	}
 }
@@ -243,5 +337,7 @@ func TestWholeDeadlineDoesNotLaunchAnotherStep(t *testing.T) {
 	cancel()
 	e := &fakeExecutor{}
 	r := sequence(ctx, sampleManifest().Limits, e)
-	if len(e.names) != 0 || r.Outcome != "FAILURE" || r.Failure != "whole_deadline" { t.Fatal("expired original launched workload") }
+	if len(e.names) != 0 || r.Outcome != "FAILURE" || r.Failure != "whole_deadline" {
+		t.Fatal("expired original launched workload")
+	}
 }
