@@ -34,6 +34,63 @@ usage='usage: sh tools/track3-preflight.sh <zeocore-repo-path> <scratch-path> <p
 [ -n "$scratch" ] || { echo "$usage" >&2; exit 2; }
 [ -n "$job_target" ] || { echo "$usage" >&2; exit 2; }
 
+# pomar's review of pr#142 (9098c0b8): the previous bounded-wait sent TERM
+# then called a plain `wait`, which is itself unbounded if the child traps
+# or ignores TERM -- a child that outlives TERM can run (and "complete")
+# indefinitely while the script still prints "killed". The watchdog below
+# is the actual bounding primitive: it always escalates to the unmaskable
+# KILL after a short fixed grace period, so the shell's own blocking `wait`
+# on the real child is bounded by that escalation, not by the child's own
+# cooperation. `wait` is never polled via kill -0 (a zombie still answers
+# kill -0 until reaped, so that would not distinguish "still running" from
+# "exited, awaiting reap"); it is called exactly once, and is what actually
+# reaps the child and reports its true exit status. The one honest residual
+# gap -- a process stuck in an unkillable kernel state even after KILL --
+# is out of this fix's scope (no generic executor redesign); everything
+# else must never silently read as the ordinary "completed" or "killed".
+bounded_run() {
+  budget=$1
+  outfile=$2
+  shift 2
+  start=$(date +%s)
+  "$@" >"$outfile" 2>&1 &
+  pid=$!
+  # The watchdog's own stdout/stderr must be redirected here, not inherited:
+  # bounded_run is itself called inside a command substitution (`x=$(...)`),
+  # which only sees EOF once every process holding its pipe's write end has
+  # closed it. Killing the watchdog's own subshell process does not kill an
+  # already-running `sleep` it has already forked as a plain foreground
+  # child (the same orphaning this fix exists to handle for the real
+  # command) -- that orphaned sleep would otherwise keep the inherited pipe
+  # fd open for its own remaining duration, silently stalling the
+  # substitution for up to budget+5 extra seconds even after bounded_run's
+  # own bookkeeping has already finished. Redirecting to /dev/null here
+  # means its children inherit that instead.
+  (
+    sleep "$budget"
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 5
+    kill -KILL "$pid" 2>/dev/null || true
+  ) >/dev/null 2>&1 &
+  watchdog=$!
+  # Under `set -e`, a bare failing `wait` would abort this function (and,
+  # since this runs inside a command-substitution subshell, silently
+  # truncate the caller's output) before the report below is ever printed --
+  # the exit-status capture must stay inside an if-condition, exempt from -e.
+  if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  end=$(date +%s)
+  elapsed=$((end - start))
+  if [ "$rc" -ge 128 ]; then
+    echo "TIMED_OUT_KILLED $rc"
+  elif [ "$elapsed" -gt "$budget" ]; then
+    echo "TIMED_OUT_COMPLETED_BEFORE_TERMINATION $rc"
+  else
+    echo "COMPLETED $rc"
+  fi
+}
+
 preflight() {
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   host=$(hostname)
@@ -117,38 +174,81 @@ preflight() {
   # it precisely as what it is; a real installed-environment qualification
   # is a separate, not-yet-written check, out of this script's scope.
   uv_path=$(command -v uv 2>/dev/null || true)
+  uv_timeout_ok=false
   if [ -z "$uv_path" ]; then
     echo "uv on PATH: DOES-NOT-EXIST"
   else
-    echo "uv on PATH: $uv_path ($("$uv_path" --version 2>&1))"
+    # pomar's review: TRACK3_UV_TIMEOUT must be a positive, bounded integer
+    # -- not empty, not negative/zero, not non-numeric (which would make the
+    # arithmetic comparisons below error out), and not an absurdly large
+    # value that functions as "no timeout" in practice.
+    uv_timeout=${TRACK3_UV_TIMEOUT:-30}
+    case "$uv_timeout" in
+      '' | *[!0-9]*)
+        echo "uv on PATH: $uv_path (TRACK3_UV_TIMEOUT invalid: must be a positive integer, got '$uv_timeout')"
+        ;;
+      *)
+        if [ "$uv_timeout" -ge 1 ] && [ "$uv_timeout" -le 3600 ]; then
+          uv_timeout_ok=true
+        else
+          echo "uv on PATH: $uv_path (TRACK3_UV_TIMEOUT invalid: must be between 1 and 3600 seconds, got $uv_timeout)"
+        fi
+        ;;
+    esac
+  fi
+  if [ "$uv_timeout_ok" = true ]; then
+    # pomar's review: the preceding --version call is its own subprocess and
+    # must not be claimed as covered by the lock-check's own timeout below
+    # -- it gets its own short, separately-bounded run instead of an
+    # unbounded direct call.
+    versionfile=$(mktemp)
+    version_report=$(bounded_run 10 "$versionfile" "$uv_path" --version)
+    case "$version_report" in
+      COMPLETED\ 0) echo "uv on PATH: $uv_path ($(cat "$versionfile"))" ;;
+      *) echo "uv on PATH: $uv_path (version check: $version_report, bounded to 10s)" ;;
+    esac
+    rm -f "$versionfile"
+
     required_python=$(awk -F'"' '/^requires-python/{print $2; exit}' "$repo/pyproject.toml" 2>/dev/null || echo NOT-INSPECTED)
     echo "zeocore requires-python: $required_python"
     # pomar's review: this check may consult the network or uv's own cache,
     # so an unresponsive network/registry must not hang this (or any caller's
-    # mandatory) run indefinitely. Bounded to uv_timeout seconds, with the
-    # child process killed (not merely abandoned) on timeout; the `exec`
-    # inside the subshell replaces it with uv itself, so `$!` names the
-    # actual child to kill, never an already-exited wrapper shell.
-    uv_timeout=${TRACK3_UV_TIMEOUT:-30}
+    # mandatory) run indefinitely. bounded_run's watchdog guarantees the
+    # child is escalated to an unmaskable KILL, not merely sent a signal it
+    # can ignore, so termination is genuinely bounded -- never report
+    # "killed" without that escalation having actually confirmed it.
     lockcheck=$(mktemp)
-    (cd "$repo" && exec "$uv_path" lock --check >"$lockcheck" 2>&1) &
-    uv_pid=$!
-    uv_waited=0
-    while kill -0 "$uv_pid" 2>/dev/null && [ "$uv_waited" -lt "$uv_timeout" ]; do
-      sleep 1
-      uv_waited=$((uv_waited + 1))
-    done
-    lock_reason=""
-    if kill -0 "$uv_pid" 2>/dev/null; then
-      kill "$uv_pid" 2>/dev/null || true
-      wait "$uv_pid" 2>/dev/null || true
-      lock_consistency=NOT-CONFIGURED
-      lock_reason=" (timed out after ${uv_timeout}s, killed)"
-    elif wait "$uv_pid"; then
-      lock_consistency=VERIFIED
-    else
-      lock_consistency=NOT-CONFIGURED
-    fi
+    lock_report=$(cd "$repo" && bounded_run "$uv_timeout" "$lockcheck" "$uv_path" lock --check)
+    case "$lock_report" in
+      "COMPLETED 0")
+        lock_consistency=VERIFIED
+        lock_reason=""
+        ;;
+      COMPLETED\ *)
+        lock_consistency=NOT-CONFIGURED
+        lock_reason=""
+        ;;
+      TIMED_OUT_KILLED\ *)
+        lock_consistency=NOT-CONFIGURED
+        lock_reason=" (timed out after ${uv_timeout}s, killed)"
+        ;;
+      TIMED_OUT_COMPLETED_BEFORE_TERMINATION\ *)
+        # Honest, not glossed over: the child outlived the timeout but
+        # happened to finish on its own before our escalation reaped it --
+        # this is still a timeout for this run's purposes (it did not
+        # complete within budget), but it was not actually killed by us, and
+        # saying so would be false.
+        lock_consistency=NOT-CONFIGURED
+        lock_reason=" (timed out after ${uv_timeout}s, completed on its own before termination was confirmed -- not killed by this check)"
+        ;;
+      *)
+        # A supported primitive unavailable (bounded_run itself failed to
+        # run, or produced an unrecognized report) must read as unknown, not
+        # as a safe default in either direction.
+        lock_consistency=UNKNOWN
+        lock_reason=" (bounded execution unavailable or unrecognized: $lock_report)"
+        ;;
+    esac
     echo "uv_lock_consistency_with_pyproject (uv lock --check; may consult network/cache, not a bounded offline check, bounded to ${uv_timeout}s, and does not prove an installed environment): $lock_consistency$lock_reason"
     rm -f "$lockcheck"
   fi
