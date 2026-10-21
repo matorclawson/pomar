@@ -142,7 +142,15 @@ func TestPublicHostStartLaunchesARealLocatableProcess(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("start failed: %d %s", w.Code, w.Body.String())
 	}
+	// pomar's review (POMAR147-CLEANUP-1): the pinned helper's cleanup must
+	// be registered immediately after a successful launch, before any
+	// fallible assertion -- otherwise a t.Fatal in one of those assertions
+	// leaks the real process, since Cleanup only runs what was already
+	// registered. snapshot() itself cannot fail/fatal, so it's safe to read
+	// before registering.
 	snap := snapshot(h, e)
+	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap.PID, Start: snap.Start}) })
+
 	if snap.Phase != "running" {
 		t.Fatalf("phase = %q, want running", snap.Phase)
 	}
@@ -157,7 +165,6 @@ func TestPublicHostStartLaunchesARealLocatableProcess(t *testing.T) {
 	if err := syscall.Kill(snap.PID, 0); err != nil {
 		t.Fatalf("recorded PID %d is not a real running process: %v", snap.PID, err)
 	}
-	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap.PID, Start: snap.Start}) })
 
 	a := snap.Actions["start-1"]
 	if a.State != "completed" || a.ResultingIncarnation != snap.Incarnation {
@@ -267,7 +274,12 @@ func TestPublicHostStopThenReconcileProducesRealReconciliationEvidence(t *testin
 	if w := hostActionCall(h, "env", "start", "start-1", ""); w.Code != 200 {
 		t.Fatalf("start failed: %d %s", w.Code, w.Body.String())
 	}
-	incarnation1 := snapshot(h, e).Incarnation
+	// pomar's review (POMAR147-CLEANUP-1): registered immediately after the
+	// successful launch, before the fallible WriteFile/kill/stop sequence
+	// below -- a pinned helper leaks if any of those fatal first.
+	snap1 := snapshot(h, e)
+	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap1.PID, Start: snap1.Start}) })
+	incarnation1 := snap1.Incarnation
 	if err := os.WriteFile(e.Spec.Rootfs, []byte("retained workspace bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +375,11 @@ func TestPublicHostReplaceResolutionTargetSequence(t *testing.T) {
 	if w := hostActionCall(h, "env", "start", "start-1", ""); w.Code != 200 {
 		t.Fatalf("start-1 failed: %d %s", w.Code, w.Body.String())
 	}
-	incarnation1 := snapshot(h, e).Incarnation
+	// pomar's review (POMAR147-CLEANUP-1): registered immediately after the
+	// successful launch, before the fallible Store/Broker setup below.
+	snap1 := snapshot(h, e)
+	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap1.PID, Start: snap1.Start}) })
+	incarnation1 := snap1.Incarnation
 	if err := os.WriteFile(e.Spec.Rootfs, []byte("retained workspace bytes"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -492,11 +508,30 @@ func TestKillOwnedProcessRefusesWhenIdentityNoLongerMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := cmd.Process.Pid
-	// Kill only, no Wait here: the test body itself owns reaping (via the
-	// background cmd.Wait() goroutine below) on every path that reaches it;
-	// a second concurrent Wait() call on the same *exec.Cmd is a documented
-	// misuse. This is just a kill-only safety net for an early t.Fatal.
-	t.Cleanup(func() { cmd.Process.Kill() })
+	// pomar's review (POMAR147-CLEANUP-1): the single authoritative
+	// cmd.Wait() goroutine starts immediately after Start() succeeds, not
+	// later past fallible assertions -- an early t.Fatal before this point
+	// previously left no goroutine to ever join, so cleanup's kill alone
+	// could leave an unreaped zombie. Cleanup now kills and joins this SAME
+	// channel (never a second, concurrent Wait() call on the same *exec.Cmd,
+	// which is a documented misuse).
+	stillRunning := make(chan error, 1)
+	go func() { stillRunning <- cmd.Wait() }()
+	t.Cleanup(func() {
+		// Short-circuit on the normal success path, where the main test
+		// body has already drained stillRunning and the process is already
+		// gone: without this check, cleanup would otherwise block for the
+		// full timeout below on every run, since nothing more is ever sent
+		// on an already-drained channel.
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		cmd.Process.Kill()
+		select {
+		case <-stillRunning:
+		case <-time.After(5 * time.Second):
+		}
+	})
 
 	ps, err := (proc.PS{}).List()
 	if err != nil {
@@ -522,8 +557,6 @@ func TestKillOwnedProcessRefusesWhenIdentityNoLongerMatches(t *testing.T) {
 	// immediately; a genuinely still-running, untouched process makes Wait
 	// block for the whole timeout.
 	killOwnedProcess(t, proc.Process{PID: pid, Start: "Mon Jan  1 00:00:00 1970"})
-	stillRunning := make(chan error, 1)
-	go func() { stillRunning <- cmd.Wait() }()
 	select {
 	case err := <-stillRunning:
 		t.Fatalf("process %d was reaped (so it was signaled) despite a mismatching recorded identity: %v", pid, err)
