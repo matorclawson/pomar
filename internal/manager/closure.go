@@ -161,7 +161,7 @@ func (m *Manager) closurePair(e Entry) (ResultReply, int, string) {
 			}
 			return ResultReply{}, 503, "closure_pending"
 		}
-		if !result.Verify(i.Policy.PublicKey, doc, sig) {
+		if !result.VerifyClosure(i.Policy.PublicKey, doc, sig) {
 			return ResultReply{}, 409, "closure_corrupt"
 		}
 		out.Signature = encodeSignature(sig)
@@ -259,7 +259,7 @@ func (m *Manager) recoverClosures(now time.Time) {
 					m.mu.Unlock()
 					continue
 				}
-				sig = signer.Sign(p.Intent.Document)
+				sig = signer.SignClosure(p.Intent.Document)
 			}
 			err = result.PublishClosure(filepath.Join(m.cfg.Venue.Root(), attemptsDir, e.Attempt), p.Intent.Document, sig)
 		}

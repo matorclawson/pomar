@@ -1,5 +1,7 @@
 package result
 
+import "crypto/ed25519"
+
 // sow: pomar-SOW-87. Closure is independent of the unchanged result/v1 wire.
 // Only the trusted manager assembles and freezes this evidence. This package
 // exposes no endpoint that imports manifests or signs actor-supplied claims.
@@ -30,4 +32,25 @@ func ReadHelperStatus(dir string) ([]byte, error) {
 	}
 	defer root.Close()
 	return readRegular(root, "status.json")
+}
+
+// ClosureSignatureContext separates closure evidence from the unchanged raw
+// result signature domain. Signatures cover these bytes, then the exact JSON.
+const ClosureSignatureContext = "pomar.closure/v1\x00"
+
+func closureMessage(doc []byte) []byte {
+	message := make([]byte, len(ClosureSignatureContext)+len(doc))
+	copy(message, ClosureSignatureContext)
+	copy(message[len(ClosureSignatureContext):], doc)
+	return message
+}
+
+// SignClosure signs trusted frozen closure bytes in their own domain.
+func (s *Signer) SignClosure(doc []byte) []byte {
+	return s.Sign(closureMessage(doc))
+}
+
+// VerifyClosure requires the closure domain; legacy raw signatures are refused.
+func VerifyClosure(pub ed25519.PublicKey, doc, sig []byte) bool {
+	return Verify(pub, closureMessage(doc), sig)
 }

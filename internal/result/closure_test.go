@@ -58,3 +58,29 @@ func TestClosureFinalSymlinkCannotAuthorizeOrModifyForeignEvidence(t *testing.T)
 		t.Fatal("foreign evidence changed", err)
 	}
 }
+
+func TestClosureSignatureCannotBeUsedAsResultSignature(t *testing.T) {
+	dir := t.TempDir()
+	signer, err := LoadOrCreate(dir, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := []byte(`{"schema":"pomar.closure/v1","attempt":"original"}`)
+	proof := signer.SignClosure(doc)
+	if !VerifyClosure(signer.Public(), doc, proof) {
+		t.Fatal("valid closure rejected")
+	}
+	if Verify(signer.Public(), doc, proof) {
+		t.Fatal("closure accepted in raw result signature domain")
+	}
+	raw := signer.Sign(doc)
+	if !Verify(signer.Public(), doc, raw) {
+		t.Fatal("unchanged raw result signature rejected")
+	}
+	if VerifyClosure(signer.Public(), doc, raw) {
+		t.Fatal("raw result signature accepted as closure")
+	}
+	if VerifyClosure(signer.Public(), append(append([]byte(nil), doc...), ' '), proof) {
+		t.Fatal("changed closure bytes accepted")
+	}
+}

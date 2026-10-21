@@ -97,6 +97,10 @@ consumer can rely on explicit cleanup evidence.
 The separately signed `pomar.closure/v1` document is read at
 `GET /v1/attempts/{id}/closure`, with the same attempt/class authorization as
 result reads. Its successful wrapper has `closure`, `signature`, and `key_id`.
+The closure signature covers ASCII `pomar.closure/v1`, one NUL byte, then
+the exact closure JSON bytes. Consumers use `result.VerifyClosure`; raw
+`pomar.result/v1` signatures and their wire format remain unchanged. A raw
+signature over a closure document is refused.
 The exact `pomar.result/v1` document and successful result wrapper are unchanged.
 Only the manager assembles closure evidence; there is no manifest-import or
 arbitrary-signing endpoint.

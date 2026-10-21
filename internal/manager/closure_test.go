@@ -65,7 +65,7 @@ func TestClosurePublicReaderBindsOriginalResultAndPositiveCleanup(t *testing.T) 
 	if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Verify(m.cfg.Signer.Public(), reply.Closure, decodeClosureSignature(reply.Signature)) {
+	if !result.VerifyClosure(m.cfg.Signer.Public(), reply.Closure, decodeClosureSignature(reply.Signature)) {
 		t.Fatal("closure signature invalid")
 	}
 	var d ClosureDocument
@@ -104,7 +104,7 @@ func TestClosureInterruptedPublicationRecoversOriginalWithPinnedKey(t *testing.T
 	m.cfg.Signer = signer
 	m.recoverClosures(time.Now().Add(2 * time.Second))
 	doc, sig, err := result.ReadClosure(dir)
-	if err != nil || !bytes.Equal(doc, original) || !result.Verify(signer.Public(), doc, sig) {
+	if err != nil || !bytes.Equal(doc, original) || !result.VerifyClosure(signer.Public(), doc, sig) {
 		t.Fatal("original closure not recovered", err)
 	}
 	if w := closureRequest(m, e.Attempt); w.Code != 200 {
@@ -188,7 +188,7 @@ func TestClosureKeyRotationHoldsOriginalUntilItsSignerReturns(t *testing.T) {
 	m.cfg.Signer = signer
 	m.recoverClosures(time.Now().Add(4 * time.Second))
 	doc, sig, err := result.ReadClosure(dir)
-	if err != nil || !bytes.Equal(doc, original) || !result.Verify(signer.Public(), doc, sig) {
+	if err != nil || !bytes.Equal(doc, original) || !result.VerifyClosure(signer.Public(), doc, sig) {
 		t.Fatal("original key did not recover original", err)
 	}
 }
