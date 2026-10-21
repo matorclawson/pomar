@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/zeroemployeeorg/pomar/internal/proc"
 )
 
 // POMAR-CC-SOW-37 rev3: a public-Host-API replacement->resolution regression
@@ -50,7 +52,11 @@ func fakeHelperBinary(t *testing.T) string {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(dir, "fakehelper")
-	cmd := exec.Command("go", "build", "-o", bin, src)
+	// Bounded: pomar's review -- a failed/hung fixture build must not hang
+	// the whole finite gate alongside it.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", bin, src)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building fake helper binary: %v\n%s", err, out)
 	}
@@ -76,6 +82,8 @@ type envSnap struct {
 	Phase       string
 	Incarnation string
 	PID         int
+	Start       string
+	HelperExit  *HelperExit
 	Actions     map[string]Action
 }
 
@@ -86,7 +94,12 @@ func snapshot(h *Host, e *Environment) envSnap {
 	for k, v := range e.Actions {
 		actions[k] = v
 	}
-	return envSnap{Phase: e.Phase, Incarnation: e.Spec.Incarnation, PID: e.Process.PID, Actions: actions}
+	var exit *HelperExit
+	if e.HelperExit != nil {
+		cp := *e.HelperExit
+		exit = &cp
+	}
+	return envSnap{Phase: e.Phase, Incarnation: e.Spec.Incarnation, PID: e.Process.PID, Start: e.Process.Start, HelperExit: exit, Actions: actions}
 }
 
 func hostActionCall(h *Host, env, action, operationID, incarnation string) *httptest.ResponseRecorder {
@@ -144,7 +157,7 @@ func TestPublicHostStartLaunchesARealLocatableProcess(t *testing.T) {
 	if err := syscall.Kill(snap.PID, 0); err != nil {
 		t.Fatalf("recorded PID %d is not a real running process: %v", snap.PID, err)
 	}
-	t.Cleanup(func() { syscall.Kill(snap.PID, syscall.SIGKILL) })
+	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap.PID, Start: snap.Start}) })
 
 	a := snap.Actions["start-1"]
 	if a.State != "completed" || a.ResultingIncarnation != snap.Incarnation {
@@ -168,22 +181,48 @@ func writeVMStopped(t *testing.T, h *Host, e *Environment) {
 	}
 }
 
-// killAndConfirmGone sends a real SIGKILL to pid and waits until the real OS
-// process table (not an injected fake) no longer reports it -- so stop()'s
-// own departed() check, run completely unmodified, has a genuine departure
-// to find.
-func killAndConfirmGone(t *testing.T, pid int) {
+// killOwnedProcess sends a real SIGKILL to want.PID, but only after
+// re-checking, via a real process-table read (the same proc.Find pair
+// host.go's own departed() checks -- PID AND start time together), that the
+// PID still identifies the exact process this fixture itself launched.
+// pomar's review: a bare PID, once its original process has already exited,
+// can be silently reused by the OS for something completely unrelated --
+// signaling it blind risks killing a stranger process, not the fixture's
+// own helper. If the identity no longer matches, this sends nothing.
+func killOwnedProcess(t *testing.T, want proc.Process) {
 	t.Helper()
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+	ps, err := (proc.PS{}).List()
+	if err != nil {
 		t.Fatal(err)
 	}
+	got, ok := proc.Find(ps, want.PID)
+	if !ok || got.Start != want.Start {
+		t.Logf("pid %d no longer matches the owned process identity (want start %q; found %+v, present=%v) -- not signaling", want.PID, want.Start, got, ok)
+		return
+	}
+	if err := syscall.Kill(want.PID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		t.Fatal(err)
+	}
+}
+
+// killAndWaitForDeparture kills the environment's own currently-recorded
+// helper process (identity-checked, see killOwnedProcess) and then waits
+// for confirmation by joining host.go's own authoritative departure signal
+// -- e.HelperExit, set by start()'s internal cmd.Wait() goroutine once it
+// reaps the real child -- rather than a second, independent raw-PID poll
+// racing against that same reap (pomar's review: "join its owned wait
+// completion").
+func killAndWaitForDeparture(t *testing.T, h *Host, e *Environment) {
+	t.Helper()
+	snap := snapshot(h, e)
+	killOwnedProcess(t, proc.Process{PID: snap.PID, Start: snap.Start})
 	for range 100 {
-		if err := syscall.Kill(pid, 0); err != nil {
+		if exit := snapshot(h, e).HelperExit; exit != nil && exit.PID == snap.PID {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("pid %d still present after SIGKILL", pid)
+	t.Fatalf("pid %d: no HelperExit recorded after kill", snap.PID)
 }
 
 // realFenceEvidence is a *correctly shaped* h.probe substitute: it reports
@@ -233,7 +272,7 @@ func TestPublicHostStopThenReconcileProducesRealReconciliationEvidence(t *testin
 		t.Fatal(err)
 	}
 
-	killAndConfirmGone(t, snapshot(h, e).PID)
+	killAndWaitForDeparture(t, h, e)
 	writeVMStopped(t, h, e)
 	if w := hostActionCall(h, "env", "stop", "stop-1", incarnation1); w.Code != 200 {
 		t.Fatalf("stop failed: %d %s", w.Code, w.Body.String())
@@ -352,7 +391,7 @@ func TestPublicHostReplaceResolutionTargetSequence(t *testing.T) {
 	serveGuestBroker(t, e.Spec.ControlSocket, broker1)
 
 	// --- stop + reconcile incarnation 1 (proven above) ---
-	killAndConfirmGone(t, snapshot(h, e).PID)
+	killAndWaitForDeparture(t, h, e)
 	writeVMStopped(t, h, e)
 	if w := hostActionCall(h, "env", "stop", "stop-1", incarnation1); w.Code != 200 {
 		t.Fatalf("stop-1 failed: %d %s", w.Code, w.Body.String())
@@ -372,7 +411,7 @@ func TestPublicHostReplaceResolutionTargetSequence(t *testing.T) {
 	}
 	snap2 := snapshot(h, e)
 	incarnation2 := snap2.Incarnation
-	t.Cleanup(func() { syscall.Kill(snap2.PID, syscall.SIGKILL) })
+	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap2.PID, Start: snap2.Start}) })
 
 	// --- the real guest restarts under the new incarnation: reopening the
 	// same store directory is what actually (and honestly) transitions the
@@ -437,5 +476,74 @@ func TestPublicHostReplaceResolutionTargetSequence(t *testing.T) {
 	}
 	if got := store2.Snapshot().Operations["original-op"]; got != original {
 		t.Fatalf("original operation history changed after successor dispatch: got %+v, want %+v", got, original)
+	}
+}
+
+// TestKillOwnedProcessRefusesWhenIdentityNoLongerMatches is pomar's required
+// regression: a bare PID, once its originally-recorded process has exited,
+// can be silently reused by the OS for something else entirely. This proves
+// killOwnedProcess never signals a PID whose real, current identity (start
+// time, from a real process-table read) doesn't match what was recorded --
+// and that it still correctly signals a genuinely matching identity.
+func TestKillOwnedProcessRefusesWhenIdentityNoLongerMatches(t *testing.T) {
+	bin := fakeHelperBinary(t)
+	cmd := exec.Command(bin)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	// Kill only, no Wait here: the test body itself owns reaping (via the
+	// background cmd.Wait() goroutine below) on every path that reaches it;
+	// a second concurrent Wait() call on the same *exec.Cmd is a documented
+	// misuse. This is just a kill-only safety net for an early t.Fatal.
+	t.Cleanup(func() { cmd.Process.Kill() })
+
+	ps, err := (proc.PS{}).List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, ok := proc.Find(ps, pid)
+	if !ok {
+		t.Fatalf("just-started process %d not found in the real process table", pid)
+	}
+
+	// A deliberately wrong start time -- simulating the exact scenario this
+	// check exists for: the PID has since been reused by an unrelated
+	// process. No signal must reach the real, still-running process.
+	//
+	// syscall.Kill(pid, 0) alone cannot prove this: a SIGKILLed child
+	// becomes a zombie, still answering kill(pid, 0) successfully, until
+	// this process (its real parent) reaps it -- so a mistaken signal here
+	// would read identically to "never touched" on that check alone
+	// (caught by mutant-testing this very assertion against a deliberately
+	// disabled identity check, which the kill(pid,0)-only version of this
+	// test did not detect). cmd.Wait() with a short, bounded timeout
+	// distinguishes them instead: a real kill makes Wait return almost
+	// immediately; a genuinely still-running, untouched process makes Wait
+	// block for the whole timeout.
+	killOwnedProcess(t, proc.Process{PID: pid, Start: "Mon Jan  1 00:00:00 1970"})
+	stillRunning := make(chan error, 1)
+	go func() { stillRunning <- cmd.Wait() }()
+	select {
+	case err := <-stillRunning:
+		t.Fatalf("process %d was reaped (so it was signaled) despite a mismatching recorded identity: %v", pid, err)
+	case <-time.After(300 * time.Millisecond):
+		// Still running, as required. Wait is left outstanding in the
+		// background goroutine; the real kill below reaps it for real.
+	}
+
+	// The real, matching identity must still actually be killable -- this
+	// isn't a check that silently disables killing altogether.
+	killOwnedProcess(t, real)
+	select {
+	case err := <-stillRunning:
+		if err == nil {
+			t.Fatal("process exited cleanly instead of being killed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("process %d not reaped within 5s after a correctly-identified kill", pid)
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatalf("process %d still present after being reaped", pid)
 	}
 }
