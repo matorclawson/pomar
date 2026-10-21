@@ -141,16 +141,8 @@ func TestGoproxyCacheKeptWhileAttemptsAreLive(t *testing.T) {
 	m.t.entries["live"].State = StateExited
 	m.freezeResult(m.t.entries["live"])
 	m.mu.Unlock()
-	// Terminal but unpublished evidence also pins the supporting cache.
-	rep, err = m.Caches(true)
-	if err != nil || len(rep.Evicted) != 0 {
-		t.Fatal("pending publication lost supporting cache", err)
-	}
-	if err := os.MkdirAll(filepath.Join(v.Root(), attemptsDir, "live"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	m.recoverResults(time.Now())
-
+	// The frozen result no longer reads goproxy. Retain its unresolved
+	// record while allowing the independent shared cache to be evicted.
 	rep, err = m.Caches(true)
 	if err != nil {
 		t.Fatal(err)
@@ -158,4 +150,11 @@ func TestGoproxyCacheKeptWhileAttemptsAreLive(t *testing.T) {
 	if len(rep.Evicted) != 1 || v.IsOpen(venue.KindVolume, "goproxy") {
 		t.Fatalf("with no live attempt, the over-budget cache was kept: %+v", rep)
 	}
+	m.mu.Lock()
+	e := m.t.entries["live"]
+	if e == nil || !e.Terminal() || e.Publication.Intent == nil || m.resultDisposable(*e) {
+		m.mu.Unlock()
+		t.Fatal("cache eviction lost or released unresolved completion evidence")
+	}
+	m.mu.Unlock()
 }

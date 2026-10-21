@@ -205,11 +205,11 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			w.WriteHeader(http.StatusNoContent)
 		})
 	}
-	m.resultRoutes(mux) // reads: on both sockets
+	m.resultRoutes(mux)  // reads: on both sockets
 	m.closureRoutes(mux) // authorized evidence read, never an imported signing request
-	m.outputRoutes(mux) // reads: on both sockets
-	m.pinsRoutes(mux)   // reads: on both sockets
-	m.logRoutes(mux)    // reads: on both sockets
+	m.outputRoutes(mux)  // reads: on both sockets
+	m.pinsRoutes(mux)    // reads: on both sockets
+	m.logRoutes(mux)     // reads: on both sockets
 	mux.HandleFunc("GET /v1/vm-orphans", m.hostWide(func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.VMOrphans())
 	}))
