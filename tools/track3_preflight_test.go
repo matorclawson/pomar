@@ -5,22 +5,92 @@
 package tools
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
-// zeocoreFixture returns a minimal, self-contained directory shaped like
-// enough of zeroemployeeorg/zeocore for the preflight script's own reads:
-// its pandoc floor (src/zeo_core/integrations/pandoc/_runner.py), its CI
-// pin (tools/install-pandoc.sh) and its Python requirement (pyproject.toml).
-// Never the real clone -- hermetic and under this test's own control.
-func zeocoreFixture(t *testing.T, ciPin string) string {
+func sha256Sum(s string) [32]byte {
+	return sha256.Sum256([]byte(s))
+}
+
+// hermeticPATH is the ONLY source of PATH for every test below -- never
+// os.Environ(). Council's review of pr#142: "The test is not hermetic
+// (cmd.Env = os.Environ()). It runs the real uv (network, cache, possible
+// Python download) and the real pandoc inside `make verify`." A fixture's
+// own fake-tool directory, when given, is listed first so it shadows the
+// real uv/pandoc/stat; otherwise these fixed, absolute system directories
+// are the only ones ever consulted -- never the ambient process PATH, which
+// could vary host to host or carry something this test never asked for.
+func hermeticPATH(fakeBin string) string {
+	dirs := []string{"/usr/bin", "/bin", "/sbin", "/opt/homebrew/bin"}
+	if fakeBin != "" {
+		dirs = append([]string{fakeBin}, dirs...)
+	}
+	return "PATH=" + strings.Join(dirs, ":")
+}
+
+// isolatedHome returns a fresh, empty directory to use as HOME, so a real
+// ~/.gitconfig, ~/.netrc or any other ambient per-user state on the test
+// host is never consulted by the script's own git/uv/pandoc invocations.
+func isolatedHome(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	return t.TempDir()
+}
+
+// hermeticEnv builds the complete, explicit environment for one subprocess
+// invocation -- PATH, an isolated HOME, a fixed TZ/LC_ALL, and no inherited
+// git config or hooks (GIT_CONFIG_GLOBAL/GIT_CONFIG_NOSYSTEM point git away
+// from any real global/system config, per Council's hermeticity finding),
+// plus whatever test-specific extras are given. Never os.Environ().
+func hermeticEnv(t *testing.T, fakeBin string, extra ...string) []string {
+	t.Helper()
+	env := []string{
+		hermeticPATH(fakeBin),
+		"HOME=" + isolatedHome(t),
+		"TZ=UTC",
+		"LC_ALL=C",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=track3-preflight-test",
+		"GIT_AUTHOR_EMAIL=track3-preflight-test@example.invalid",
+		"GIT_COMMITTER_NAME=track3-preflight-test",
+		"GIT_COMMITTER_EMAIL=track3-preflight-test@example.invalid",
+	}
+	return append(env, extra...)
+}
+
+// gitFixture runs a real, hermetic `git` (never the test runner's own
+// inherited config) inside dir.
+func gitFixture(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = hermeticEnv(t, "")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+// zeocoreFixture returns a minimal, self-contained, REAL git repository
+// shaped like enough of zeroemployeeorg/zeocore for the preflight script's
+// own HEAD-relative reads: its pandoc floor
+// (src/zeo_core/integrations/pandoc/_runner.py), its CI pin
+// (tools/install-pandoc.sh) and its Python requirement (pyproject.toml). The
+// script now reads these via `git show HEAD:<path>`, not the working tree,
+// so the fixture must be a real commit, not just files on disk. Returns the
+// repo root and its HEAD commit SHA.
+func zeocoreFixture(t *testing.T, ciPin string) (root, head string) {
+	t.Helper()
+	root = t.TempDir()
 	runner := filepath.Join(root, "src", "zeo_core", "integrations", "pandoc", "_runner.py")
 	if err := os.MkdirAll(filepath.Dir(runner), 0755); err != nil {
 		t.Fatal(err)
@@ -38,34 +108,51 @@ func zeocoreFixture(t *testing.T, ciPin string) string {
 	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("requires-python = \">=3.14\"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	return root
+	gitFixture(t, root, "init", "-q")
+	gitFixture(t, root, "add", "-A")
+	gitFixture(t, root, "commit", "-q", "-m", "init")
+	head = strings.TrimSpace(gitFixture(t, root, "rev-parse", "HEAD"))
+	return root, head
 }
 
-// runPreflight invokes the real script as a subprocess, returning its
-// combined output. PATH is passed through so a real pandoc/uv, if present
-// on the test host, is actually exercised -- this is a real subprocess
-// test, not a reimplementation of the script's own logic.
-func runPreflight(t *testing.T, repo, scratch, jobTarget string) (string, error) {
+// runPreflightEnv invokes the real script as a subprocess with a fully
+// explicit, hermetic environment (never os.Environ()), returning its
+// combined output and the process's own error (nil on exit 0).
+func runPreflightEnv(t *testing.T, env []string, args ...string) (string, error) {
 	t.Helper()
 	script, err := filepath.Abs("track3-preflight.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("sh", script, repo, scratch, jobTarget)
-	cmd.Env = append(os.Environ(), "TZ=UTC")
+	cmd := exec.Command("sh", append([]string{script}, args...)...)
+	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
+// runPreflight is the common case: no fixture fakes, just the hermetic
+// system PATH, the real `repo`/`scratch`/`jobTarget` positional arguments and
+// no expected-revision pin.
+func runPreflight(t *testing.T, repo, scratch, jobTarget string) (string, error) {
+	t.Helper()
+	return runPreflightEnv(t, hermeticEnv(t, ""), repo, scratch, jobTarget)
+}
+
 func TestTrack3PreflightReportsThreeDistinctPandocValues(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 	out, err := runPreflight(t, repo, t.TempDir(), "3.11")
+	// This fixture's job target (3.11) is below the real installed pandoc on
+	// this host in common cases and above it in others -- the overall gate
+	// may legitimately be NOT-VERIFIED (nonzero exit) either way; this test
+	// only asserts the three-value report shape, not the gate outcome.
 	if err != nil {
-		t.Fatalf("script failed: %v\n%s", err, out)
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatalf("script failed to run at all: %v\n%s", err, out)
+		}
 	}
 	for _, want := range []string{
-		"pandoc floor (code minimum, from " + filepath.Join(repo, "src/zeo_core/integrations/pandoc/_runner.py") + "): 2.15",
-		"pandoc CI pin (from " + filepath.Join(repo, "tools/install-pandoc.sh") + "): 3.1.3",
+		"pandoc floor (code minimum, from HEAD:src/zeo_core/integrations/pandoc/_runner.py): 2.15",
+		"pandoc CI pin (from HEAD:tools/install-pandoc.sh): 3.1.3",
 		"pandoc job target (council/Architect operational policy, not a repo fact): 3.11",
 	} {
 		if !strings.Contains(out, want) {
@@ -81,18 +168,42 @@ func TestTrack3PreflightChecksInstalledAgainstJobTargetNotCIPin(t *testing.T) {
 	if _, err := exec.LookPath("pandoc"); err != nil {
 		t.Skip("no pandoc on PATH to exercise the real version check")
 	}
-	repo := zeocoreFixture(t, "1.0.0") // a CI pin an installed pandoc would trivially satisfy
+	repo, _ := zeocoreFixture(t, "1.0.0") // a CI pin an installed pandoc would trivially satisfy
 	out, err := runPreflight(t, repo, t.TempDir(), "999.0.0")
-	if err != nil {
-		t.Fatalf("script failed: %v\n%s", err, out)
+	if err == nil {
+		t.Fatalf("an unmeetable job target must fail the overall gate (nonzero exit): %s", out)
 	}
 	if !strings.Contains(out, "pandoc_status: NOT-CONFIGURED") {
 		t.Fatalf("an unmeetable job target must not read as satisfied just because the CI pin is low: %s", out)
 	}
 }
 
+// Council P2: a pandoc version must be validated as strictly numeric-dotted
+// (^[0-9]+(\.[0-9]+)*$) before it is ever handed to `sort -V` -- a
+// non-numeric installed_version (as a real `pandoc --version` could in
+// principle emit from an unexpected build, and as this fake deliberately
+// does) must read as UNKNOWN, never silently compared.
+func TestTrack3PreflightTreatsNonNumericPandocVersionAsUnknown(t *testing.T) {
+	repo, _ := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBin, "pandoc"), []byte("#!/bin/sh\necho 'pandoc dev-build-not-a-version'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runPreflightEnv(t, hermeticEnv(t, fakeBin), repo, filepath.Join(root, "scratch"), "3.11")
+	if err == nil {
+		t.Fatalf("an unknown pandoc version must not pass the overall gate: %s", out)
+	}
+	if !strings.Contains(out, "pandoc_status: UNKNOWN") {
+		t.Fatalf("a non-numeric-dotted installed version must read UNKNOWN, not silently compared: %s", out)
+	}
+}
+
 func TestTrack3PreflightScratchAncestry(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 
 	t.Run("safe: sticky ancestor is accepted even though world-writable", func(t *testing.T) {
 		root := t.TempDir()
@@ -103,10 +214,7 @@ func TestTrack3PreflightScratchAncestry(t *testing.T) {
 		if err := os.Chmod(dir, os.ModeSticky|0o777); err != nil {
 			t.Fatal(err)
 		}
-		out, err := runPreflight(t, repo, filepath.Join(dir, "future-leaf"), "3.11")
-		if err != nil {
-			t.Fatalf("script failed: %v\n%s", err, out)
-		}
+		out, _ := runPreflight(t, repo, filepath.Join(dir, "future-leaf"), "3.11")
 		if !strings.Contains(out, "scratch_ancestry_status: VERIFIED") {
 			t.Fatalf("a sticky, world-writable ancestor (the /tmp pattern) must be accepted: %s", out)
 		}
@@ -122,8 +230,8 @@ func TestTrack3PreflightScratchAncestry(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := runPreflight(t, repo, filepath.Join(dir, "future-leaf"), "3.11")
-		if err != nil {
-			t.Fatalf("script failed: %v\n%s", err, out)
+		if err == nil {
+			t.Fatalf("an unsafe ancestor must fail the overall gate: %s", out)
 		}
 		if !strings.Contains(out, "scratch_ancestry_status: NOT-CONFIGURED") {
 			t.Fatalf("a world-writable, non-sticky ancestor must be refused: %s", out)
@@ -142,10 +250,7 @@ func TestTrack3PreflightScratchAncestry(t *testing.T) {
 		if err := os.Chmod(dir, 0o770); err != nil {
 			t.Fatal(err)
 		}
-		out, err := runPreflight(t, repo, filepath.Join(dir, "future-leaf"), "3.11")
-		if err != nil {
-			t.Fatalf("script failed: %v\n%s", err, out)
-		}
+		out, _ := runPreflight(t, repo, filepath.Join(dir, "future-leaf"), "3.11")
 		if !strings.Contains(out, "scratch_ancestry_status: NOT-CONFIGURED") {
 			t.Fatalf("a group-writable, non-sticky ancestor must be refused, not silently accepted: %s", out)
 		}
@@ -155,18 +260,46 @@ func TestTrack3PreflightScratchAncestry(t *testing.T) {
 		root := t.TempDir()
 		out, err := runPreflight(t, repo, filepath.Join(root, "not-created-yet"), "3.11")
 		if err != nil {
-			t.Fatalf("script failed: %v\n%s", err, out)
+			if _, ok := err.(*exec.ExitError); !ok {
+				t.Fatalf("script failed to run at all: %v\n%s", err, out)
+			}
 		}
 		if !strings.Contains(out, "leaf exists: NO") || !strings.Contains(out, "scratch_ancestry_status: VERIFIED") {
 			t.Fatalf("a safe, existing ancestor with a not-yet-created leaf must still verify: %s", out)
 		}
 	})
+
+	// Council P3: a nonexistent leaf suffix containing `..` must be
+	// lexically canonicalized before the ancestor walk starts, or the walk
+	// could be mis-anchored relative to the path's real meaning.
+	t.Run("nonexistent leaf suffix containing .. is canonicalized before the walk", func(t *testing.T) {
+		root := t.TempDir()
+		safeDir := filepath.Join(root, "safe-ancestor")
+		if err := os.Mkdir(safeDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// safe-ancestor/decoy/../future-leaf lexically resolves to
+		// safe-ancestor/future-leaf; "decoy" itself never exists.
+		scratch := filepath.Join(safeDir, "decoy", "..", "future-leaf")
+		out, err := runPreflight(t, repo, scratch, "3.11")
+		if err != nil {
+			if _, ok := err.(*exec.ExitError); !ok {
+				t.Fatalf("script failed to run at all: %v\n%s", err, out)
+			}
+		}
+		if !strings.Contains(out, "scratch_ancestry_status: VERIFIED") {
+			t.Fatalf("a .. in a nonexistent leaf suffix must be canonicalized, reaching the real safe ancestor: %s", out)
+		}
+	})
 }
 
-// pomar's review of pr#142: when stat itself is unavailable or its output
-// is unparseable, the permission string must never silently read as safe.
+// pomar's review of pr#142: when stat itself is unavailable, the permission
+// string must never silently read as safe -- and Council's distinction:
+// this is UNKNOWN (we could not determine), not NOT-CONFIGURED (we
+// positively determined it's unsafe) -- both fail the ancestor closed, but
+// the label must say which actually happened.
 func TestTrack3PreflightFailsClosedWhenStatIsUnavailable(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 	root := t.TempDir()
 
 	fakeBin := filepath.Join(root, "bin")
@@ -177,18 +310,12 @@ func TestTrack3PreflightFailsClosedWhenStatIsUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := filepath.Abs("track3-preflight.sh")
-	if err != nil {
-		t.Fatal(err)
+	out, err := runPreflightEnv(t, hermeticEnv(t, fakeBin), repo, filepath.Join(root, "future-leaf"), "3.11")
+	if err == nil {
+		t.Fatalf("an unreadable ancestor must fail the overall gate: %s", out)
 	}
-	cmd := exec.Command("sh", script, repo, filepath.Join(root, "future-leaf"), "3.11")
-	cmd.Env = append([]string{"PATH=" + fakeBin + ":/usr/bin:/bin", "TZ=UTC"}, filteredEnv("PATH", "TZ")...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("script failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "scratch_ancestry_status: NOT-CONFIGURED") || !strings.Contains(string(out), "could not read permission metadata") {
-		t.Fatalf("a failed stat must fail the ancestor closed, not read VERIFIED: %s", out)
+	if !strings.Contains(out, "scratch_ancestry_status: UNKNOWN") || !strings.Contains(out, "could not read permission metadata") {
+		t.Fatalf("a failed stat must fail the ancestor closed as UNKNOWN, not read VERIFIED or NOT-CONFIGURED: %s", out)
 	}
 }
 
@@ -197,32 +324,163 @@ func TestTrack3PreflightFailsClosedWhenStatIsUnavailable(t *testing.T) {
 // "??????????") previously passed the old length-only check and read as
 // VERIFIED. The actual ls-style grammar must be validated, not just length.
 func TestTrack3PreflightFailsClosedOnMalformedTenByteStat(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 	root := t.TempDir()
 
 	fakeBin := filepath.Join(root, "bin")
 	if err := os.Mkdir(fakeBin, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Exactly 10 bytes, exit 0, but no real permission bits -- pomar's own
-	// counterexample.
 	if err := os.WriteFile(filepath.Join(fakeBin, "stat"), []byte("#!/bin/sh\nprintf '??????????'\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	script, err := filepath.Abs("track3-preflight.sh")
-	if err != nil {
+	out, err := runPreflightEnv(t, hermeticEnv(t, fakeBin), repo, filepath.Join(root, "future-leaf"), "3.11")
+	if err == nil {
+		t.Fatalf("a malformed stat must fail the overall gate: %s", out)
+	}
+	if !strings.Contains(out, "scratch_ancestry_status: UNKNOWN") || !strings.Contains(out, "could not read permission metadata") {
+		t.Fatalf("a malformed 10-byte stat output must fail the ancestor closed as UNKNOWN: %s", out)
+	}
+}
+
+// fakeUVScript builds a fake `uv` whose `lock` subcommand records its own
+// environment to envFile (one KEY=VALUE per line) before acting out
+// `behavior` (a shell fragment), so a test can assert exactly what the real
+// script passed it -- in particular UV_OFFLINE/UV_PYTHON_DOWNLOADS/
+// UV_CACHE_DIR, which Council's P1 requires on every invocation.
+func fakeUVScript(envFile, behavior string) string {
+	return "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
+		"  lock) env > \"" + envFile + "\"; " + behavior + " ;;\n" +
+		"esac\n"
+}
+
+// Council P1: the must-fix-first finding. `uv lock --check` must run with
+// UV_OFFLINE=1 and UV_PYTHON_DOWNLOADS=never, plus a private UV_CACHE_DIR,
+// so this "read-only" script genuinely cannot reach the network, trigger a
+// Python download, or write into any shared/real uv cache.
+func TestTrack3PreflightUvLockCheckRunsOfflineWithPrivateCache(t *testing.T) {
+	repo, _ := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("sh", script, repo, filepath.Join(root, "future-leaf"), "3.11")
-	cmd.Env = append([]string{"PATH=" + fakeBin + ":/usr/bin:/bin", "TZ=UTC"}, filteredEnv("PATH", "TZ")...)
-	out, err := cmd.CombinedOutput()
+	envFile := filepath.Join(root, "uv-env.txt")
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUVScript(envFile, "true")), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// This fixture's job target (3.11) may or may not be satisfied by the
+	// real pandoc on this host -- irrelevant to what this test checks (the
+	// env uv's lock subcommand actually received), so only a hard run
+	// failure (not merely an unverified gate) is fatal here.
+	out, err := runPreflightEnv(t, hermeticEnv(t, fakeBin), repo, t.TempDir(), "3.11")
 	if err != nil {
-		t.Fatalf("script failed: %v\n%s", err, out)
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatalf("script failed to run at all: %v\n%s", err, out)
+		}
 	}
-	if !strings.Contains(string(out), "scratch_ancestry_status: NOT-CONFIGURED") || !strings.Contains(string(out), "could not read permission metadata") {
-		t.Fatalf("a malformed 10-byte stat output must fail the ancestor closed, not read VERIFIED: %s", out)
+
+	recorded, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("fake uv's lock subcommand never ran, or never recorded its env: %v", err)
 	}
+	env := string(recorded)
+	checks := map[string]string{
+		"UV_OFFLINE":          "1",
+		"UV_PYTHON_DOWNLOADS": "never",
+	}
+	for k, want := range checks {
+		line := k + "=" + want
+		if !strings.Contains(env, line) {
+			t.Fatalf("expected %q in uv's own environment, got:\n%s", line, env)
+		}
+	}
+	cacheLine := ""
+	for _, l := range strings.Split(env, "\n") {
+		if strings.HasPrefix(l, "UV_CACHE_DIR=") {
+			cacheLine = l
+		}
+	}
+	if cacheLine == "" {
+		t.Fatalf("expected a UV_CACHE_DIR to be set for uv, got none in:\n%s", env)
+	}
+	cacheDir := strings.TrimPrefix(cacheLine, "UV_CACHE_DIR=")
+	if strings.HasPrefix(cacheDir, repo) {
+		t.Fatalf("UV_CACHE_DIR must not be inside the read-only repo: %s", cacheDir)
+	}
+	if _, err := os.Stat(cacheDir); err == nil {
+		t.Fatalf("the private UV_CACHE_DIR (%s) must be cleaned up after the script exits, not left behind", cacheDir)
+	}
+}
+
+// Three distinct lock outcomes Council listed as missing: a real VERIFIED
+// (rc 0), a real NOT-CONFIGURED (nonzero, not a timeout), and an UNKNOWN
+// (uv genuinely absent from PATH).
+func TestTrack3PreflightLockConsistencyOutcomes(t *testing.T) {
+	repo, _ := zeocoreFixture(t, "3.1.3")
+
+	t.Run("VERIFIED: fake uv lock --check exits 0", func(t *testing.T) {
+		root := t.TempDir()
+		fakeBin := filepath.Join(root, "bin")
+		if err := os.Mkdir(fakeBin, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUVScript(filepath.Join(root, "env.txt"), "exit 0")), 0755); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runPreflightEnv(t, hermeticEnv(t, fakeBin), repo, t.TempDir(), "3.11")
+		if err != nil {
+			if _, ok := err.(*exec.ExitError); !ok {
+				t.Fatalf("script failed to run at all: %v\n%s", err, out)
+			}
+		}
+		if !strings.Contains(out, "uv_lock_consistency_with_pyproject") || !strings.Contains(out, ": VERIFIED") {
+			t.Fatalf("expected a VERIFIED lock-consistency line: %s", out)
+		}
+	})
+
+	t.Run("NOT-CONFIGURED: fake uv lock --check exits nonzero, not a timeout", func(t *testing.T) {
+		root := t.TempDir()
+		fakeBin := filepath.Join(root, "bin")
+		if err := os.Mkdir(fakeBin, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUVScript(filepath.Join(root, "env.txt"), "exit 1")), 0755); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runPreflightEnv(t, hermeticEnv(t, fakeBin), repo, t.TempDir(), "3.11")
+		if err == nil {
+			t.Fatalf("an inconsistent lock must fail the overall gate: %s", out)
+		}
+		if !strings.Contains(out, "uv_lock_consistency_with_pyproject") || !strings.Contains(out, ": NOT-CONFIGURED") {
+			t.Fatalf("expected a NOT-CONFIGURED lock-consistency line: %s", out)
+		}
+	})
+
+	t.Run("UNKNOWN: uv genuinely absent from PATH", func(t *testing.T) {
+		// hermeticEnv's fixed PATH tail includes /opt/homebrew/bin, where a
+		// real uv lives on this host -- exclude it here (no other test
+		// needs uv genuinely absent) so this case is real, not accidental.
+		env := append([]string{}, hermeticEnv(t, "")...)
+		for i, kv := range env {
+			if strings.HasPrefix(kv, "PATH=") {
+				env[i] = "PATH=/usr/bin:/bin:/sbin"
+			}
+		}
+		out, err := runPreflightEnv(t, env, repo, t.TempDir(), "3.11")
+		if err == nil {
+			t.Fatalf("a missing uv must fail the overall gate: %s", out)
+		}
+		if !strings.Contains(out, "uv on PATH: DOES-NOT-EXIST") {
+			t.Fatalf("expected uv reported absent: %s", out)
+		}
+		if !strings.Contains(out, "uv_lock_consistency_with_pyproject") || !strings.Contains(out, ": UNKNOWN") {
+			t.Fatalf("a missing uv must still emit an explicit UNKNOWN lock line, not omit it: %s", out)
+		}
+	})
 }
 
 // A council/pomar review: the uv lock--check call may consult the network
@@ -232,7 +490,7 @@ func TestTrack3PreflightFailsClosedOnMalformedTenByteStat(t *testing.T) {
 // proves both: the script returns promptly, and the fake uv never reaches
 // the point of writing its completion marker.
 func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 	root := t.TempDir()
 
 	fakeBin := filepath.Join(root, "bin")
@@ -245,28 +503,14 @@ func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	script, err := filepath.Abs("track3-preflight.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("sh", script, repo, filepath.Join(root, "scratch"), "3.11")
-	cmd.Env = append([]string{
-		"PATH=" + fakeBin + ":/usr/bin:/bin",
-		"TZ=UTC",
-		"MARKER=" + marker,
-		"TRACK3_UV_TIMEOUT=1",
-	}, filteredEnv("PATH", "TZ", "MARKER", "TRACK3_UV_TIMEOUT")...)
-
+	env := hermeticEnv(t, fakeBin, "MARKER="+marker, "TRACK3_UV_TIMEOUT=1")
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11")
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("script failed: %v\n%s", err, out)
-	}
 	if elapsed > 4*time.Second {
 		t.Fatalf("script took %s, well over the ~1s timeout, want well under the fake uv's 5s sleep: %s", elapsed, out)
 	}
-	if !strings.Contains(string(out), "uv_lock_consistency_with_pyproject") || !strings.Contains(string(out), "NOT-CONFIGURED (timed out after 1s, killed)") {
+	if !strings.Contains(out, "uv_lock_consistency_with_pyproject") || !strings.Contains(out, "NOT-CONFIGURED (timed out after 1s, killed") {
 		t.Fatalf("expected a timed-out, killed, NOT-CONFIGURED report: %s", out)
 	}
 	if _, err := os.Stat(marker); err == nil {
@@ -283,7 +527,7 @@ func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
 // dependent on the child's cooperation, and that the script never falsely
 // reports "killed" by trusting an ignorable signal alone.
 func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 	root := t.TempDir()
 
 	fakeBin := filepath.Join(root, "bin")
@@ -296,36 +540,86 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 		t.Fatal(err)
 	}
 
-	script, err := filepath.Abs("track3-preflight.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("sh", script, repo, filepath.Join(root, "scratch"), "3.11")
-	cmd.Env = append([]string{
-		"PATH=" + fakeBin + ":/usr/bin:/bin",
-		"TZ=UTC",
-		"MARKER=" + marker,
-		"TRACK3_UV_TIMEOUT=1",
-	}, filteredEnv("PATH", "TZ", "MARKER", "TRACK3_UV_TIMEOUT")...)
-
+	env := hermeticEnv(t, fakeBin, "MARKER="+marker, "TRACK3_UV_TIMEOUT=1")
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11")
 	elapsed := time.Since(start)
-	if err != nil {
-		t.Fatalf("script failed: %v\n%s", err, out)
-	}
-	// Bounded by the 1s timeout plus the fixed TERM grace (5s) plus a KILL
-	// grace margin -- well under the fake uv's own 20s sleep, which is the
-	// whole point: a TERM-ignoring child must not be able to outlast the
-	// configured budget.
 	if elapsed > 10*time.Second {
 		t.Fatalf("script took %s, want well under the fake uv's 20s sleep (TERM-ignoring child must still be bounded): %s", elapsed, out)
 	}
-	if !strings.Contains(string(out), "uv_lock_consistency_with_pyproject") || !strings.Contains(string(out), "NOT-CONFIGURED (timed out after 1s, killed)") {
+	if !strings.Contains(out, "uv_lock_consistency_with_pyproject") || !strings.Contains(out, "NOT-CONFIGURED (timed out after 1s, killed") {
 		t.Fatalf("expected a timed-out, killed, NOT-CONFIGURED report even though the child ignored TERM: %s", out)
 	}
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatalf("fake uv's completion marker exists -- a TERM-ignoring child was not actually force-killed before completing")
+	}
+}
+
+// Council P2: the watchdog must kill the WHOLE process group, not just the
+// direct child -- a TERM-ignoring child with its own backgrounded
+// grandchild must lose both to the escalation. Checked by the grandchild's
+// OWN liveness (syscall.Kill(pid, 0)) immediately after the script returns,
+// not by waiting for a completion marker it would take the grandchild's
+// full 20s sleep to write: an earlier version of this test used exactly
+// that marker-file approach and, when mutant-verified by reverting the
+// watchdog to a single-pid (non-group) kill, PASSED ANYWAY -- the window
+// between the script returning (~6s in) and the marker's own 20s deadline
+// was long enough for an orphaned-but-still-running grandchild to look
+// indistinguishable from a killed one. Checking the pid directly removes
+// that blind spot.
+func TestTrack3PreflightKillsEntireProcessGroupIncludingGrandchildren(t *testing.T) {
+	repo, _ := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	grandchildPIDFile := filepath.Join(root, "grandchild.pid")
+	// `( echo $$; ... ) &` would NOT work here -- confirmed directly on this
+	// shell: `$$` inside a backgrounded subshell still reports the PARENT
+	// script's own pid, not a distinct one (POSIX leaves this
+	// implementation-defined, and this shell keeps the parent's). An
+	// earlier version of this test used exactly that and, because of it,
+	// was unknowingly checking the liveness of the already-dead direct
+	// child, not the grandchild -- it passed even under a single-pid-kill
+	// mutant for the wrong reason. `sh -c '...' &` is a genuinely separate
+	// process invocation, confirmed to report its own distinct pid via `$$`.
+	fakeUV := "#!/bin/sh\n" +
+		"trap '' TERM\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
+		"  lock)\n" +
+		"    sh -c 'echo $$ > \"'\"$GRANDCHILD_PID_FILE\"'\"; sleep 20' &\n" +
+		"    sleep 20\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := hermeticEnv(t, fakeBin, "GRANDCHILD_PID_FILE="+grandchildPIDFile, "TRACK3_UV_TIMEOUT=1")
+	start := time.Now()
+	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11")
+	elapsed := time.Since(start)
+	if elapsed > 10*time.Second {
+		t.Fatalf("script took %s, want well under the 20s sleeps (the whole group must be bounded): %s", elapsed, out)
+	}
+	if !strings.Contains(out, "NOT-CONFIGURED (timed out after 1s, killed") {
+		t.Fatalf("expected a timed-out, killed report: %s", out)
+	}
+	pidBytes, err := os.ReadFile(grandchildPIDFile)
+	if err != nil {
+		t.Fatalf("the grandchild never recorded its own pid (never started?): %v", err)
+	}
+	var gpid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(pidBytes)), "%d", &gpid); err != nil {
+		t.Fatalf("could not parse grandchild pid %q: %v", pidBytes, err)
+	}
+	if err := syscall.Kill(gpid, 0); err == nil {
+		t.Fatalf("grandchild pid %d is still alive after the script returned -- group kill did not reach a descendant outside the direct child", gpid)
+	} else if err != syscall.ESRCH {
+		t.Fatalf("unexpected error probing grandchild pid %d: %v", gpid, err)
 	}
 }
 
@@ -335,7 +629,7 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 // budget) but was not actually killed by this check, and the script must
 // say so rather than claim "killed" for a termination it didn't cause.
 func TestTrack3PreflightReportsHonestlyWhenChildCompletesDuringTermGraceWithoutBeingKilled(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 	root := t.TempDir()
 
 	fakeBin := filepath.Join(root, "bin")
@@ -350,26 +644,46 @@ func TestTrack3PreflightReportsHonestlyWhenChildCompletesDuringTermGraceWithoutB
 		t.Fatal(err)
 	}
 
-	script, err := filepath.Abs("track3-preflight.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command("sh", script, repo, filepath.Join(root, "scratch"), "3.11")
-	cmd.Env = append([]string{
-		"PATH=" + fakeBin + ":/usr/bin:/bin",
-		"TZ=UTC",
-		"MARKER=" + marker,
-		"TRACK3_UV_TIMEOUT=1",
-	}, filteredEnv("PATH", "TZ", "MARKER", "TRACK3_UV_TIMEOUT")...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("script failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "completed on its own before termination was confirmed -- not killed by this check") {
+	env := hermeticEnv(t, fakeBin, "MARKER="+marker, "TRACK3_UV_TIMEOUT=1")
+	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11")
+	if !strings.Contains(out, "completed on its own before termination was confirmed -- not killed by this check") {
 		t.Fatalf("expected an honest not-killed-by-this-check report for a child that outlived TERM but finished before KILL: %s", out)
 	}
 	if _, statErr := os.Stat(marker); statErr != nil {
 		t.Fatalf("the child's own marker should exist in this case (it really did complete on its own): %v", statErr)
+	}
+}
+
+// Council P3: rc>=128 alone is not proof WE killed the child -- a process
+// that crashes or self-signals well within budget can land in the exact
+// same exit-status range. A fake uv that kills itself with SIGKILL almost
+// immediately (budget never comes close to elapsing) must be reported as a
+// plain failed completion, never as "timed out ... killed".
+func TestTrack3PreflightDoesNotClaimKilledForAnInBudgetSelfCrash(t *testing.T) {
+	repo, _ := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakeUV := "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'uv 0.0.0-fake' ;;\n  lock) kill -KILL $$ ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A generous 30s budget (the default) that the near-instant self-kill
+	// comes nowhere near -- if the script ever reports "killed" here, it can
+	// only be from trusting the exit-status range alone, not real escalation
+	// provenance. Must go through runPreflightEnv with fakeBin on PATH, not
+	// the no-fakes runPreflight convenience helper -- an earlier version of
+	// this test called the latter by mistake, silently exercising the real
+	// uv instead of this fake one, and passed regardless of the mutation
+	// under test for that reason alone.
+	out, _ := runPreflightEnv(t, hermeticEnv(t, fakeBin), repo, filepath.Join(root, "scratch"), "3.11")
+	if !strings.Contains(out, "uv_lock_consistency_with_pyproject") || !strings.Contains(out, ": NOT-CONFIGURED") {
+		t.Fatalf("expected a plain NOT-CONFIGURED report for a self-killed child: %s", out)
+	}
+	if strings.Contains(out, "timed out") || strings.Contains(out, "killed") {
+		t.Fatalf("an in-budget self-crash must never be reported as a timeout/kill this check performed: %s", out)
 	}
 }
 
@@ -378,7 +692,7 @@ func TestTrack3PreflightReportsHonestlyWhenChildCompletesDuringTermGraceWithoutB
 // comparisons error out (non-numeric) or let an absurd value function as
 // "no timeout" in practice.
 func TestTrack3PreflightRejectsInvalidUvTimeout(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 	root := t.TempDir()
 	fakeBin := filepath.Join(root, "bin")
 	if err := os.Mkdir(fakeBin, 0755); err != nil {
@@ -387,53 +701,132 @@ func TestTrack3PreflightRejectsInvalidUvTimeout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte("#!/bin/sh\necho 'uv 0.0.0-fake'\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	script, err := filepath.Abs("track3-preflight.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, bad := range []string{"0", "-1", "not-a-number", "999999"} {
 		t.Run(bad, func(t *testing.T) {
-			cmd := exec.Command("sh", script, repo, filepath.Join(root, "scratch-"+bad), "3.11")
-			cmd.Env = append([]string{
-				"PATH=" + fakeBin + ":/usr/bin:/bin",
-				"TZ=UTC",
-				"TRACK3_UV_TIMEOUT=" + bad,
-			}, filteredEnv("PATH", "TZ", "TRACK3_UV_TIMEOUT")...)
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("script failed: %v\n%s", err, out)
+			env := hermeticEnv(t, fakeBin, "TRACK3_UV_TIMEOUT="+bad)
+			out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch-"+bad), "3.11")
+			if err == nil {
+				t.Fatalf("an invalid timeout must fail the overall gate: %s", out)
 			}
-			if !strings.Contains(string(out), "TRACK3_UV_TIMEOUT invalid") {
+			if !strings.Contains(out, "TRACK3_UV_TIMEOUT invalid") {
 				t.Fatalf("expected an explicit invalid-timeout report for %q: %s", bad, out)
 			}
-			if strings.Contains(string(out), "uv_lock_consistency_with_pyproject") {
-				t.Fatalf("an invalid timeout must not proceed to run the lock check at all: %s", out)
+			if !strings.Contains(out, "uv_lock_consistency_with_pyproject") || !strings.Contains(out, ": UNKNOWN") {
+				t.Fatalf("an invalid timeout must still emit an explicit UNKNOWN lock line, not silently drop it: %s", out)
 			}
 		})
 	}
 }
 
-// filteredEnv returns the current environment with the given keys removed,
-// so a constructed PATH/TZ above is the only source of truth for them.
-func filteredEnv(exclude ...string) []string {
-	var out []string
-	for _, kv := range os.Environ() {
-		skip := false
-		for _, k := range exclude {
-			if strings.HasPrefix(kv, k+"=") {
-				skip = true
-				break
+// Council: the repository-root check must refuse upward-search
+// misattribution -- a path that is merely a SUBDIRECTORY of a real git
+// repository (not the repo's own top level) must never have its facts
+// reported as if they were about the requested path.
+func TestTrack3PreflightRefusesSubdirectoryOfARealRepoAsMisattribution(t *testing.T) {
+	repo, _ := zeocoreFixture(t, "3.1.3")
+	subdir := filepath.Join(repo, "src")
+	out, err := runPreflight(t, subdir, t.TempDir(), "3.11")
+	if err == nil {
+		t.Fatalf("a subdirectory, not the repo's own top level, must fail the overall gate: %s", out)
+	}
+	if !strings.Contains(out, "repo_root_status: NOT-CONFIGURED") {
+		t.Fatalf("a requested path that is only a subdirectory of the real repo root must be refused: %s", out)
+	}
+	if strings.Contains(out, "pandoc floor (code minimum, from HEAD:src/zeo_core/integrations/pandoc/_runner.py): 2.15") {
+		t.Fatalf("misattributed repo-root facts must not be reported as if verified: %s", out)
+	}
+}
+
+func TestTrack3PreflightSameRevisionCheck(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+
+	t.Run("NOT-PROVIDED when no expected revision is given", func(t *testing.T) {
+		out, _ := runPreflight(t, repo, t.TempDir(), "3.11")
+		if !strings.Contains(out, "same_revision_status: NOT-PROVIDED") {
+			t.Fatalf("expected NOT-PROVIDED with no 4th argument: %s", out)
+		}
+	})
+
+	t.Run("MATCH when the expected revision is the real HEAD", func(t *testing.T) {
+		out, err := runPreflightEnv(t, hermeticEnv(t, ""), repo, t.TempDir(), "3.11", head)
+		if err != nil {
+			if _, ok := err.(*exec.ExitError); !ok {
+				t.Fatalf("script failed to run at all: %v\n%s", err, out)
 			}
 		}
-		if !skip {
-			out = append(out, kv)
+		if !strings.Contains(out, "same_revision_status: MATCH") {
+			t.Fatalf("expected MATCH against the real HEAD: %s", out)
+		}
+	})
+
+	t.Run("MISMATCH when the expected revision is a different, valid SHA", func(t *testing.T) {
+		other := strings.Repeat("a", 40)
+		if other == head {
+			other = strings.Repeat("b", 40)
+		}
+		out, err := runPreflightEnv(t, hermeticEnv(t, ""), repo, t.TempDir(), "3.11", other)
+		if err == nil {
+			t.Fatalf("a revision mismatch must fail the overall gate: %s", out)
+		}
+		if !strings.Contains(out, "same_revision_status: MISMATCH") {
+			t.Fatalf("expected MISMATCH against a different SHA: %s", out)
+		}
+	})
+
+	t.Run("a malformed expected revision is refused at the usage level", func(t *testing.T) {
+		out, err := runPreflightEnv(t, hermeticEnv(t, ""), repo, t.TempDir(), "3.11", "not-a-sha")
+		if err == nil {
+			t.Fatalf("a malformed expected revision must be refused, not silently accepted: %s", out)
+		}
+		if !strings.Contains(out, "usage:") {
+			t.Fatalf("expected a usage refusal for a malformed expected-revision argument: %s", out)
+		}
+	})
+}
+
+// Council: dirty-working-tree state must be surfaced explicitly, and the
+// repo-fact reads must come from HEAD regardless -- an uncommitted edit to
+// the pandoc floor file must NOT change what this script reports.
+func TestTrack3PreflightReadsHeadNotWorkingTreeAndReportsDirtyState(t *testing.T) {
+	repo, _ := zeocoreFixture(t, "3.1.3")
+	runnerPath := filepath.Join(repo, "src", "zeo_core", "integrations", "pandoc", "_runner.py")
+	if err := os.WriteFile(runnerPath, []byte("MIN_PANDOC_VERSION: Final = (9, 99)\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runPreflight(t, repo, t.TempDir(), "3.11")
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatalf("script failed to run at all: %v\n%s", err, out)
 		}
 	}
-	return out
+	if !strings.Contains(out, "working_tree_status: DIRTY") {
+		t.Fatalf("expected the dirty working tree to be reported explicitly: %s", out)
+	}
+	if !strings.Contains(out, "pandoc floor (code minimum, from HEAD:src/zeo_core/integrations/pandoc/_runner.py): 2.15") {
+		t.Fatalf("the uncommitted edit must not change the reported floor, which is read from HEAD: %s", out)
+	}
+}
+
+// The final receipt_sha256 line must be a real sha256 over the report text
+// actually printed, computed after capture so the two can never drift.
+func TestTrack3PreflightReceiptMatchesReportSha256(t *testing.T) {
+	repo, _ := zeocoreFixture(t, "3.1.3")
+	out, _ := runPreflight(t, repo, t.TempDir(), "3.11")
+
+	idx := strings.Index(out, "receipt_sha256: ")
+	if idx < 0 {
+		t.Fatalf("missing receipt_sha256 line: %s", out)
+	}
+	reportText := out[:idx]
+	receiptLine := strings.TrimSpace(out[idx:])
+	wantHash := fmt.Sprintf("receipt_sha256: %x", sha256Sum(reportText))
+	if receiptLine != wantHash {
+		t.Fatalf("receipt does not match sha256 of the printed report:\nwant %s\ngot  %s", wantHash, receiptLine)
+	}
 }
 
 func TestTrack3PreflightRejectsIncompleteArguments(t *testing.T) {
-	repo := zeocoreFixture(t, "3.1.3")
+	repo, _ := zeocoreFixture(t, "3.1.3")
 	script, err := filepath.Abs("track3-preflight.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -444,6 +837,7 @@ func TestTrack3PreflightRejectsIncompleteArguments(t *testing.T) {
 		{repo, t.TempDir()}, // missing the job target
 	} {
 		cmd := exec.Command("sh", append([]string{script}, args...)...)
+		cmd.Env = hermeticEnv(t, "")
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("args %v: expected a usage refusal, got success: %s", args, out)
