@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Track 3 (pomar-SOW-87 / zeo-rt-sched-SOW-04 / zeocore-SOW-41): a read-only
 # preflight for the ENG-UK job re-running zeocore's same source revision,
 # after the environment correction. This script never installs, modifies or
@@ -6,8 +6,22 @@
 # environment and reports facts, so the scheduler's allocation can carry real
 # preflight evidence instead of a plan.
 #
-# Usage: sh tools/track3-preflight.sh <zeocore-repo-path> <scratch-path> \
-#          <pandoc-job-target> [<expected-full-commit-sha>]
+# Council's review of 6f0f91e: this script requires bash and was not
+# declaring it -- `bounded_run`'s process-group primitive (`set -m` on a
+# background job) silently does NOT create a new process group under a
+# plain POSIX `/bin/sh` without job-control support (dash, the real `/bin/sh`
+# on most Linux hosts including the actual ENG-UK job target): verified
+# directly -- `dash` without a controlling tty prints "can't access tty; job
+# control turned off" and leaves the backgrounded job in the SAME process
+# group as the shell itself, silently breaking every group-kill guarantee
+# this script relies on. bash's `set -m` was verified to still create a
+# genuinely distinct process group even with no controlling tty
+# (`< /dev/null`). The shebang and invocation now require bash explicitly,
+# and the script refuses to proceed under any other shell rather than run
+# with a broken safety primitive and not say so.
+#
+# Usage: bash tools/track3-preflight.sh <zeocore-repo-path> <scratch-path> \
+#          <pandoc-job-target> <expected-full-commit-sha>
 #
 # <zeocore-repo-path> is a local checkout of zeroemployeeorg/zeocore, read
 # only (via `git show HEAD:<path>`, never the working tree) to learn its OWN
@@ -23,10 +37,15 @@
 # policy, not a repo fact, so it is never read from the repo or defaulted;
 # the caller must supply it explicitly
 # (Architect's msg-architect-architect-pandoc-settled-2156).
-# <expected-full-commit-sha>, if given, must be the exact 40-hex-character
-# commit this job was told to re-run; the inspected HEAD is compared against
-# it and reported MATCH/MISMATCH. Omitting it reports same_revision_status
-# as NOT-PROVIDED -- never a silent, assumed match.
+# <expected-full-commit-sha> is the exact 40-hex-character commit this job
+# was told to re-run; the inspected HEAD is compared against it and reported
+# MATCH/MISMATCH, and MISMATCH (like anything else short of MATCH) fails the
+# overall gate. This argument is REQUIRED, not optional: Council's review of
+# 6f0f91e found that an omitted expected revision reported NOT-PROVIDED and
+# that status silently PASSED the overall gate -- a preflight that can
+# report VERIFIED without ever having been told which revision it was
+# supposed to confirm is not a safe default for a job that re-runs a named,
+# specific source revision. There is no longer a 3-argument form.
 #
 # Every external command this script runs (git, pandoc, uv, stat, hostname,
 # id) is bounded: it runs in its own process group (bounded_run below) so a
@@ -35,21 +54,30 @@
 # run with UV_OFFLINE=1, UV_PYTHON_DOWNLOADS=never and a private, disposable
 # UV_CACHE_DIR, so this "read-only" script genuinely cannot reach the network
 # or write outside its own bounds; if that cannot be guaranteed the check
-# reports UNKNOWN rather than silently running unprotected.
+# reports UNKNOWN rather than silently running unprotected. The lock check
+# itself runs against a clean `git archive HEAD` snapshot, never the
+# repo's own working tree -- Council's review of 6f0f91e: reporting
+# source_head/floor/pin/pyproject from HEAD while validating uv.lock against
+# the WORKING TREE's pyproject.toml means an uncommitted edit could make the
+# lock check pass or fail for a revision this script never actually reports.
 #
 # The script reports an explicit overall status -- VERIFIED only if every
-# check that must hold for this job to proceed actually came back VERIFIED
-# (or, for same-revision, was not asked for) -- and exits 0 only in that
-# case; any NOT-CONFIGURED or UNKNOWN among the gating checks is a nonzero
-# exit. This is a deliberate behavior change from an earlier, unconditional
-# exit 0; any caller that wants "ran to completion" semantics instead of this
-# gate must say so explicitly and the caller contract updated accordingly --
-# until then, nonzero on an unverified run is the only safe default for a
-# preflight gating a real job.
+# gating check actually came back VERIFIED (or MATCH, for same-revision) --
+# and exits 0 only in that case; any NOT-CONFIGURED, UNKNOWN or MISMATCH
+# among the gating checks is a nonzero exit. This is a deliberate behavior
+# change from an earlier, unconditional exit 0; any caller that wants "ran to
+# completion" semantics instead of this gate must say so explicitly and the
+# caller contract updated accordingly -- until then, nonzero on an unverified
+# run is the only safe default for a preflight gating a real job.
 #
 # Output is the report followed by its own sha256 (a receipt over the report
 # text itself, computed after capture, so the two can never drift).
 set -eu
+
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "error: this script requires bash (its process-group termination guarantees depend on bash's set -m; a plain POSIX sh, e.g. dash, silently disables job control and breaks them). Run it as: bash tools/track3-preflight.sh ..." >&2
+  exit 2
+fi
 
 LC_ALL=C
 export LC_ALL
@@ -72,11 +100,12 @@ repo=${1:-}
 scratch=${2:-}
 job_target=${3:-}
 expected_head=${4:-}
-usage='usage: sh tools/track3-preflight.sh <zeocore-repo-path> <scratch-path> <pandoc-job-target> [<expected-full-commit-sha>]'
+usage='usage: bash tools/track3-preflight.sh <zeocore-repo-path> <scratch-path> <pandoc-job-target> <expected-full-commit-sha>'
 [ -n "$repo" ] && [ -d "$repo" ] || { echo "$usage" >&2; exit 2; }
 [ -n "$scratch" ] || { echo "$usage" >&2; exit 2; }
 [ -n "$job_target" ] || { echo "$usage" >&2; exit 2; }
-if [ -n "$expected_head" ] && ! expr "$expected_head" : '[0-9a-fA-F]\{40\}$' >/dev/null; then
+[ -n "$expected_head" ] || { echo "$usage" >&2; exit 2; }
+if ! expr "$expected_head" : '[0-9a-fA-F]\{40\}$' >/dev/null; then
   echo "$usage (expected-full-commit-sha must be exactly 40 hex characters, got '$expected_head')" >&2
   exit 2
 fi
@@ -116,6 +145,26 @@ fi
 # what was observed -- rc>=128 alone, without that provenance, is reported as
 # the honest, narrower "exited with a signal-range status before our own
 # escalation would have fired" case, never glossed as "killed by this check".
+#
+# Council's review of 6f0f91e found two further real gaps in the ORIGINAL
+# version of this function (fixed below, both via the same unconditional
+# post-reap sweep): (N1) if the process GROUP LEADER itself dies quickly
+# from the watchdog's TERM (because, unlike the counterexample this fix was
+# originally built against, the leader does not trap/ignore TERM) while a
+# background descendant of its OWN does ignore TERM and would otherwise
+# survive, `wait "$pid"` returns as soon as the leader exits and the
+# watchdog was being cancelled immediately afterward -- before its own
+# scheduled KILL step ever ran -- so that surviving descendant was never
+# actually killed. (N2) a leader that simply exits normally, well within
+# budget, having left an unrelated background job of its own running, had
+# that leftover neither killed nor even counted, since the residual check
+# only ever ran once, informationally, with no sweep action taken.
+#
+# The fix is the same for both: after the leader is reaped, REGARDLESS of
+# why or how quickly, unconditionally check the whole process group for any
+# remaining member and, if one exists, escalate TERM then KILL against the
+# group right then -- not deferred to the (by then cancelled) watchdog's own
+# schedule, and not skipped just because the leader itself exited cleanly.
 bounded_run() {
   budget=$1
   outfile=$2
@@ -147,6 +196,22 @@ bounded_run() {
   wait "$watchdog" 2>/dev/null || true
   end=$(date +%s)
   elapsed=$((end - start))
+
+  # Unconditional post-reap group sweep (Council's N1/N2): whatever remains
+  # in this command's process group after the leader itself is gone is
+  # swept here, every time, regardless of why the leader exited or how
+  # quickly. The common case (nothing left) costs nothing extra; only a
+  # genuine straggler pays the short grace sleeps below.
+  if command -v ps >/dev/null 2>&1; then
+    if ps -o pid= -g "$pid" >/dev/null 2>&1; then
+      kill -TERM -"$pid" 2>/dev/null || true
+      sleep 1
+      if ps -o pid= -g "$pid" >/dev/null 2>&1; then
+        kill -KILL -"$pid" 2>/dev/null || true
+        sleep 1
+      fi
+    fi
+  fi
   residual=none
   if command -v ps >/dev/null 2>&1; then
     if ps -o pid= -g "$pid" >/dev/null 2>&1; then
@@ -281,21 +346,15 @@ preflight() {
   echo "zeocore source_remote: $source_remote"
   echo "working_tree_status: $working_tree_status (informational -- facts below are read from HEAD, not the working tree, regardless)"
 
-  same_revision_status=NOT-PROVIDED
-  if [ -n "$expected_head" ]; then
-    if [ "$source_head" = NOT-INSPECTED ]; then
-      same_revision_status=UNKNOWN
-    elif [ "$source_head" = "$expected_head" ]; then
-      same_revision_status=MATCH
-    else
-      same_revision_status=MISMATCH
-    fi
+  if [ "$source_head" = NOT-INSPECTED ]; then
+    same_revision_status=UNKNOWN
+  elif [ "$source_head" = "$expected_head" ]; then
+    same_revision_status=MATCH
+  else
+    same_revision_status=MISMATCH
   fi
-  echo "same_revision_status: $same_revision_status${expected_head:+ (expected $expected_head)}"
-  case "$same_revision_status" in
-    NOT-PROVIDED | MATCH) ;;
-    *) note_not_verified ;;
-  esac
+  echo "same_revision_status: $same_revision_status (expected $expected_head)"
+  [ "$same_revision_status" = MATCH ] || note_not_verified
 
   # --- 1. pandoc: three distinct, separately-sourced values (council's
   # settlement, msg-architect-architect-pandoc-settled-2156): the repo's
@@ -411,44 +470,62 @@ preflight() {
     esac
 
     uv_cache_dir=$(mktemp -d "$scratch_tmp/uvcache.XXXXXX" 2>/dev/null || echo "")
+    head_snapshot=$(mktemp -d "$scratch_tmp/headsnap.XXXXXX" 2>/dev/null || echo "")
     if [ -z "$uv_cache_dir" ]; then
       lock_consistency=UNKNOWN
       lock_reason=" (could not allocate a private UV_CACHE_DIR; refusing to run unprotected)"
+    elif [ -z "$head_snapshot" ]; then
+      lock_consistency=UNKNOWN
+      lock_reason=" (could not allocate a HEAD snapshot directory; refusing to check the working tree instead)"
     else
-      run_bounded "$uv_timeout" env \
-        UV_OFFLINE=1 \
-        UV_PYTHON_DOWNLOADS=never \
-        "UV_CACHE_DIR=$uv_cache_dir" \
-        "$uv_path" lock --check --directory "$repo_root"
-      case "$BOUNDED_STATUS" in
-        OK)
-          lock_consistency=VERIFIED
-          lock_reason=""
-          ;;
-        FAILED)
-          lock_consistency=NOT-CONFIGURED
-          lock_reason=""
-          ;;
-        TIMED_OUT_KILLED)
-          lock_consistency=NOT-CONFIGURED
-          lock_reason=" (timed out after ${uv_timeout}s, killed; residual process-group members: $BOUNDED_RESIDUAL)"
-          ;;
-        TIMED_OUT_COMPLETED)
-          lock_consistency=NOT-CONFIGURED
-          lock_reason=" (timed out after ${uv_timeout}s, completed on its own before termination was confirmed -- not killed by this check)"
-          ;;
-        *)
-          lock_consistency=UNKNOWN
-          lock_reason=" (bounded execution unavailable or unrecognized)"
-          ;;
-      esac
+      # Council's review of 6f0f91e: `uv lock --check` reads real files on
+      # disk, so running it directly against $repo_root checks the WORKING
+      # TREE's pyproject.toml/uv.lock, not the HEAD this script reports --
+      # an uncommitted edit could make this pass or fail for a revision
+      # that isn't the one named in source_head/same_revision_status above.
+      # `git archive HEAD` extracts exactly HEAD's own tree into a throwaway
+      # directory, so the lock check genuinely validates the inspected
+      # revision regardless of working-tree state.
+      run_bounded 10 sh -c "git -C \"\$1\" archive HEAD | tar -x -C \"\$2\"" sh "$repo_root" "$head_snapshot"
+      if [ "$BOUNDED_STATUS" != OK ]; then
+        lock_consistency=UNKNOWN
+        lock_reason=" (could not extract a HEAD snapshot: $BOUNDED_STATUS)"
+      else
+        run_bounded "$uv_timeout" env \
+          UV_OFFLINE=1 \
+          UV_PYTHON_DOWNLOADS=never \
+          "UV_CACHE_DIR=$uv_cache_dir" \
+          "$uv_path" lock --check --directory "$head_snapshot"
+        case "$BOUNDED_STATUS" in
+          OK)
+            lock_consistency=VERIFIED
+            lock_reason=""
+            ;;
+          FAILED)
+            lock_consistency=NOT-CONFIGURED
+            lock_reason=""
+            ;;
+          TIMED_OUT_KILLED)
+            lock_consistency=NOT-CONFIGURED
+            lock_reason=" (timed out after ${uv_timeout}s, killed; residual process-group members: $BOUNDED_RESIDUAL)"
+            ;;
+          TIMED_OUT_COMPLETED)
+            lock_consistency=NOT-CONFIGURED
+            lock_reason=" (timed out after ${uv_timeout}s, completed on its own before termination was confirmed -- not killed by this check)"
+            ;;
+          *)
+            lock_consistency=UNKNOWN
+            lock_reason=" (bounded execution unavailable or unrecognized)"
+            ;;
+        esac
+      fi
     fi
   fi
   if [ "$repo_root_status" != VERIFIED ]; then
     lock_consistency=UNKNOWN
     lock_reason=" (repository root not verified; refusing to resolve --directory)"
   fi
-  echo "uv_lock_consistency_with_pyproject (uv lock --check; offline, no Python downloads, private cache, bounded to ${uv_timeout:-N/A}s, does not prove an installed environment): $lock_consistency$lock_reason"
+  echo "uv_lock_consistency_with_pyproject (uv lock --check against a HEAD snapshot, not the working tree; offline, no Python downloads, private cache, bounded to ${uv_timeout:-N/A}s, does not prove an installed environment): $lock_consistency$lock_reason"
   [ "$lock_consistency" = VERIFIED ] || note_not_verified
 
   # --- 3. scratch path ancestry: no existing ancestor writable by others
