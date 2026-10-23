@@ -8,15 +8,17 @@ import (
 )
 
 type Observation struct {
-	Pin            string `json:"pin"`
-	History        string `json:"history_sha256"`
-	KeyID          string `json:"key_id"`
-	PID            int    `json:"pid"`
-	Birth          string `json:"process_birth"`
-	Capacity       string `json:"capacity_binding_sha256"`
-	CallerHistory  string `json:"caller_history_sha256"`
-	OwnerCapacity  string `json:"owner_capacity_sha256"`
-	CallerCapacity string `json:"caller_capacity_sha256"`
+	ManagerTable        FilePin `json:"manager_table"`
+	ManagerTableHistory string  `json:"manager_table_history_sha256"`
+	Pin                 string  `json:"pin"`
+	History             string  `json:"history_sha256"`
+	KeyID               string  `json:"key_id"`
+	PID                 int     `json:"pid"`
+	Birth               string  `json:"process_birth"`
+	Capacity            string  `json:"capacity_binding_sha256"`
+	CallerHistory       string  `json:"caller_history_sha256"`
+	OwnerCapacity       string  `json:"owner_capacity_sha256"`
+	CallerCapacity      string  `json:"caller_capacity_sha256"`
 }
 
 type Journal struct {

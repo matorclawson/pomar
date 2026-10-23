@@ -9,7 +9,7 @@ import (
 func fixtureManifest() Manifest {
 	f := FilePin{strings.Repeat("a", 64), 123}
 	b := Build{Pin: strings.Repeat("b", 40), HostPin: strings.Repeat("c", 40), Binaries: map[string]FilePin{"pomar": f, "pomar-host": f}}
-	m := Manifest{Schema: "pomar.service-upgrade/v1", Host: "mac-example", OperatorUID: 501, OwnerUID: 410, CallerUID: 65020, Baseline: b, Target: b, InstallRecord: f, KeyID: strings.Repeat("d", 64), CertificateSHA1: strings.Repeat("e", 40), Entitlements: f, Retained: map[string]FilePin{}}
+	m := Manifest{Schema: "pomar.service-upgrade/v1", Host: "mac-example", OperatorUID: 501, OwnerUID: 410, CallerUID: 65020, Baseline: b, Target: b, InstallRecord: f, ManagerTable: f, KeyID: strings.Repeat("d", 64), CertificateSHA1: strings.Repeat("e", 40), Entitlements: f, Retained: map[string]FilePin{}}
 	m.Target.Pin = strings.Repeat("f", 40)
 	m.SigningPolicy = "internal_certificate"
 	for _, n := range retained {

@@ -40,7 +40,11 @@ func readFile(path string, maximum int64, uid uint32) ([]byte, error) {
 	return b, nil
 }
 func pinnedFile(path string, pin FilePin) ([]byte, error) {
-	b, err := readFile(path, pin.Bytes, 0)
+	return pinnedOwnedFile(path, pin, 0)
+}
+
+func pinnedOwnedFile(path string, pin FilePin, uid uint32) ([]byte, error) {
+	b, err := readFile(path, pin.Bytes, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +95,11 @@ func privateRoot(path string) error {
 	return nil
 }
 func durableWrite(path string, b []byte, mode os.FileMode) error {
-	if err := directory(filepath.Dir(path), 0, 0); err != nil {
+	return durableWriteOwned(path, b, mode, 0)
+}
+
+func durableWriteOwned(path string, b []byte, mode os.FileMode, uid uint32) error {
+	if err := directory(filepath.Dir(path), uid, 0); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".pomar-upgrade-pending-")
@@ -101,6 +109,11 @@ func durableWrite(path string, b []byte, mode os.FileMode) error {
 	tmp := f.Name()
 	defer os.Remove(tmp)
 	defer f.Close()
+	if uid != uint32(os.Geteuid()) {
+		if err = f.Chown(int(uid), -1); err != nil {
+			return err
+		}
+	}
 	if err = f.Chmod(mode); err != nil {
 		return err
 	}

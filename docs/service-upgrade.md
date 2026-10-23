@@ -107,3 +107,49 @@ root-owned service transition. An installable recipe also needs the exact
 sealed payload under the applicable reviewed signing policy, qualified CLI, current owner observations,
 review and an attended administrator execution result. Retain those receipts
 before updating any dependent release acceptance policy.
+
+
+## Manager table recovery
+
+A new upgrade manifest must also bind `manager_table` (SHA256 and positive byte
+length, at most64MiB). Obtain this pre-upgrade binding through the existing
+administrator receiving path; do not expose the protected table to another
+account. Check and the stop-time observation refuse a changed baseline table.
+The archive includes the exact original bytes as `manager-table.json`, root
+owned and private. Missing, changed or unbound table archives refuse rollback.
+
+After positively stopping/proving absence of every writer, rollback checks that
+the current table's complete canonical history still equals the original
+history. A v2 envelope with unchanged entries is compatible with this check;
+new jobs, completion/closure intents, unknown evidence fields, live entries or
+unsupported schemas refuse restoration. The exact old bytes, not a schema
+transformation, are restored with manager-owner UID/mode0600, synced and
+hash-verified before starting the baseline. Binary/install-record restoration
+alone cannot make a legacy manager read a migrated v2 table. New manifests
+containing this required field are deliberately refused by older upgrade CLIs;
+use the exact reviewed recovery CLI and keep its root-owned binding.
+
+Source tests exercise actual target Manager.Open against private fixture data,
+which writes v2, and prove the legacy array decoder fails without restoration
+and succeeds after exact-byte recovery. This is not an installed2195 restart
+receipt; the separate bounded real2195 startup/read exercise and independent
+Council approval remain required before administrator adoption. No source test
+starts a guest, uses a signing key or changes a permanent service.
+
+The actual-baseline source exercise is opt-in, under the same approved bounded
+qualification venue:
+
+```sh
+POMAR_ROLLBACK_BASELINE_PATH=/usr/local/libexec/pomar/pomar \
+  go test -race -count=1 ./internal/serviceupgrade -run TestManagerTable
+```
+
+It verifies the independently pinned installed2195 binary hash, uses only new
+private fixture directories under the owner's TMPDIR, no signing and no guest
+submission. It first requires2195 to reject the migrated fixture specifically
+at its legacy table decoder, then restores the snapshot and requires that same
+binary to serve and return the empty original history. A fixture helper and
+nonbootable hash-checked kernel stand in for VM assets; they are never launched.
+This demonstrates table compatibility, not VM execution or a privileged
+permanent-service upgrade. Without the explicit baseline path this separate
+exercise is reported skipped, never counted as an installed restart receipt.

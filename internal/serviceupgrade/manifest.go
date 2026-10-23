@@ -32,6 +32,7 @@ type Manifest struct {
 	Baseline        Build              `json:"baseline"`
 	Target          Build              `json:"target"`
 	InstallRecord   FilePin            `json:"install_record"`
+	ManagerTable    FilePin            `json:"manager_table"`
 	Retained        map[string]FilePin `json:"retained"`
 	KeyID           string             `json:"manager_key_id"`
 	CertificateSHA1 string             `json:"certificate_sha1"`
@@ -54,7 +55,7 @@ func (m Manifest) Validate() error {
 	if m.Schema != "pomar.service-upgrade/v1" || !hostName.MatchString(m.Host) ||
 		m.OperatorUID == 0 || m.OwnerUID == 0 || m.CallerUID == 0 || m.OperatorUID == m.OwnerUID ||
 		m.OperatorUID == m.CallerUID || m.OwnerUID == m.CallerUID || !hex64.MatchString(m.KeyID) ||
-		!validFile(m.InstallRecord, 64<<10) || !validFile(m.Entitlements, 64<<10) {
+		!validFile(m.ManagerTable, maxManagerTable) || !validFile(m.InstallRecord, 64<<10) || !validFile(m.Entitlements, 64<<10) {
 		return fmt.Errorf("unsupported service identity or incomplete certificate binding")
 	}
 	switch m.SigningPolicy {

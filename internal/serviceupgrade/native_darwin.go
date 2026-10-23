@@ -27,6 +27,7 @@ const bindir = "/usr/local/libexec/pomar"
 const serviceRoot = "/private/var/pomar"
 const recordPath = serviceRoot + "/install-record"
 const runDir = serviceRoot + "/run"
+const managerTablePath = serviceRoot + "/data/manager/table.json"
 const ownerSocket = serviceRoot + "/data/manager/manager.sock"
 const ctlSocket = runDir + "/ctl.sock"
 const label = "org.zeroemployee.pomar.manager"
@@ -264,6 +265,9 @@ func (n *Native) Check(ctx context.Context) error {
 		if hostPin != n.M.Baseline.HostPin {
 			return fmt.Errorf("installed helper source binding differs")
 		}
+		if _, err := pinnedOwnedFile(managerTablePath, n.M.ManagerTable, n.M.OwnerUID); err != nil {
+			return fmt.Errorf("baseline manager table differs: %w", err)
+		}
 		n.beforeRecord = raw
 	}
 	for _, name := range binaries {
@@ -356,44 +360,6 @@ func (n *Native) process(ctx context.Context) (int, string, error) {
 	}
 	return pid, strings.Join(f[1:6], " "), nil
 }
-func canonical(raw []byte) ([]byte, error) {
-	var v any
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.UseNumber() // Unknown evidence integers must never pass through float64.
-	if uniqueJSON(raw) != nil || d.Decode(&v) != nil {
-		return nil, fmt.Errorf("invalid bounded observation")
-	}
-	return json.Marshal(v)
-}
-func history(raw []byte, class string) (string, error) {
-	if len(bytes.TrimSpace(raw)) == 0 || bytes.TrimSpace(raw)[0] != '[' || uniqueJSON(raw) != nil {
-		return "", fmt.Errorf("ambiguous history")
-	}
-	var entries []json.RawMessage
-	if json.Unmarshal(raw, &entries) != nil {
-		return "", fmt.Errorf("history not a list")
-	}
-	seen := map[string]bool{}
-	var preserved []json.RawMessage
-	for _, raw := range entries {
-		var e manager.Entry
-		if json.Unmarshal(raw, &e) != nil || e.Attempt == "" || seen[e.Attempt] || !e.Terminal() {
-			return "", fmt.Errorf("live, duplicate or malformed attempt; upgrade refused")
-		}
-		if class != "" && e.Class.Name != class {
-			return "", fmt.Errorf("caller history escaped fixed class")
-		}
-		seen[e.Attempt] = true
-		b, err := canonical(raw)
-		if err != nil {
-			return "", err
-		}
-		preserved = append(preserved, b)
-	}
-	// Manager list is ordered; keep that order and every original field.
-	b, _ := json.Marshal(preserved)
-	return digest(b), nil
-}
 func key(raw []byte, expected string) error {
 	var k manager.KeyReply
 	if json.Unmarshal(raw, &k) != nil {
@@ -441,6 +407,15 @@ func (n *Native) Observe(ctx context.Context) (Observation, error) {
 		return o, err
 	}
 	r, err := record(raw)
+	if err != nil {
+		return o, err
+	}
+	tableBytes, err := readFile(managerTablePath, maxManagerTable, n.M.OwnerUID)
+	if err != nil {
+		return o, err
+	}
+	o.ManagerTable = FilePin{SHA256: digest(tableBytes), Bytes: int64(len(tableBytes))}
+	o.ManagerTableHistory, err = managerTableHistory(tableBytes)
 	if err != nil {
 		return o, err
 	}
@@ -599,7 +574,7 @@ func (n *Native) Archive(ctx context.Context, before Observation) (string, error
 	if err := syscall.Statfs(archiveRoot, &space); err != nil {
 		return "", err
 	}
-	need := int64(256 << 20)
+	need := int64(256<<20) + n.M.ManagerTable.Bytes
 	for _, f := range n.M.Baseline.Binaries {
 		need += f.Bytes
 	}
@@ -646,6 +621,12 @@ func (n *Native) Archive(ctx context.Context, before Observation) (string, error
 		return path, fmt.Errorf("manifest changed before archive")
 	}
 	if err = durableWrite(filepath.Join(path, "upgrade.json"), raw, 0600); err != nil {
+		return path, err
+	}
+	if before.ManagerTable != n.M.ManagerTable {
+		return path, fmt.Errorf("original manager table observation differs")
+	}
+	if err := archiveManagerTable(managerTablePath, filepath.Join(path, "manager-table.json"), n.M.ManagerTable, n.M.OwnerUID, 0); err != nil {
 		return path, err
 	}
 	return path, nil
@@ -1000,6 +981,9 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 	if !n.rollback || n.lock == nil || j.Archive != n.ArchivePath {
 		return fmt.Errorf("original rollback binding required")
 	}
+	if _, err := pinnedOwnedFile(filepath.Join(n.ArchivePath, "manager-table.json"), n.M.ManagerTable, 0); err != nil {
+		return err
+	}
 	// Verify every recovery binary before stopping a working manager, even if
 	// the archive was already checked when the journal was loaded.
 	if err := archivedBinaries(n.ArchivePath, n.M.Baseline, 0); err != nil {
@@ -1023,6 +1007,9 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 	if err := n.retainedCheck(); err != nil {
 		return err
 	}
+	if _, err := managerTableRecoveryBytes(managerTablePath, filepath.Join(n.ArchivePath, "manager-table.json"), n.M.ManagerTable, n.M.OwnerUID, 0, j.Before.ManagerTableHistory); err != nil {
+		return err
+	}
 	for _, name := range binaries {
 		current, err := readFile(bindir+"/"+name, 512<<20, 0)
 		if err != nil {
@@ -1039,6 +1026,9 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 		if err = durableWrite(bindir+"/"+name, b, 0755); err != nil {
 			return err
 		}
+	}
+	if err := restoreManagerTable(managerTablePath, filepath.Join(n.ArchivePath, "manager-table.json"), n.M.ManagerTable, n.M.OwnerUID, 0, j.Before.ManagerTableHistory); err != nil {
+		return err
 	}
 	return durableWrite(recordPath, n.beforeRecord, 0644)
 }
@@ -1060,6 +1050,16 @@ func (n *Native) LoadRollback(path string) (Journal, error) {
 	}
 	if uniqueJSON(b) != nil || json.Unmarshal(b, &j) != nil || j.Archive != path || j.ManifestSHA != n.SHA || j.Schema != "pomar.service-upgrade-journal/v1" || j.SigningPolicy != n.M.SigningPolicy {
 		return j, fmt.Errorf("archive journal binding differs")
+	}
+	if j.Before.ManagerTable != n.M.ManagerTable || !hex64.MatchString(j.Before.ManagerTableHistory) {
+		return j, fmt.Errorf("original table binding differs")
+	}
+	tableBytes, err := pinnedOwnedFile(filepath.Join(path, "manager-table.json"), n.M.ManagerTable, 0)
+	if err != nil {
+		return j, err
+	}
+	if h, err := managerTableHistory(tableBytes); err != nil || h != j.Before.ManagerTableHistory {
+		return j, fmt.Errorf("archived table history binding differs")
 	}
 	if j.Before.Pin != n.M.Baseline.Pin || j.Before.KeyID != n.M.KeyID || !hex64.MatchString(j.Before.History) || !hex64.MatchString(j.Before.Capacity) || !hex64.MatchString(j.Before.OwnerCapacity) || !hex64.MatchString(j.Before.CallerCapacity) || !hex64.MatchString(j.Before.CallerHistory) || j.Before.PID <= 1 || j.Before.Birth == "" {
 		return j, fmt.Errorf("archive original observation binding differs")
