@@ -371,19 +371,7 @@ func key(raw []byte, expected string) error {
 	}
 	return nil
 }
-func capacity(raw []byte) (string, error) {
-	var cp manager.Capacity
-	if uniqueJSON(raw) != nil || json.Unmarshal(raw, &cp) != nil || cp.Live != 0 || cp.Class.Name == "" || cp.Class.VCPU < 1 || cp.Class.MemoryBytes < 1 || len(cp.Classes) == 0 || cp.Host.CPUSlots < 1 || cp.Host.MemoryBytes < 1 {
-		return "", fmt.Errorf("non-idle or malformed capacity")
-	}
-	// Space, live count and drain are observations, not installation identity.
-	b, _ := json.Marshal(struct {
-		Class   any `json:"class"`
-		Classes any `json:"classes"`
-		Host    any `json:"host"`
-	}{cp.Class, cp.Classes, cp.Host})
-	return digest(b), nil
-}
+func capacity(raw []byte) (string, error) { return capacityBinding(raw) }
 func (n *Native) caller(ctx context.Context, action string) ([]byte, error) {
 	input, _ := json.Marshal(cicaller.Request{Action: action})
 	b, err := command(ctx, input, "/usr/bin/sudo", "-n", "-u", "_profrodci", "-H", bindir+"/pomar-ci-caller")
@@ -397,6 +385,12 @@ func (n *Native) caller(ctx context.Context, action string) ([]byte, error) {
 	return r.Body, nil
 }
 func (n *Native) Observe(ctx context.Context) (Observation, error) {
+	return n.observe(ctx, true)
+}
+
+// A fenced verification derives the caller view from owner evidence and the
+// unchanged fixed policy. It never claims to have contacted the caller.
+func (n *Native) observe(ctx context.Context, withCaller bool) (Observation, error) {
 	var o Observation
 	pid, birth, err := n.process(ctx)
 	if err != nil {
@@ -475,48 +469,22 @@ func (n *Native) Observe(ctx context.Context) (Observation, error) {
 	if json.Unmarshal(policyBytes, &policy) != nil || policy.CallerUID != int(n.M.CallerUID) || policy.ManagerUID != int(n.M.OwnerUID) || policy.Class == "" || policy.Socket != ctlSocket {
 		return o, fmt.Errorf("caller policy binding differs")
 	}
-	b, err = n.caller(ctx, "list")
+	projectedHistory, projectedCapacity, err := ownerCallerProjection(ownerHistory, b, policy.Class)
 	if err != nil {
 		return o, err
 	}
-	o.CallerHistory, err = history(b, policy.Class)
-	if err != nil {
-		return o, err
-	}
-	var entries []manager.Entry
-	if json.Unmarshal(ownerHistory, &entries) != nil {
-		return o, fmt.Errorf("history malformed")
-	}
-	for _, e := range entries {
-		if e.Class.Name == policy.Class {
-			continue
+	o.CallerHistory, o.CallerCapacity = projectedHistory, projectedCapacity
+	if withCaller {
+		actualHistory, actualCapacity, err := n.callerObservation(ctx, policy, ownerHistory)
+		if err != nil {
+			return o, err
 		}
-		input, _ := json.Marshal(cicaller.Request{Action: "get", Attempt: e.Attempt})
-		response, callErr := command(ctx, input, "/usr/bin/sudo", "-n", "-u", "_profrodci", "-H", bindir+"/pomar-ci-caller")
-		var refused cicaller.Reply
-		if callErr == nil || json.Unmarshal(response, &refused) != nil || refused.CallerUID != int(n.M.CallerUID) || refused.Status != 403 || !refused.ResponseAvailable || refused.Cached || refused.Transport != "response" || refused.Outcome != "refused" {
-			return o, fmt.Errorf("actual legacy-class refusal not established")
+		if actualHistory != projectedHistory || actualCapacity != projectedCapacity {
+			return o, fmt.Errorf("actual caller view differs from fixed owner projection")
 		}
-		break
 	}
-	b, err = n.caller(ctx, "signing-key")
-	if err != nil {
-		return o, err
-	}
-	if err = key(b, n.M.KeyID); err != nil {
-		return o, err
-	}
-	b, err = n.caller(ctx, "capacity")
-	if err != nil {
-		return o, err
-	}
-	callerCap, err := capacity(b)
-	if err != nil {
-		return o, err
-	}
-	o.Capacity = digest([]byte(ownerCap + "\n" + callerCap))
 	o.OwnerCapacity = ownerCap
-	o.CallerCapacity = callerCap
+	o.Capacity = digest([]byte(ownerCap + "\n" + o.CallerCapacity))
 	end, endBirth, err := n.process(ctx)
 	if err != nil || end != pid || endBirth != birth {
 		return o, fmt.Errorf("service changed during observation")
@@ -527,6 +495,49 @@ func (n *Native) Observe(ctx context.Context) (Observation, error) {
 	o.PID = pid
 	o.Birth = birth
 	return o, nil
+}
+
+func (n *Native) callerObservation(ctx context.Context, policy cicaller.Policy, ownerHistory []byte) (string, string, error) {
+	b, err := n.caller(ctx, "list")
+	if err != nil {
+		return "", "", err
+	}
+	callerHistory, err := history(b, policy.Class)
+	if err != nil {
+		return "", "", err
+	}
+	var entries []manager.Entry
+	if json.Unmarshal(ownerHistory, &entries) != nil {
+		return "", "", fmt.Errorf("history malformed")
+	}
+	for _, e := range entries {
+		if e.Class.Name == policy.Class {
+			continue
+		}
+		input, _ := json.Marshal(cicaller.Request{Action: "get", Attempt: e.Attempt})
+		response, callErr := command(ctx, input, "/usr/bin/sudo", "-n", "-u", "_profrodci", "-H", bindir+"/pomar-ci-caller")
+		var refused cicaller.Reply
+		if callErr == nil || json.Unmarshal(response, &refused) != nil || refused.CallerUID != int(n.M.CallerUID) || refused.Status != 403 || !refused.ResponseAvailable || refused.Cached || refused.Transport != "response" || refused.Outcome != "refused" {
+			return "", "", fmt.Errorf("actual legacy-class refusal not established")
+		}
+		break
+	}
+	b, err = n.caller(ctx, "signing-key")
+	if err != nil {
+		return "", "", err
+	}
+	if err = key(b, n.M.KeyID); err != nil {
+		return "", "", err
+	}
+	b, err = n.caller(ctx, "capacity")
+	if err != nil {
+		return "", "", err
+	}
+	callerCap, err := capacity(b)
+	if err != nil {
+		return "", "", err
+	}
+	return callerHistory, callerCap, nil
 }
 
 // Lock uses an advisory descriptor lock, not a stale PID pathname. check does
@@ -642,7 +653,11 @@ func (n *Native) Save(j Journal) error {
 	if err != nil {
 		return err
 	}
-	return durableWrite(filepath.Join(n.ArchivePath, "journal.json"), append(b, '\n'), 0600)
+	if err := durableWrite(filepath.Join(n.ArchivePath, "journal.json"), append(b, '\n'), 0600); err != nil {
+		return err
+	}
+	n.original = j
+	return nil
 }
 func (n *Native) Fence(ctx context.Context) error {
 	// Drain is atomic with admission. Existing clients cannot race an admitted
@@ -929,24 +944,17 @@ func (n *Native) Verify(ctx context.Context, before Observation) (err error) {
 	if json.Unmarshal(b, &cp) != nil || !cp.Draining || cp.Live != 0 {
 		return fmt.Errorf("post-install admission drain differs")
 	}
-	// Allow actual caller GET readbacks under the verified global drain. A
-	// failed verification recloses the directory; starts remain drain-refused.
-	// The manager creates its socket at 0660. Reopen only the directory; a
-	// manager-owned child must never become a root chmod target.
-	if err = controlDirectoryMode(runDir, n.M.OwnerUID, 0750); err != nil {
+	// The directory mode, unlike drain, survives manager restart. Caller GETs
+	// belong to the explicit post-opening phase, never this reversible window.
+	if err = directory(runDir, n.M.OwnerUID, 0700); err != nil {
 		return err
 	}
-	defer func() {
-		if err != nil {
-			_ = n.closeControl()
-		}
-	}()
-	after, err := n.Observe(ctx)
+	after, err := n.observe(ctx, false)
 	if err != nil {
 		return err
 	}
-	if after.Pin != build.Pin || after.History != before.History || after.KeyID != before.KeyID || after.Capacity != before.Capacity || after.CallerHistory != before.CallerHistory {
-		return fmt.Errorf("post-install history/key/class/budget/caller identity differs")
+	if err = preservedObservation(after, before, build.Pin); err != nil {
+		return err
 	}
 	if err = n.noWriters(ctx, after.PID); err != nil {
 		return err
@@ -957,26 +965,54 @@ func (n *Native) Open(ctx context.Context) error {
 	if err := n.retainedCheck(); err != nil {
 		return err
 	}
-	if err := directory(runDir, n.M.OwnerUID, 0750); err != nil {
-		return err
+	j := n.original
+	if !openingPhase(j.Phase) {
+		return fmt.Errorf("durable original opening intent required")
 	}
-	b, err := owner(ctx, "capacity")
+	prefix := "opening"
+	if strings.HasPrefix(j.Phase, "rollback-opening") {
+		prefix = "rollback-opening"
+	}
+	err := reopenAdmission(ctx, func(step string) error {
+		j.Phase = prefix + "-" + step
+		return n.Save(j) // file sync + rename + directory sync before effect
+	}, func(on bool) error {
+		args := []string{"drain"}
+		if !on {
+			args = append(args, "-off")
+		}
+		b, err := owner(ctx, args...)
+		if err != nil {
+			return err
+		}
+		var cp manager.Capacity
+		if json.Unmarshal(b, &cp) != nil || cp.Draining != on || (on && cp.Live != 0) {
+			return fmt.Errorf("idle opening drain/release not confirmed")
+		}
+		return nil
+	}, func() error {
+		if err := controlDirectoryMode(runDir, n.M.OwnerUID, 0750); err != nil {
+			return err
+		}
+		return syncDirectory(serviceRoot)
+	}, func() error {
+		// Full caller observations happen only after the durable boundary.
+		after, err := n.Observe(ctx)
+		if err != nil {
+			return err
+		}
+		build := n.M.Target
+		if n.rollback {
+			build = n.M.Baseline
+		}
+		return preservedObservation(after, j.Before, build.Pin)
+	})
 	if err != nil {
-		return err
-	}
-	var cp manager.Capacity
-	if json.Unmarshal(b, &cp) != nil || !cp.Draining || cp.Live != 0 {
-		return fmt.Errorf("verified drain required before opening")
-	}
-	b, err = owner(ctx, "drain", "-off")
-	if err != nil {
-		return err
-	}
-	if json.Unmarshal(b, &cp) != nil || cp.Draining {
-		return fmt.Errorf("admission reopening not confirmed")
+		return &OpeningFailure{Journal: n.original, Err: err}
 	}
 	return nil
 }
+
 func (n *Native) Restore(ctx context.Context, j Journal) error {
 	if !n.rollback || n.lock == nil || j.Archive != n.ArchivePath {
 		return fmt.Errorf("original rollback binding required")
