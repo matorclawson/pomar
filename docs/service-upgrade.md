@@ -148,7 +148,7 @@ It verifies the independently pinned installed2195 binary hash, uses only new
 private fixture directories under the owner's TMPDIR, no signing and no guest
 submission. It first requires2195 to reject the migrated fixture specifically
 at its legacy table decoder, then restores the snapshot and requires that same
-binary to serve and return the empty original history. A fixture helper and
+binary to serve and return the original terminal fixture history. A fixture helper and
 nonbootable hash-checked kernel stand in for VM assets; they are never launched.
 This demonstrates table compatibility, not VM execution or a privileged
 permanent-service upgrade. Without the explicit baseline path this separate

@@ -104,7 +104,7 @@ func TestManagerTableRollbackStartsActual2195(t *testing.T) {
 			var entries []manager.Entry
 			err := client.DoContext(ctx, "GET", "/v1/attempts", nil, &entries)
 			if err == nil {
-				if len(entries) != 0 {
+				if len(entries) != 1 || entries[0].Attempt != "original" || entries[0].ExitCode == nil || *entries[0].ExitCode != 0 {
 					t.Fatal("unexpected fixture history")
 				}
 				stop()

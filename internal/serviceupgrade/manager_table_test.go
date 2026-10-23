@@ -31,7 +31,13 @@ func migratedManagerTableAt(t *testing.T, root string) (string, string, string, 
 	}
 	target := filepath.Join(root, "manager", "table.json")
 	// Whitespace deliberately differs from the serializer: restore exact bytes.
-	original := []byte("  [ ]\n")
+	now := time.Now().UTC().Truncate(time.Second)
+	exit := 0
+	rows, err := json.MarshalIndent([]manager.Entry{{Attempt: "original", Command: []string{"fixture-only"}, State: manager.StateExited, Created: now, Ended: now, ExitCode: &exit}}, "", " ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := append(append([]byte(" \n"), rows...), '\n')
 	if err := os.WriteFile(target, original, 0600); err != nil {
 		t.Fatal(err)
 	}
