@@ -15,6 +15,7 @@ const upgradeHelp = `Usage:
   pomar upgrade check -bundle ROOT_STAGE -manifest-sha256 SHA256 [-archive ORIGINAL_ARCHIVE]
   pomar upgrade apply -bundle ROOT_STAGE -manifest-sha256 SHA256
   pomar upgrade rollback -bundle ROOT_STAGE -manifest-sha256 SHA256 -archive ORIGINAL_ARCHIVE
+  pomar upgrade resume-opening -bundle ROOT_STAGE -manifest-sha256 SHA256 -archive ORIGINAL_ARCHIVE
 
 Administrator operations for an existing, explicitly bound macOS service.
 check is read-only. stage creates only a private verified payload stage.
@@ -23,6 +24,9 @@ rollback restores only the manifest-bound original archive after idle checks.
 They do not provision accounts, grants, keys, images, classes or a new daemon.
 An explicit reviewed signing policy and retained manifest SHA256 are required.
 An incomplete transaction retains its archive/journal; do not replay apply.
+resume-opening resumes only a journaled opening, re-drains and verifies first.
+Opening is post-reversible; new evidence prevents rollback. Caller checks are
+reported after opening and their failure never triggers automatic rollback.
 See docs/service-upgrade.md for prerequisites, evidence and recovery limits.
 `
 
@@ -33,7 +37,7 @@ func upgradeCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	action := args[0]
 	switch action {
-	case "stage", "check", "apply", "rollback":
+	case "stage", "check", "apply", "rollback", "resume-opening":
 	default:
 		fmt.Fprint(stderr, upgradeHelp)
 		return 2
@@ -50,7 +54,7 @@ func upgradeCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, upgradeHelp)
 		return 2
 	}
-	if (*archive != "" && (action == "stage" || action == "apply")) || (action == "rollback" && *archive == "") {
+	if (*archive != "" && (action == "stage" || action == "apply")) || ((action == "rollback" || action == "resume-opening") && *archive == "") {
 		fmt.Fprint(stderr, upgradeHelp)
 		return 2
 	}

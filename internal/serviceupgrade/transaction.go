@@ -1,9 +1,10 @@
-// Package serviceupgrade changes only the two binaries of an existing service.
+// Package serviceupgrade changes the frozen binaries, record and compatible table snapshot of an existing service.
 // It does not provision accounts, images, callers, keys, jobs or a new daemon.
 package serviceupgrade
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -98,6 +99,10 @@ func Apply(ctx context.Context, d Driver, manifestSHA string) (Journal, error) {
 	}
 	for _, op := range operations {
 		if err = step(op.phase, op.act); err != nil {
+			var opened *OpeningFailure
+			if op.phase == "opening" && errors.As(err, &opened) {
+				j = opened.Journal
+			}
 			return j, fmt.Errorf("upgrade incomplete at %s; retained archive %s; admission must be reconciled: %w", j.Phase, j.Archive, err)
 		}
 	}
@@ -134,7 +139,15 @@ func Rollback(ctx context.Context, d Driver, j Journal, manifestSHA string) (Jou
 	if err := d.Verify(ctx, j.Before); err != nil {
 		return j, err
 	}
+	j.Phase = "rollback-opening"
+	if err := d.Save(j); err != nil {
+		return j, err
+	}
 	if err := d.Open(ctx); err != nil {
+		var opened *OpeningFailure
+		if errors.As(err, &opened) {
+			j = opened.Journal
+		}
 		return j, err
 	}
 	j.Phase = "rolled-back"

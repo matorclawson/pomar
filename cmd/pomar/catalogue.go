@@ -9,6 +9,7 @@ func ownerCatalogue() []command {
 		{"upgrade check", "Check the installed baseline and controlled payload", "pomar upgrade check -bundle ROOT_STAGE -manifest-sha256 SHA256 [-archive ORIGINAL_ARCHIVE]", "JSON", []string{"administrator only; readbacks do not perform apply"}},
 		{"upgrade apply", "Apply a checked existing-service transaction", "pomar upgrade apply -bundle ROOT_STAGE -manifest-sha256 SHA256", "JSON", []string{"administrator only; requires matched idle owner and retained rollback"}},
 		{"upgrade rollback", "Restore the archived existing-service build", "pomar upgrade rollback -bundle ROOT_STAGE -manifest-sha256 SHA256 -archive ORIGINAL_ARCHIVE", "JSON", []string{"administrator only; preserve the transaction journal and archive"}},
+		{"upgrade resume-opening", "Resume the original interrupted opening", "pomar upgrade resume-opening -bundle ROOT_STAGE -manifest-sha256 SHA256 -archive ORIGINAL_ARCHIVE", "JSON", []string{"administrator only; post-reversible; preserves newer evidence; no replay of apply"}},
 		{"server prepare", "Prepare the release-pinned development base", "pomar server prepare -root ABSOLUTE_DIR [-image NAME]", "text", []string{"development owner only; new dedicated root"}},
 		{"server kernel", "Acquire the pinned development kernel", "pomar server kernel -root ABSOLUTE_DIR", "text", nil},
 		{"server start", "Run a foreground development manager", "pomar server start -root ABSOLUTE_DIR -kernel-sha256 HEX [MANAGER_OPTIONS]", "text", []string{"no launch daemon or account provisioning"}},

@@ -29,7 +29,10 @@ func controlDirectoryMode(path string, uid uint32, mode os.FileMode) error {
 	if st.Mode&syscall.S_IFMT != syscall.S_IFDIR || st.Uid != uid || st.Mode&0022 != 0 || (mode != 0700 && mode != 0750) {
 		return fmt.Errorf("control directory custody refused")
 	}
-	return syscall.Fchmod(fd, uint32(mode))
+	if err := syscall.Fchmod(fd, uint32(mode)); err != nil {
+		return err
+	}
+	return syscall.Fsync(fd)
 }
 
 func archivedBinaries(path string, build Build, uid uint32) error {

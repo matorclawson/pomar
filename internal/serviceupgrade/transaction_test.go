@@ -14,6 +14,7 @@ type fakeDriver struct {
 	changed bool
 	reads   int
 	j       Journal
+	openErr error
 }
 
 func (f *fakeDriver) event(name string) error {
@@ -45,8 +46,13 @@ func (f *fakeDriver) Stop(context.Context, Observation) error   { return f.event
 func (f *fakeDriver) Replace(context.Context) error             { return f.event("replace") }
 func (f *fakeDriver) Start(context.Context) error               { return f.event("start") }
 func (f *fakeDriver) Verify(context.Context, Observation) error { return f.event("verify") }
-func (f *fakeDriver) Open(context.Context) error                { return f.event("open") }
-func (f *fakeDriver) Restore(context.Context, Journal) error    { return f.event("restore") }
+func (f *fakeDriver) Open(context.Context) error {
+	if err := f.event("open"); err != nil {
+		return err
+	}
+	return f.openErr
+}
+func (f *fakeDriver) Restore(context.Context, Journal) error { return f.event("restore") }
 
 func contains(events []string, name string) bool {
 	for _, s := range events {
@@ -146,5 +152,13 @@ func TestJournalRetainsSigningPolicyAndRollbackRefusesAnotherPolicy(t *testing.T
 	f = &fakeDriver{}
 	if _, err := Rollback(context.Background(), f, j, "original"); err == nil || len(f.events) != 0 {
 		t.Fatal("rollback policy mismatch allowed effects", f.events, err)
+	}
+}
+
+func TestApplyReturnsPostOpenCallerFailureAsItsOwnPhase(t *testing.T) {
+	f := &fakeDriver{openErr: &OpeningFailure{Journal: Journal{Phase: "opening-caller-failed", Archive: "retained-archive"}, Err: errors.New("opened, caller verification FAILED")}}
+	j, err := Apply(context.Background(), f, "original")
+	if err == nil || j.Phase != "opening-caller-failed" || !strings.Contains(err.Error(), "caller verification FAILED") || contains(f.events, "restore") {
+		t.Fatal(j, f.events, err)
 	}
 }

@@ -60,17 +60,30 @@ manager's atomic owner drain prevents new admission; only the matched idle
 manager is unloaded. The control directory is closed across restart. Directory
 modes change through a no-follow descriptor; the manager-created socket is never
 chmodded by the administrator. No other
-process is signalled. Only the two pinned binaries and install record change.
+process is signalled. Only the two pinned binaries and install record change during apply; rollback also restores the exact archived manager table when still safe.
 Prior concurrency/reboot/check qualifications are explicitly invalidated before
 replacement and never inferred from a successful restart.
 
-After restart, the new manager's drain must be confirmed before reopening the
-control path for actual caller GET readbacks. The command verifies installed
-file hashes/signatures, retained files, every terminal history record (including
-unknown evidence fields), public-key binding and owner/caller class/budget
-identity. Only after all checks does it lift admission's drain. A failed check
-retains its journal/archive and holds admission for reconciliation. Ordinary
-host reservation/admission and full native site qualification remain separate.
+After restart, the new manager's drain is confirmed while its control directory
+remains mode0700. Owner-only verification preserves every terminal history,
+raw manager-table history, public key, installed hash/signature and class/budget
+binding. The fixed caller policy and executable/grants remain pinned. Its
+expected history/capacity are projected from the owner response and fixed class;
+this projection is **not** labelled an actual caller GET. The actual caller was
+checked before the upgrade and is checked again separately after opening.
+A failed reversible check leaves the directory private. Mode0700, unlike the
+in-memory drain, survives manager restart; this applies to rollback verification too.
+
+The reversible window ends at the **synced opening intent**, before any chmod0750.
+Each opening step writes and fsyncs its journal file, renames it and fsyncs the
+archive directory before its effect. Open always sets the owner drain on again,
+requires Live==0, records the exposing intent, exposes the directory, records
+release intent and lifts drain. A restart after opening intent is explicitly
+post-reversible, even if the final completion reply was lost. Once opened, a
+separate caller-verifying phase performs the real caller GETs and compares them
+with the retained identities. Failure is reported as **opened, caller verification
+FAILED**, not a held private admission fence or an automatic rollback. The failed
+phase and archive remain. New work or finalization evidence prevents rollback.
 
 ## Recovery and rollback
 
@@ -82,13 +95,14 @@ manifest and original archive:
 ```text
 sudo /path/to/verified/pomar upgrade check -bundle ROOT_STAGE -manifest-sha256 SHA256 -archive ORIGINAL_ARCHIVE
 sudo /path/to/verified/pomar upgrade rollback -bundle ROOT_STAGE -manifest-sha256 SHA256 -archive ORIGINAL_ARCHIVE
+sudo /path/to/verified/pomar upgrade resume-opening -bundle ROOT_STAGE -manifest-sha256 SHA256 -archive ORIGINAL_ARCHIVE
 ```
 
 Rollback refuses a different manifest, arbitrary archive, unknown installed
 binary/record bytes, active work or uncertain process identity. It restores only
-the archived baseline binaries and exact old record, restarts the unchanged
+the archived baseline binaries, exact old record and compatible original table bytes, restarts the unchanged
 service, repeats post-install readbacks and then reopens admission. It does not
-rewrite result history or replace signing keys, images, kernel/rootfs, caller,
+discard newer result history or replace signing keys, images, kernel/rootfs, caller,
 policy, grants, classes or launch configuration. If those bindings changed or a
 new job was admitted, stop and reconcile with the service owner.
 
@@ -97,10 +111,20 @@ loaded and again before stopping the current manager. The exact signing policy i
 retained in that journal and the target install record; another policy cannot be
 substituted during recovery.
 
-The current owner drain is in memory. Reboot-safe persistent admission state is
-a separate service change, and a host reboot during a transaction requires owner
-reconciliation before dependent jobs proceed. Crash-left `.pomar-upgrade-pending-*`
-files are retained for inspection; automatic cleanup is not part of this verb.
+`resume-opening` accepts only the original bound archive and an interrupted
+opening phase. It rechecks the installed byte set and history, re-drains the
+existing positively identified manager, closes the directory for owner-only
+verification, then repeats the journaled opening. It never repeats apply,
+creates a new original, restores a table, or launches a guest. It refuses an
+unrelated/complete phase, active work or changed history. A non-running service
+requires separate supported owner reconciliation; absence is not guessed.
+
+The manager-owned startup drain remains deferred: the ordinary drain is still
+in memory. Before opening the directory is the persistent fence; after opening
+intent there is no claim of a reversible admission hold across restart/reboot.
+Any later original, frozen completion/closure intent or changed unknown raw
+history makes rollback refuse and preserves that evidence. Crash-left
+`.pomar-upgrade-pending-*` files remain for inspection; no automatic cleanup.
 
 Source/unit qualification of this implementation does not demonstrate a real
 root-owned service transition. An installable recipe also needs the exact
@@ -153,3 +177,23 @@ nonbootable hash-checked kernel stand in for VM assets; they are never launched.
 This demonstrates table compatibility, not VM execution or a privileged
 permanent-service upgrade. Without the explicit baseline path this separate
 exercise is reported skipped, never counted as an installed restart receipt.
+
+## Immutable release increment
+
+The rc.1 distribution from21a90167 predates this recovery change and must remain
+unchanged with its existing qualification. `cmd/pomar` links serviceupgrade, so
+both its packaged executable and the adoption procedure/upgrade manifest change;
+this is not a documentation-only or out-of-band recovery script. Prepare a new
+immutable rc.2 from the newly qualified exact source head, with a fresh complete
+artifact manifest/hash set. Other bundled Go tools may also differ through VCS
+stamping; hash every resulting artifact rather than assume unchanged bytes.
+The required manager_table binding means the old recovery CLI cannot consume the
+new manifest. The administrator must use the independently verified new CLI.
+
+Source review and an admitted exact-head normal gate precede the rc.2 artifact
+packet review. Only that qualified payload may go to the already authorized
+internal executable-signing producer. Independently verify resulting hashes,
+public certificate leaf, team and product identifiers; signing permission does
+not authorize installation. Existing job-result signing is unchanged and no
+new attestation service or credential export is introduced. The source tests
+are not evidence that a permanent service has been upgraded or recovered.
