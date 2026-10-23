@@ -162,6 +162,72 @@ func TestManagerTableArchiveIsRequiredAndPinned(t *testing.T) {
 	}
 }
 
+// Exercise the real target startup before adding evidence: rollback must not
+// turn an otherwise valid schema migration into permission to erase later work.
+func TestManagerTableRollbackRefusesEvidenceAddedAfterTargetStartup(t *testing.T) {
+	for _, change := range []string{"additional attempt", "completion intent", "published completion", "closure intent", "closure published"} {
+		t.Run(change, func(t *testing.T) {
+			_, target, archive, pin, before, _ := migratedManagerTable(t)
+			migrated, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(migrated, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			var rows []map[string]json.RawMessage
+			if err := json.Unmarshal(envelope["entries"], &rows); err != nil || len(rows) != 1 {
+				t.Fatal("expected migrated original", err)
+			}
+			switch change {
+			case "additional attempt":
+				// Keep the original too; this is a new obligation, not merely a
+				// replacement or deletion of the archived row.
+				rows = append(rows, map[string]json.RawMessage{
+					"attempt": json.RawMessage(`"later-original"`),
+					"state":   json.RawMessage(`"exited"`),
+				})
+			case "completion intent":
+				rows[0]["publication"] = json.RawMessage(`{"state":"pending","intent":{"document":"e30=","sha256":"new-frozen-completion","policy":{"mode":"unsigned-development","purpose":"fixture"}}}`)
+			case "published completion":
+				rows[0]["publication"] = json.RawMessage(`{"state":"published","intent":{"document":"e30=","sha256":"new-frozen-completion","policy":{"mode":"unsigned-development","purpose":"fixture"}}}`)
+			case "closure intent":
+				rows[0]["closure"] = json.RawMessage(`{"state":"pending","intent":{"document":"e30=","sha256":"new-frozen-closure","policy":{"mode":"unsigned-development","purpose":"fixture"}}}`)
+			case "closure published":
+				rows[0]["closure"] = json.RawMessage(`{"state":"published","intent":{"document":"e30=","sha256":"new-frozen-closure","policy":{"mode":"unsigned-development","purpose":"fixture"}}}`)
+			}
+			envelope["entries"], err = json.Marshal(rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, current, 0600); err != nil {
+				t.Fatal(err)
+			}
+			archived, err := os.ReadFile(archive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			uid := uint32(os.Getuid())
+			if err := restoreManagerTable(target, archive, pin, uid, uid, before); err == nil {
+				t.Fatal("rollback discarded post-upgrade evidence")
+			}
+			got, err := os.ReadFile(target)
+			if err != nil || !bytes.Equal(got, current) {
+				t.Fatal("refusal changed current evidence", err)
+			}
+			got, err = os.ReadFile(archive)
+			if err != nil || !bytes.Equal(got, archived) {
+				t.Fatal("refusal changed original archive", err)
+			}
+		})
+	}
+}
+
 func TestManagerTableManifestRequiresFrozenSnapshot(t *testing.T) {
 	for _, pin := range []FilePin{{}, {"bad", 2}, {digest([]byte("[]")), maxManagerTable + 1}} {
 		m := fixtureManifest()
