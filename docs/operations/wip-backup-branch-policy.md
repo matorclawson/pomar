@@ -11,3 +11,25 @@ Git pre-push reports proposed ref effects, not every original command-line optio
 Pomar accepts ONLY mailbox zeroemployee, declared role zeo-site-maintainer, matorclawson/pomar, exact refs/heads/zeo-site-maintainer/wip/creator-verification-20261024 and owner-selected H3a36b259ab1cdac8c4c3e56a81cbee077732bfe1, per owner receipt ans_e0e32846c5121f83 and Pomar acceptance ans_401620a808dd686b. Charter a0606767 line32 independently verifies the alias; its historical work repo is not the Pomar source allocation. Other roles/refs/heads require their actual owning acceptance; no generic environment exemption. Ordinary pushes still execute make verify.
 
 Source is NOT_LIVE. Before adoption: actual permitted synthetic/refusal/ancestry controls, ordinary-guard checks, independent owning review and exact hook hash readback are required. The receiver adopts through its supported per-clone route with normal hooks preserved. Then only the actual owner performs the exact permitted backup and remote ref/H readback. No fleet-live claim from a commit or document. Roll back through the receiver to the previous recorded hook bytes; do not disable hooks or change hooksPath to escape a refusal. No tests or hook execution are claimed on the author host.
+
+
+The complete update stream is captured in private, bounded scratch before any
+exception is considered. Capture errors, oversize input, NUL bytes and nonempty
+unterminated final records refuse; a valid earlier record cannot hide a suffix.
+The input fixture includes allowed-plus-unterminated mixed/tag/delete/malformed
+and otherwise-valid suffixes, each partial record alone, and a closed-descriptor
+read failure. All of these exercise the actual hook, without a network push.
+
+Configuration queries distinguish success, exit1 (absent), and every other
+failure. A present mirror value must be exactly one false value; invalid Boolean
+syntax, repeated values, rewrite-query errors and refspec-query errors refuse.
+The fixture injects errors only at each actual config query and checks the
+specific refusal boundary. Positive missing-config and explicit-false cases
+remain required. No query error is treated as evidence that policy is absent.
+
+Required semantic mutants, only after an admitted pristine harness PASS: remove
+the partial-record refusal so a valid update plus an ignored suffix is accepted;
+then independently treat config-query errors as absence. Each must fail its
+intended refusal assertion, with the fixed source passing again. These controls
+and mutants have not been executed by this source contribution. Formatting,
+source commits and static review are not a harness, mutant or full-gate receipt.

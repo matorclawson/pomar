@@ -44,6 +44,67 @@ run() {
     fi
 }
 run own-fork-owner-backup pass "$scratch/valid"
+run_guard() {
+    local name=$1 input=$2 expected=$3
+    run "$name" refuse "$input"
+    case "$(cat "$scratch/stderr")" in
+        *"$expected"*) ;;
+        *) echo "FAIL wrong refusal boundary: $name" >&2; exit 1 ;;
+    esac
+}
+# A newline-terminated allowed update must never hide an unterminated suffix.
+# Each alone must also fail, before authorization can return success.
+for suffix in mixed tag delete malformed valid; do
+    case "$suffix" in
+        mixed) printf '%s %s refs/heads/main %s' "$local_ref" "$head" "$zero" > "$scratch/partial" ;;
+        tag) printf '%s %s refs/tags/wip/backup %s' "$local_ref" "$head" "$zero" > "$scratch/partial" ;;
+        delete) printf '%s %s %s %s' "$local_ref" "$zero" "$ref" "$head" > "$scratch/partial" ;;
+        malformed) printf 'malformed' > "$scratch/partial" ;;
+        valid) printf '%s %s %s %s' "$local_ref" "$head" "$ref" "$zero" > "$scratch/partial" ;;
+    esac
+    run_guard "partial-alone-$suffix" "$scratch/partial" 'partial or unreadable update record'
+    cat "$scratch/valid" "$scratch/partial" > "$scratch/valid-and-partial"
+    run_guard "valid-then-partial-$suffix" "$scratch/valid-and-partial" 'partial or unreadable update record'
+done
+# A closed input descriptor must fail capture, not look like clean EOF.
+if "$hook" origin "$url" <&- > "$scratch/stdout" 2> "$scratch/stderr"; then
+    echo 'FAIL unreadable input admitted' >&2; exit 1
+fi
+case "$(cat "$scratch/stderr")" in
+    *'update stream read failed'*) ;;
+    *) echo 'FAIL unreadable input missed capture guard' >&2; exit 1 ;;
+esac
+# Inject only config-query failures; other Git operations still use the actual
+# installed Git. This fixture cannot become an installed credential/tool route.
+export TEST_REAL_GIT
+TEST_REAL_GIT=$(command -v git)
+cat > "$scratch/tools/git" <<'GIT'
+#!/usr/bin/env bash
+if [[ "${1:-}" == config ]]; then
+    case "${TEST_GIT_CONFIG_FAULT:-}:${2:-}" in
+        rewrite:--name-only|mirror:--bool|push:--get-all) exit 3 ;;
+    esac
+fi
+exec "$TEST_REAL_GIT" "$@"
+GIT
+chmod +x "$scratch/tools/git"
+for fault in rewrite mirror push; do
+    case "$fault" in
+        rewrite) expected='URL rewrite configuration unreadable' ;;
+        mirror) expected='mirror configuration unreadable' ;;
+        push) expected='push refspec configuration unreadable' ;;
+    esac
+    TEST_GIT_CONFIG_FAULT=$fault run_guard "config-read-error-$fault" "$scratch/valid" "$expected"
+done
+git config remote.origin.mirror not-a-boolean
+run_guard malformed-mirror-boolean "$scratch/valid" 'mirror configuration unreadable'
+git config --unset remote.origin.mirror
+git config remote.origin.mirror false
+run explicit-nonmirror pass "$scratch/valid"
+git config --add remote.origin.mirror false
+run_guard ambiguous-mirror "$scratch/valid" 'mirror configured or ambiguous'
+git config --unset-all remote.origin.mirror
+run absent-config-still-valid pass "$scratch/valid"
 printf '%s %s %s %s
 ' "$local_ref" "$head" "$ref" "$head" > "$scratch/ff"
 run idempotent-fast-forward pass "$scratch/ff"

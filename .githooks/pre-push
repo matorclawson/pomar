@@ -7,15 +7,34 @@ set -euo pipefail
 backup_refused() { echo "WIP BACKUP REFUSED: $1" >&2; exit 1; }
 root=$(git rev-parse --show-toplevel) || exit 1
 cd "$root"
+# Capture a bounded complete stream first. A failed read must not masquerade
+# as clean EOF after earlier valid updates. This is private scratch, not source.
+umask 077
+input_file=$(mktemp "${TMPDIR:-/tmp}/zeo-wip-input.XXXXXXXX") || backup_refused "input scratch unavailable"
+trap 'rm -f "$input_file"' EXIT
+head -c 3145729 > "$input_file" || backup_refused "update stream read failed"
+input_bytes=$(wc -c < "$input_file") || backup_refused "input size unavailable"
+[[ "$input_bytes" -le 3145728 ]] || backup_refused "update stream too large"
+# Bash read discards NUL bytes; refuse them instead of accepting altered input.
+LC_ALL=C tr -d '\000' < "$input_file" | cmp -s "$input_file" - || backup_refused "invalid update bytes"
 updates=()
 backup=0
-while read -r local_ref local_oid remote_ref remote_oid extra; do
+while true; do
+    line=
+    if IFS= read -r line; then
+        :
+    else
+        read_status=$?
+        [[ "$read_status" == 1 && -z "$line" ]] || backup_refused "partial or unreadable update record"
+        break
+    fi
+    read -r local_ref local_oid remote_ref remote_oid extra <<< "$line"
     [[ -n "$local_ref" && -n "$remote_ref" && -z "${extra:-}" ]] || backup_refused "malformed update"
     [[ "$local_oid" =~ ^[0-9a-f]{40}$ && "$remote_oid" =~ ^[0-9a-f]{40}$ ]] || backup_refused "unsupported object identity"
     [[ ${#updates[@]} -lt 1024 && ${#local_ref} -le 1024 && ${#remote_ref} -le 1024 ]] || backup_refused "update limit"
     updates+=("$local_ref $local_oid $remote_ref $remote_oid")
     case "$local_ref $remote_ref" in */wip/*) backup=1 ;; esac
-done
+done < "$input_file"
 [[ ${#updates[@]} -gt 0 ]] || backup_refused "empty update stream"
 if [[ "$backup" == 1 ]]; then
     [[ $# == 2 && "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || backup_refused "named destination required"
@@ -26,9 +45,24 @@ if [[ "$backup" == 1 ]]; then
     # they may contain caller credentials. No network or credential read here.
     if git config --name-only --get-regexp '^url\..*\.(insteadof|pushinsteadof)$' >/dev/null 2>&1; then
         backup_refused "URL rewrite configured"
+    else
+        config_status=$?
+        [[ "$config_status" == 1 ]] || backup_refused "URL rewrite configuration unreadable"
     fi
-    [[ $(git config --bool --get "remote.$remote.mirror" || true) != true ]] || backup_refused "mirror configured"
-    [[ -z $(git config --get-all "remote.$remote.push" || true) ]] || backup_refused "implicit push refspec configured"
+    # --get-all also exposes repeated/ambiguous values. Only exit 1 means
+    # absent; malformed booleans or any other query failure must refuse.
+    if mirror=$(git config --bool --get-all "remote.$remote.mirror" 2>/dev/null); then
+        [[ "$mirror" == false ]] || backup_refused "mirror configured or ambiguous"
+    else
+        config_status=$?
+        [[ "$config_status" == 1 ]] || backup_refused "mirror configuration unreadable"
+    fi
+    if git config --get-all "remote.$remote.push" >/dev/null 2>&1; then
+        backup_refused "implicit push refspec configured"
+    else
+        config_status=$?
+        [[ "$config_status" == 1 ]] || backup_refused "push refspec configuration unreadable"
+    fi
     destinations=$(git remote get-url --push --all "$remote") || backup_refused "destination unavailable"
     [[ "$destinations" != *$'\n'* && "$destinations" == "$url" ]] || backup_refused "extra or mismatched destination"
     case "$url" in
