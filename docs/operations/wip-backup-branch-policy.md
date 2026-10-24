@@ -49,3 +49,11 @@ Unrelated parse/setup/other-guard failures refuse kill credit. The unchanged
 source suite must pass again after each mutant. These fixture-only hook-path
 selectors do not exist in the production hook or authorize live installation.
 No pristine or mutant result has been executed or accepted from this source edit.
+
+
+Additional actual-hook fixture cases bind source identity refusals: wrong current
+local ref and wrong local object ID in both repositories; allowed Runtime role
+with a different source SOW; changed selected Pomar HEAD. Each asserts its exact
+closed refusal. Synthetic commit/ref changes stay inside the private fixture,
+then restore the original fixture ref before later positive controls. This does
+not change the actual accepted owner/source policy or prove live authentication.

@@ -77,6 +77,17 @@ run_guard() {
         *) echo "FAIL wrong refusal boundary: $name" >&2; exit 1 ;;
     esac
 }
+# Source identity failures must reach their own guard, not merely fail setup.
+printf '%s %s %s %s\n' refs/heads/other-source "$head" "$ref" "$zero" > "$scratch/wrong-local-ref"
+run_guard wrong-local-ref "$scratch/wrong-local-ref" 'source mapping is not current branch'
+printf '%s %s %s %s\n' "$local_ref" ffffffffffffffffffffffffffffffffffffffff "$ref" "$zero" > "$scratch/wrong-local-oid"
+run_guard wrong-local-oid "$scratch/wrong-local-oid" 'source mapping is not current branch'
+changed_head=$(printf 'different private source fixture\n' | git commit-tree "$(git rev-parse HEAD^{tree})" -p "$head")
+git update-ref "$local_ref" "$changed_head" "$head"
+printf '%s %s %s %s\n' "$local_ref" "$changed_head" "$ref" "$zero" > "$scratch/changed-selected-head"
+run_guard changed-selected-head "$scratch/changed-selected-head" 'owner-selected source changed'
+git update-ref "$local_ref" "$head" "$changed_head"
+
 # A newline-terminated allowed update must never hide an unterminated suffix.
 # Each alone must also fail, before authorization can return success.
 for suffix in mixed tag delete malformed valid; do
