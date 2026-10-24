@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/zeroemployeeorg/pomar/internal/npmproxy"
 )
@@ -99,6 +100,16 @@ func TestProgressTailSerializedBoundPreservesRawWindow(t *testing.T) {
 			valid := strings.ToValidUTF8(string(raw[offset:]), "\ufffd")
 			if !strings.HasSuffix(valid, log.TailText) || log.TailText == "" {
 				t.Error("display must retain an unchanged valid-UTF8 suffix, including formatting")
+			}
+			if log.TailText != valid && strings.HasSuffix(valid, log.TailText) {
+				// Check maximality with encoding/json, independently of the
+				// implementation's per-rune cost calculation.
+				omitted := strings.TrimSuffix(valid, log.TailText)
+				_, size := utf8.DecodeLastRuneInString(omitted)
+				longer, err := json.Marshal(omitted[len(omitted)-size:] + log.TailText)
+				if err != nil || len(longer) <= progressLogWindow {
+					t.Fatalf("tail is not maximal: adding the preceding rune uses %d bytes (budget %d), error %v", len(longer), progressLogWindow, err)
+				}
 			}
 			if log.TailOffset != int64(offset) || log.TailBytes != len(raw)-offset || log.WindowTruncated != (offset > 0) {
 				t.Error("display limiting changed the observed raw window")
