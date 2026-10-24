@@ -126,3 +126,11 @@ fixture administrative directory and unchanged source HEAD, refs, index and
 configuration, and removes sanitization for an intended-failure mutant followed
 by a pristine restored control. Authored controls require actual qualification;
 source inspection alone does not establish that they passed.
+
+The Git-local sanitization mutant must produce the descendant's exact inherited
+variable marker for one of GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR or GIT_INDEX_FILE,
+plus the intended update-stream read refusal and test exit1. Generic hook/setup
+failure cannot count as a killed mutant. Clone and linked-worktree pristine
+controls, separate fixture administrative directories, unchanged source snapshots
+and restored-source controls remain required. These authored assertions are not
+executed-control evidence.

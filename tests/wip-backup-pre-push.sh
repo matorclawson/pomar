@@ -349,6 +349,8 @@ if [[ "${WIP_HOOK_MUTATION_CHILD:-0}" != 1 ]]; then
         chmod +x "$mutant"
         if (cd "$source_root" && PATH="$test_base_path" WIP_HOOK_MUTATION_CHILD=1 WIP_HOOK_UNDER_TEST="$mutant" "$BASH" "$source_root/tests/wip-backup-pre-push.sh") > "$scratch/mutant-$mutation.log" 2>&1; then
             echo "FAIL mutant survived: $mutation" >&2; exit 1
+        else
+            mutant_exit=$?
         fi
         case "$mutation" in
             eof) assertion='FAIL exception admitted: valid-then-partial-mixed' ;;
@@ -362,6 +364,13 @@ if [[ "${WIP_HOOK_MUTATION_CHILD:-0}" != 1 ]]; then
             git_env) assertion='FAIL Git-local sanitization: clone' ;;
         esac
         grep -Fxq "$assertion" "$scratch/mutant-$mutation.log" || { echo "FAIL unrelated mutant failure: $mutation" >&2; exit 1; }
+        if [[ "$mutation" == git_env ]]; then
+            # Only the four explicitly seeded variables are valid witnesses.
+            # Generic clone/setup/read/refusal failures cannot earn kill credit.
+            [[ "$mutant_exit" == 1 ]] || { echo 'FAIL Git-local mutant terminal outcome' >&2; exit 1; }
+            grep -Exq 'FAIL inherited Git-local environment reached descendant: (GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE)' "$scratch/mutant-$mutation.log" || { echo 'FAIL Git-local mutant lacked seeded-variable witness' >&2; exit 1; }
+            grep -Fxq 'WIP BACKUP REFUSED: update stream read failed' "$scratch/mutant-$mutation.log" || { echo 'FAIL Git-local mutant missed intended hook boundary' >&2; exit 1; }
+        fi
         (cd "$source_root" && PATH="$test_base_path" WIP_HOOK_MUTATION_CHILD=1 WIP_HOOK_UNDER_TEST="$hook" "$BASH" "$source_root/tests/wip-backup-pre-push.sh") > "$scratch/fixed-$mutation.log" 2>&1 || { echo "FAIL fixed source after mutant: $mutation" >&2; exit 1; }
     done
 fi
