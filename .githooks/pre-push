@@ -65,30 +65,38 @@ if [[ "$backup" == 1 ]]; then
     fi
     destinations=$(git remote get-url --push --all "$remote") || backup_refused "destination unavailable"
     [[ "$destinations" != *$'\n'* && "$destinations" == "$url" ]] || backup_refused "extra or mismatched destination"
-    case "$url" in
-        "git@github.com:matorclawson/pomar.git"|"https://github.com/matorclawson/pomar.git"|"https://github.com/matorclawson/pomar") ;;
-        *) backup_refused "not the accepted own fork" ;;
+    # Exact GitHub host and matorclawson fork owner, one safe repository name.
+    # No credentials, suffix path, query, port or alternate host is accepted.
+    if [[ "$url" =~ ^git@github\.com:matorclawson/[A-Za-z0-9][A-Za-z0-9._-]*$ ||
+          "$url" =~ ^https://github\.com/matorclawson/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        :
+    else
+        backup_refused "not the accepted own fork"
+    fi
+    # Architect ans_647a2c18bcee56a6: literal first-column names from
+    # seat-charters f3b1f172; mailbox alias equals seat. Attribution only,
+    # never OS authentication or a table-repository/source-SOW restriction.
+    case "${ZMAIL_INSTANCE:-}" in
+        dt-animated-comics-maintainer|dt-comic-slides-maintainer|dt-hud-maintainer|dt-library|dt-proofreader|dt-x-capture-maintainer|ducktyper|ducktyper-ops|pomar|pomar-cc|pomar-guest|profrod|profrod-ops|profrod-site-design|rasa|rasa-ops|rasa-bench|zbs|zeo-ledger|zeo-rt|zeo-rt-ledger|zeo-rt-pr|zeo-rt-review|zeo-rt-sched|zeo-rt-seats|zeoagenda-maintainer|zeoapp|zeoarchitect|zeoconnect|zeoconnect-integrations|zeoconnect-ops|zeoconnect-tools|zeoconnect-ui|zeocontrolling|zeocore|zeocouncil|zeocreator|zeofetch|zeointegrations|zeomessenger|zeonewsroom|zeoreviewer|zeroemployee) role=$ZMAIL_INSTANCE ;;
+        *) backup_refused "owner mapping unavailable" ;;
     esac
-    # The accepted owner mapping plus the actual current source branch/commit
-    # and complete destination/ref stream must agree; env text alone is never
-    # an exemption. Shared-UID attribution cannot be promoted to OS isolation.
-    [[ "${ZMAIL_INSTANCE:-}" == zeroemployee ]] || backup_refused "owner mapping unavailable"
-    role=zeo-site-maintainer
-    # Exact independently received owner intent and Pomar acceptance only.
-    # This is not a generic authorization for other roles, repos or refs.
-    [[ $(git rev-parse --verify HEAD) == 3a36b259ab1cdac8c4c3e56a81cbee077732bfe1 ]] || backup_refused "owner-selected source changed"
+    [[ ${#updates[@]} == 1 ]] || backup_refused "exactly one backup update required"
     current=$(git symbolic-ref -q HEAD) || backup_refused "detached source"
     head=$(git rev-parse --verify HEAD) || backup_refused "source unavailable"
-    seen_refs="|"
     for update in "${updates[@]}"; do
         read -r local_ref local_oid remote_ref remote_oid <<< "$update"
         [[ "$local_oid" != 0000000000000000000000000000000000000000 ]] || backup_refused "deletion"
-        [[ "$local_ref" == "$current" && "$local_oid" == "$head" ]] || backup_refused "source mapping is not current branch"
+        [[ "$local_ref" == "$current" && "$local_ref" == "$remote_ref" ]] || backup_refused "source mapping is not same-named current branch"
+        git cat-file -e "$local_oid^{commit}" 2>/dev/null || backup_refused "source commit unavailable"
+        git merge-base --is-ancestor "$local_oid" "$head" || backup_refused "source commit not reachable from branch"
         git check-ref-format "$local_ref" >/dev/null 2>&1 || backup_refused "invalid source ref"
         git check-ref-format "$remote_ref" >/dev/null 2>&1 || backup_refused "invalid backup ref"
-        case "$seen_refs" in *"|$remote_ref|"*) backup_refused "duplicate destination ref" ;; esac
-        seen_refs="$seen_refs$remote_ref|"
-        [[ "$remote_ref" == refs/heads/zeo-site-maintainer/wip/creator-verification-20261024 ]] || backup_refused "ref outside exact owning acceptance"
+        case "$remote_ref" in
+            "refs/heads/$role/wip/"?*) ;;
+            *) backup_refused "mixed, tag or foreign-owner update" ;;
+        esac
+        topic=${remote_ref#"refs/heads/$role/wip/"}
+        [[ "$topic" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || backup_refused "topic syntax refused"
         if [[ "$remote_oid" != 0000000000000000000000000000000000000000 ]]; then
             git cat-file -e "$remote_oid^{commit}" 2>/dev/null || backup_refused "remote ancestry unavailable"
             git merge-base --is-ancestor "$remote_oid" "$local_oid" || backup_refused "non-fast-forward backup"

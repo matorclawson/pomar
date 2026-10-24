@@ -11,19 +11,19 @@ trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/home" "$scratch/tools"
 export HOME="$scratch/home" XDG_CONFIG_HOME="$scratch/home" GIT_CONFIG_NOSYSTEM=1
 fixture=$scratch/repo
-git clone -q --shared --no-checkout "$source_root" "$fixture"
-git -C "$fixture" checkout -q -b fixture-source 3a36b259ab1cdac8c4c3e56a81cbee077732bfe1
-git -C "$fixture" remote remove origin
+git init -q "$fixture"
 git -C "$fixture" config user.name Fixture
 git -C "$fixture" config user.email fixture@example.invalid
-url=git@github.com:matorclawson/pomar.git
+git -C "$fixture" commit -q --allow-empty -m fixture -m "sow: zeo-rt-SOW-715"
+url=git@github.com:matorclawson/zeoruntime.git
 git -C "$fixture" remote add origin "$url"
 cd "$fixture"
+git branch -m zeo-rt/wip/fixture
 head=$(git rev-parse HEAD)
 local_ref=$(git symbolic-ref HEAD)
 zero=0000000000000000000000000000000000000000
-ref=refs/heads/zeo-site-maintainer/wip/creator-verification-20261024
-export ZMAIL_INSTANCE=zeroemployee
+ref=refs/heads/zeo-rt/wip/fixture
+export ZMAIL_INSTANCE=zeo-rt
 export TEST_MAKE_LOG="$scratch/make.log"
 cat > "$scratch/tools/make" <<'MAKE'
 #!/usr/bin/env bash
@@ -44,7 +44,7 @@ run() {
     else
         [[ "$code" != 0 ]] || { echo "FAIL exception admitted: $name" >&2; exit 1; }
         if [[ "$name" == ordinary-still-gated ]]; then
-            [[ "$code" == 47 && -f "$TEST_MAKE_LOG" ]] && grep -qx verify "$TEST_MAKE_LOG" || { echo "FAIL ordinary gate boundary: $name" >&2; exit 1; }
+            [[ "$code" == 47 && -e "$TEST_MAKE_LOG" ]] && grep -Fxq verify "$TEST_MAKE_LOG" || { echo "FAIL ordinary guard boundary: $name" >&2; exit 1; }
             return
         fi
         if grep -Fxq 'UNQUALIFIED WIP BACKUP ONLY: no gate, PR, merge or release acceptance.' "$scratch/stderr"; then
@@ -56,8 +56,8 @@ run() {
                 empty) expected='empty update stream' ;;
                 malformed) expected='malformed update' ;;
                 delete) expected='deletion' ;;
-                tag|mixed-all-or-nothing|foreign-owner-ref) expected='ref outside exact owning acceptance' ;;
-                duplicate-destination-ref) expected='duplicate destination ref' ;;
+                tag|foreign-owner-ref) expected='mixed, tag or foreign-owner update' ;;
+                duplicate-destination-ref|mixed-all-or-nothing) expected='exactly one backup update required' ;;
                 foreign-context|missing-context) expected='owner mapping unavailable' ;;
                 gold|foreign-fork) expected='not the accepted own fork' ;;
                 mismatched-actual-argument|duplicate-push-destination) expected='extra or mismatched destination' ;;
@@ -83,15 +83,71 @@ run_guard() {
 }
 # Source identity failures must reach their own guard, not merely fail setup.
 printf '%s %s %s %s\n' refs/heads/other-source "$head" "$ref" "$zero" > "$scratch/wrong-local-ref"
-run_guard wrong-local-ref "$scratch/wrong-local-ref" 'source mapping is not current branch'
+run_guard wrong-local-ref "$scratch/wrong-local-ref" 'source mapping is not same-named current branch'
 printf '%s %s %s %s\n' "$local_ref" ffffffffffffffffffffffffffffffffffffffff "$ref" "$zero" > "$scratch/wrong-local-oid"
-run_guard wrong-local-oid "$scratch/wrong-local-oid" 'source mapping is not current branch'
-changed_head=$(printf 'different private source fixture\n' | git commit-tree "$(git rev-parse HEAD^{tree})" -p "$head")
-git update-ref "$local_ref" "$changed_head" "$head"
-printf '%s %s %s %s\n' "$local_ref" "$changed_head" "$ref" "$zero" > "$scratch/changed-selected-head"
-run_guard changed-selected-head "$scratch/changed-selected-head" 'owner-selected source changed'
-git update-ref "$local_ref" "$head" "$changed_head"
+run_guard wrong-local-oid "$scratch/wrong-local-oid" 'source commit unavailable'
+wrong_sow=$(printf 'private wrong SOW fixture\n\nsow: foreign-SOW-1\n' | git commit-tree "$(git rev-parse HEAD^{tree})" -p "$head")
+git update-ref "$local_ref" "$wrong_sow" "$head"
+printf '%s %s %s %s\n' "$local_ref" "$wrong_sow" "$ref" "$zero" > "$scratch/wrong-source-sow"
+run source-sow-not-eligibility-filter pass "$scratch/wrong-source-sow"
+git update-ref "$local_ref" "$head" "$wrong_sow"
 
+# A pushed ancestor is valid when reachable from the same-named branch.
+newer=$(printf 'fixture descendant\n' | git commit-tree "$(git rev-parse HEAD^{tree})" -p "$head")
+git update-ref "$local_ref" "$newer" "$head"
+run reachable-nontip-source pass "$scratch/valid"
+git update-ref "$local_ref" "$head" "$newer"
+unreachable=$(printf 'fixture unrelated source\n' | git commit-tree "$(git rev-parse HEAD^{tree})")
+printf '%s %s %s %s\n' "$local_ref" "$unreachable" "$ref" "$zero" > "$scratch/unreachable"
+run_guard unreachable-source "$scratch/unreachable" 'source commit not reachable from branch'
+# Exact pinned 43-seat matrix; repository/SOW columns are not eligibility.
+for seat in dt-animated-comics-maintainer dt-comic-slides-maintainer dt-hud-maintainer dt-library dt-proofreader dt-x-capture-maintainer ducktyper ducktyper-ops pomar pomar-cc pomar-guest profrod profrod-ops profrod-site-design rasa rasa-ops rasa-bench zbs zeo-ledger zeo-rt zeo-rt-ledger zeo-rt-pr zeo-rt-review zeo-rt-sched zeo-rt-seats zeoagenda-maintainer zeoapp zeoarchitect zeoconnect zeoconnect-integrations zeoconnect-ops zeoconnect-tools zeoconnect-ui zeocontrolling zeocore zeocouncil zeocreator zeofetch zeointegrations zeomessenger zeonewsroom zeoreviewer zeroemployee; do
+    git branch -m "$seat/wip/fixture"
+    seat_ref="refs/heads/$seat/wip/fixture"
+    printf '%s %s %s %s\n' "$seat_ref" "$head" "$seat_ref" "$zero" > "$scratch/seat-valid"
+    ZMAIL_INSTANCE=$seat run "known-seat-$seat" pass "$scratch/seat-valid"
+done
+git branch -m unknown-seat/wip/fixture
+printf '%s %s %s %s\n' refs/heads/unknown-seat/wip/fixture "$head" refs/heads/unknown-seat/wip/fixture "$zero" > "$scratch/unknown-seat"
+ZMAIL_INSTANCE=unknown-seat run_guard unknown-seat "$scratch/unknown-seat" 'owner mapping unavailable'
+git branch -m zeo-rt/wip/fixture
+for accepted_url in git@github.com:matorclawson/zero-employee.git https://github.com/matorclawson/zero-employee.git https://github.com/matorclawson/zero-employee; do
+    git remote set-url origin "$accepted_url"
+    run accepted-fork-spelling pass "$scratch/valid" "$accepted_url"
+done
+git remote set-url origin "$url"
+# Council C3: exactly one topic component, 1..64 lower-case/digit/hyphen
+# characters, starting in lower-case/digit. Every fixture branch is Git-valid.
+for topic in a a-0 azzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz; do
+    git branch -m "zeo-rt/wip/$topic"
+    topic_ref="refs/heads/zeo-rt/wip/$topic"
+    printf '%s %s %s %s\n' "$topic_ref" "$head" "$topic_ref" "$zero" > "$scratch/topic"
+    run topic-boundary-positive pass "$scratch/topic"
+done
+for topic in Upper nested/topic underscore_topic -leading azzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz; do
+    git branch -m "zeo-rt/wip/$topic"
+    topic_ref="refs/heads/zeo-rt/wip/$topic"
+    printf '%s %s %s %s\n' "$topic_ref" "$head" "$topic_ref" "$zero" > "$scratch/topic"
+    run_guard "invalid-topic-$topic" "$scratch/topic" 'topic syntax refused'
+done
+git branch -m zeo-rt/wip/fixture
+# Removing only the one-update guard must expose a two-identical-update push.
+cat "$scratch/valid" "$scratch/valid" > "$scratch/second-identical"
+run_guard second-update-mutant-control "$scratch/second-identical" 'exactly one backup update required'
+# Known seat with another known seat's branch must reach namespace refusal.
+git branch -m zeoarchitect/wip/fixture
+printf '%s %s %s %s\n' refs/heads/zeoarchitect/wip/fixture "$head" refs/heads/zeoarchitect/wip/fixture "$zero" > "$scratch/cross-seat"
+run_guard cross-known-seat "$scratch/cross-seat" 'mixed, tag or foreign-owner update'
+git branch -m zeo-rt/wip/fixture
+# Distinct second ref must refuse as a whole, even when first is eligible.
+cp "$scratch/valid" "$scratch/second-distinct"
+printf '%s %s %s %s\n' "$local_ref" "$head" refs/heads/zeo-rt/wip/second "$zero" >> "$scratch/second-distinct"
+run_guard second-distinct-ref "$scratch/second-distinct" 'exactly one backup update required'
+for rejected_url in https://github.com/matorclawson/zero-employee.git/extra https://github.com/matorclawson/zero-employee.git?query=1 https://github.com/matorclawson.evil/zero-employee.git https://github.com:443/matorclawson/zero-employee.git https://user@github.com/matorclawson/zero-employee.git; do
+    git remote set-url origin "$rejected_url"
+    run rejected-url-syntax refuse "$scratch/valid" "$rejected_url" 'not the accepted own fork'
+done
+git remote set-url origin "$url"
 # Detach only the private fixture HEAD, preserving the source object and role.
 # This must reach the symbolic-ref guard, then restore the original fixture ref.
 git update-ref --no-deref HEAD "$head"
@@ -165,7 +221,7 @@ printf '%s %s %s %s
 run delete refuse "$scratch/delete"
 printf '%s %s refs/tags/wip/backup %s
 ' "$local_ref" "$head" "$zero" > "$scratch/tag"
-run tag refuse "$scratch/tag"
+run tag refuse "$scratch/tag" "$url" 'source mapping is not same-named current branch'
 cp "$scratch/valid" "$scratch/mixed"
 printf '%s %s refs/heads/main %s
 ' "$local_ref" "$head" "$zero" >> "$scratch/mixed"
@@ -174,15 +230,15 @@ cat "$scratch/valid" "$scratch/valid" > "$scratch/duplicate"
 run duplicate-destination-ref refuse "$scratch/duplicate"
 printf '%s %s refs/heads/foreign/wip/backup %s
 ' "$local_ref" "$head" "$zero" > "$scratch/foreign"
-run foreign-owner-ref refuse "$scratch/foreign"
+run foreign-owner-ref refuse "$scratch/foreign" "$url" 'source mapping is not same-named current branch'
 ZMAIL_INSTANCE=foreign run foreign-context refuse "$scratch/valid"
 ZMAIL_INSTANCE= run missing-context refuse "$scratch/valid"
-git remote set-url origin git@github.com:zeroemployeeorg/pomar.git
-run gold refuse "$scratch/valid" git@github.com:zeroemployeeorg/pomar.git
-git remote set-url origin git@github.com:foreign/pomar.git
-run foreign-fork refuse "$scratch/valid" git@github.com:foreign/pomar.git
+git remote set-url origin git@github.com:zeroemployeeorg/zeoruntime.git
+run gold refuse "$scratch/valid" git@github.com:zeroemployeeorg/zeoruntime.git
+git remote set-url origin git@github.com:foreign/zeoruntime.git
+run foreign-fork refuse "$scratch/valid" git@github.com:foreign/zeoruntime.git
 git remote set-url origin "$url"
-run mismatched-actual-argument refuse "$scratch/valid" https://github.com/foreign/pomar.git
+run mismatched-actual-argument refuse "$scratch/valid" https://github.com/foreign/zeoruntime.git
 git config --add remote.origin.pushurl "$url"
 git config --add remote.origin.pushurl "$url"
 run duplicate-push-destination refuse "$scratch/valid"
@@ -207,17 +263,23 @@ run missing-ancestry refuse "$scratch/unknown"
 printf '%s %s refs/heads/main %s
 ' "$local_ref" "$head" "$zero" > "$scratch/ordinary"
 run ordinary-still-gated refuse "$scratch/ordinary"
-[[ -f "$TEST_MAKE_LOG" ]] && grep -qx verify "$TEST_MAKE_LOG" || { echo "ordinary make verify guard bypassed" >&2; exit 1; }
+rm -f "$TEST_MAKE_LOG"
 # Optional paths below are fixture-only; production hooks never read these
 # variables. Child runs avoid recursive mutation and restore the actual source.
 if [[ "${WIP_HOOK_MUTATION_CHILD:-0}" != 1 ]]; then
-    for mutation in eof config; do
+    for mutation in eof config seat destination nonff deletion second topic; do
         mutant=$scratch/hook-$mutation
         awk -v target="$mutation" '
             target == "eof" && index($0, "partial or unreadable update record") { print "        :"; changed++; next }
             target == "config" && index($0, "[[ \"$config_status\" == 1 ]]") { print "        :"; changed++; next }
+            target == "seat" && index($0, "owner mapping unavailable") { print "        *) role=${ZMAIL_INSTANCE:-} ;;"; changed++; next }
+            target == "destination" && index($0, "backup_refused \"not the accepted own fork\"") { print "        :"; changed++; next }
+            target == "nonff" && index($0, "backup_refused \"non-fast-forward backup\"") { print "            :"; changed++; next }
+            target == "deletion" && index($0, "backup_refused \"deletion\"") { print "        if [[ \"$local_oid\" == 0000000000000000000000000000000000000000 ]]; then local_oid=$head; fi"; changed++; next }
+            target == "second" && index($0, "backup_refused \"exactly one backup update required\"") { print "    :"; changed++; next }
+            target == "topic" && index($0, "backup_refused \"topic syntax refused\"") { print "        :"; changed++; next }
             { print }
-            END { if ((target == "eof" && changed != 1) || (target == "config" && changed != 3)) exit 2 }
+            END { if ((target == "eof" && changed != 1) || (target == "config" && changed != 3) || (target == "seat" && changed != 1) || (target == "destination" && changed != 1) || (target == "nonff" && changed != 1) || (target == "deletion" && changed != 1) || (target == "second" && changed != 1) || (target == "topic" && changed != 1)) exit 2 }
         ' "$hook" > "$mutant" || { echo "FAIL mutant source mismatch: $mutation" >&2; exit 1; }
         chmod +x "$mutant"
         if (cd "$source_root" && PATH="$test_base_path" WIP_HOOK_MUTATION_CHILD=1 WIP_HOOK_UNDER_TEST="$mutant" "$BASH" "$source_root/tests/wip-backup-pre-push.sh") > "$scratch/mutant-$mutation.log" 2>&1; then
@@ -226,6 +288,12 @@ if [[ "${WIP_HOOK_MUTATION_CHILD:-0}" != 1 ]]; then
         case "$mutation" in
             eof) assertion='FAIL exception admitted: valid-then-partial-mixed' ;;
             config) assertion='FAIL exception admitted: config-read-error-rewrite' ;;
+            seat) assertion='FAIL exception admitted: unknown-seat' ;;
+            destination) assertion='FAIL exception admitted: rejected-url-syntax' ;;
+            nonff) assertion='FAIL exception admitted: non-fast-forward' ;;
+            deletion) assertion='FAIL exception admitted: delete' ;;
+            second) assertion='FAIL exception admitted: second-update-mutant-control' ;;
+            topic) assertion='FAIL exception admitted: invalid-topic-Upper' ;;
         esac
         grep -Fxq "$assertion" "$scratch/mutant-$mutation.log" || { echo "FAIL unrelated mutant failure: $mutation" >&2; exit 1; }
         (cd "$source_root" && PATH="$test_base_path" WIP_HOOK_MUTATION_CHILD=1 WIP_HOOK_UNDER_TEST="$hook" "$BASH" "$source_root/tests/wip-backup-pre-push.sh") > "$scratch/fixed-$mutation.log" 2>&1 || { echo "FAIL fixed source after mutant: $mutation" >&2; exit 1; }
