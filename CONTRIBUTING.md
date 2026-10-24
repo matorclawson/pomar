@@ -58,11 +58,20 @@ interface today.
   storage binding and bounded reservation. If absent, ask the owner for an
   approved local workspace/budget; never invent a mount or copy another host's
   paths. Do not replace a running seat's storage defaults.
-- Run `make verify` on the committed Apple silicon source head: versions,
+- Every ordinary push, final approval and merge requires `make verify` on the
+  exact committed Apple silicon source head: versions,
   absence of a Docker socket, tracked-file hygiene, gofmt, vet, all Go race
   tests, static Linux ARM64 shim, locked Swift build/tests and the host's
   Virtualization entitlement. Maintainers pass the private hygiene denylist;
   never commit it. Run `make hooks` once in your own clone for the pre-push gate.
+- The only WIP push exception is one accepted own-fork destination and one
+  same-named current-branch ref `<seat>/wip/<topic>`, under the reviewed literal
+  seat and topic policy. Resolve the repository first, then unset the variable
+  names returned by `git rev-parse --local-env-vars` before descendant tools.
+  Its hook runs format and lint only under a fail-closed whole-process bound
+  below three minutes. It never runs the full suite or grants approval, merge,
+  release or runtime acceptance. Missing tools, incomplete input or quick-check
+  failure refuse the push. Every other push retains the full gate.
 - Use meaningful behavioral tests for changed boundaries, including lost
   acknowledgements, mismatched bindings, refusal paths and concurrency. Pomar
   has no mandatory mutation-testing gate; report any actual mutation tool/scope
@@ -87,9 +96,16 @@ licensed with the code (Apache-2.0 §6).
 
 ## 6. How to submit.
 
-One ready PR at a time, stacked on the fork. Continue the next branch while a PR
-waits; only the ready-to-merge queue is serialized. Reconcile successors against
-actual merged gold. Do not force-push a reviewed head.
+Open any new PR, including a draft, only after the full repository gate has
+passed on the exact committed head. Include HEAD, DIRTY, EXIT and the raw-log
+SHA256 in its body. Existing drafts remain drafts until their gate passes.
+Opening or updating a PR never triggers the heavy suite; PR checks stay light.
+Test regularly on the work branch in the permitted own lane and placement;
+retain failures and push reviewed-policy WIP backups where the merged
+repository rules allow them. Until the WIP amendment merges, current rules bind.
+One ready non-draft PR at a time, stacked on the fork. Continue the next branch
+while a PR waits. Final approval and merge require the full exact-head gate.
+Reconcile successors against actual merged gold; do not force-push a reviewed head.
 
 Use this PR body order:
 
