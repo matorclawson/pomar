@@ -242,24 +242,31 @@ private func expectExecutableRefusal(_ body: () throws -> Void) {
     }
 }
 
+private func expectCustodyRefusal(_ body: () throws -> Void) {
+    do { try body(); Issue.record("Unsafe rootfs custody was accepted") }
+    catch AgentLaunchCustody.Failure.custody { }
+    catch { Issue.record("Wrong rootfs custody failure boundary: \(error)") }
+}
+
 @Test func launchCustodyRefusesPublicOrLinkedWorkspaceBeforeReceipt() throws {
     try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
         chmod(request.rootfs, 0o644)
         defer { chmod(request.rootfs, 0o600) }
-        #expect(throws: AgentLaunchCustody.Failure.self) {
-            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
                 environment: request.environment, session: request.session, incarnation: "public",
-                sourceSHA: String(repeating: "a", count: 40))
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
         }
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-public.json").path))
         chmod(request.rootfs, 0o600)
         let link = directory.appendingPathComponent("alias.ext4")
         #expect(Darwin.link(request.rootfs, link.path) == 0)
         defer { unlink(link.path) }
-        #expect(throws: AgentLaunchCustody.Failure.self) {
-            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
                 environment: request.environment, session: request.session, incarnation: "linked",
-                sourceSHA: String(repeating: "a", count: 40))
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
         }
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-linked.json").path))
     }
@@ -544,5 +551,82 @@ func launchExecutableRejectsInvalidKindOrSizeBeforeOpen(_ kind: String) throws {
         }
         #expect(!opened)
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-pre-open.json").path))
+    }
+}
+
+@Test(arguments: ["directory-mode", "path"])
+func launchRootfsRefusesInvalidDirectoryOrPath(_ kind: String) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        var rootfs = request.rootfs
+        if kind == "directory-mode" {
+            try #require(chmod(directory.path, 0o770) == 0)
+        } else {
+            let alternate = directory.appendingPathComponent("alternate.ext4")
+            try Data("retained writer fixture".utf8).write(to: alternate)
+            try #require(chmod(alternate.path, 0o600) == 0)
+            rootfs = alternate.path
+        }
+        defer { chmod(directory.path, 0o700) }
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: rootfs,
+                environment: request.environment, session: request.session, incarnation: "rootfs-boundary",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-rootfs-boundary.json").path))
+    }
+}
+
+@Test func launchRootfsRefusesSymlinkBeforeReceipt() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        let retained = directory.appendingPathComponent("retained-original.ext4")
+        try #require(rename(request.rootfs, retained.path) == 0)
+        try #require(symlink(retained.path, request.rootfs) == 0)
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "rootfs-symlink",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-rootfs-symlink.json").path))
+    }
+}
+
+@Test(arguments: ["inode", "mode"])
+func launchRootfsPostFlushChangeRetainsReceiptAndBlocksReplay(_ kind: String) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        var changed = false
+        do {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "post-flush",
+                sourceSHA: String(repeating: "a", count: 40), executable: access,
+                fullSync: { fd in
+                    let result = fcntl(fd, F_FULLFSYNC)
+                    if result == 0 && !changed {
+                        if kind == "inode" {
+                            guard rename(request.rootfs, directory.appendingPathComponent("pre-flush.ext4").path) == 0 else { return -1 }
+                            do { try Data("retained writer fixture".utf8).write(to: URL(fileURLWithPath: request.rootfs)) }
+                            catch { return -1 }
+                        }
+                        guard chmod(request.rootfs, kind == "mode" ? 0o644 : 0o600) == 0 else { return -1 }
+                        changed = true
+                    }
+                    return result
+                })
+            Issue.record("Changed rootfs custody was accepted")
+        } catch AgentLaunchCustody.Failure.persistence { }
+        catch { Issue.record("Wrong post-flush failure boundary: \(error)") }
+        try #require(changed)
+        try #require(chmod(request.rootfs, 0o600) == 0)
+        let receipt = directory.appendingPathComponent("launch-custody-post-flush.json")
+        let retained = try Data(contentsOf: receipt)
+        #expect(!retained.isEmpty)
+        #expect(throws: AgentLaunchCustody.Failure.self) {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "post-flush",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(try Data(contentsOf: receipt) == retained)
     }
 }
