@@ -92,6 +92,13 @@ printf '%s %s %s %s\n' "$local_ref" "$changed_head" "$ref" "$zero" > "$scratch/c
 run_guard changed-selected-head "$scratch/changed-selected-head" 'owner-selected source changed'
 git update-ref "$local_ref" "$head" "$changed_head"
 
+# Detach only the private fixture HEAD, preserving the source object and role.
+# This must reach the symbolic-ref guard, then restore the original fixture ref.
+git update-ref --no-deref HEAD "$head"
+run_guard detached-source "$scratch/valid" 'detached source'
+git symbolic-ref HEAD "$local_ref"
+run restored-symbolic-source pass "$scratch/valid"
+
 # A newline-terminated allowed update must never hide an unterminated suffix.
 # Each alone must also fail, before authorization can return success.
 for suffix in mixed tag delete malformed valid; do
