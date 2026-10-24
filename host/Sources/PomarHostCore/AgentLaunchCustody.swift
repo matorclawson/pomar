@@ -56,7 +56,8 @@ enum AgentLaunchCustody {
     static func writeObserved(directory: String, rootfs: String, environment: String,
                               session: String, incarnation: String, sourceSHA: String,
                               executable access: ExecutableAccess,
-                              fullSync: (Int32) -> Int32 = { fcntl($0, F_FULLFSYNC) }) throws {
+                              fullSync: (Int32) -> Int32 = { fcntl($0, F_FULLFSYNC) },
+                              fileSync: (Int32) -> Int32 = { Darwin.fsync($0) }) throws {
         var parent = stat()
         guard lstat(directory, &parent) == 0, parent.st_mode & S_IFMT == S_IFDIR,
               parent.st_uid == getuid(), parent.st_mode & 0o077 == 0,
@@ -122,12 +123,12 @@ enum AgentLaunchCustody {
                 offset += n
             }
         }
-        guard fsync(output) == 0, fullSync(output) == 0, lstat(rootfs, &current) == 0,
+        guard fileSync(output) == 0, fullSync(output) == 0, lstat(rootfs, &current) == 0,
               current.st_dev == disk.st_dev, current.st_ino == disk.st_ino,
               current.st_uid == disk.st_uid, current.st_mode & 0o777 == 0o600 else { throw Failure.persistence }
         let directoryFD = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directoryFD >= 0 else { throw Failure.persistence }
         defer { close(directoryFD) }
-        guard fsync(directoryFD) == 0, fullSync(directoryFD) == 0 else { throw Failure.persistence }
+        guard fileSync(directoryFD) == 0, fullSync(directoryFD) == 0 else { throw Failure.persistence }
     }
 }

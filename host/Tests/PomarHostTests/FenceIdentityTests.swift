@@ -453,10 +453,11 @@ func launchExecutableRefusesChangedOrIncompleteObservation(_ kind: String) throw
         let (file, original) = try ownedLaunchExecutable(in: directory)
         var access = original
         var calls = 0
-        if kind == "short-read" {
+        if kind == "short-read" || kind == "device" {
             access.metadata = { path, data in
                 let result = Darwin.lstat(path, data)
-                if result == 0 { data.pointee.st_size += 1 }
+                if result == 0 && kind == "short-read" { data.pointee.st_size += 1 }
+                if result == 0 && kind == "device" { data.pointee.st_dev ^= 1 }
                 return result
             }
         }
@@ -467,7 +468,6 @@ func launchExecutableRefusesChangedOrIncompleteObservation(_ kind: String) throw
                 catch { Issue.record("Could not change owned fixture mtime: \(error)") }
             }
             let result = Darwin.fstat(fd, data)
-            if result == 0 && kind == "device" && calls == 1 { data.pointee.st_dev ^= 1 }
             if result == 0 && kind == "short-read" { data.pointee.st_size += 1 }
             return result
         }
@@ -477,5 +477,35 @@ func launchExecutableRefusesChangedOrIncompleteObservation(_ kind: String) throw
                 sourceSHA: String(repeating: "a", count: 40), executable: access)
         }
         #expect(calls > 0)
+    }
+}
+
+@Test(arguments: [1, 2])
+func launchReceiptSyncFailureRetainsBytesAndBlocksReplay(_ failOn: Int) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        var calls = 0
+        do {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "fsync",
+                sourceSHA: String(repeating: "a", count: 40), executable: access,
+                fileSync: { fd in
+                    calls += 1
+                    if calls == failOn { errno = EIO; return -1 }
+                    return Darwin.fsync(fd)
+                })
+            Issue.record("Failed native sync was accepted")
+        } catch AgentLaunchCustody.Failure.persistence { }
+        catch { Issue.record("Wrong sync failure boundary: \(error)") }
+        try #require(calls == failOn)
+        let receipt = directory.appendingPathComponent("launch-custody-fsync.json")
+        let retained = try Data(contentsOf: receipt)
+        #expect(!retained.isEmpty)
+        #expect(throws: AgentLaunchCustody.Failure.self) {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "fsync",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(try Data(contentsOf: receipt) == retained)
     }
 }
