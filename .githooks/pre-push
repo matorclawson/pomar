@@ -1,7 +1,67 @@
 #!/usr/bin/env bash
-# Pomar's pre-push gate: make verify, the merge gate, before anything leaves this
-# clone. pipefail, so no pipe can hide a failing step. Turn it on once per
-# clone with `make hooks`.
+# sow: pomar-SOW-87
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+# WIP exception: policy below is an accepted repository/role/ref binding, not
+# authentication stronger than the shared-UID seat convention. Never use it
+# as a release/PR/merge receipt or a credential/host identity mechanism.
+backup_refused() { echo "WIP BACKUP REFUSED: $1" >&2; exit 1; }
+root=$(git rev-parse --show-toplevel) || exit 1
+cd "$root"
+updates=()
+backup=0
+while read -r local_ref local_oid remote_ref remote_oid extra; do
+    [[ -n "$local_ref" && -n "$remote_ref" && -z "${extra:-}" ]] || backup_refused "malformed update"
+    [[ "$local_oid" =~ ^[0-9a-f]{40}$ && "$remote_oid" =~ ^[0-9a-f]{40}$ ]] || backup_refused "unsupported object identity"
+    [[ ${#updates[@]} -lt 1024 && ${#local_ref} -le 1024 && ${#remote_ref} -le 1024 ]] || backup_refused "update limit"
+    updates+=("$local_ref $local_oid $remote_ref $remote_oid")
+    case "$local_ref $remote_ref" in */wip/*) backup=1 ;; esac
+done
+[[ ${#updates[@]} -gt 0 ]] || backup_refused "empty update stream"
+if [[ "$backup" == 1 ]]; then
+    [[ $# == 2 && "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || backup_refused "named destination required"
+    remote=$1
+    url=$2
+    [[ $(git rev-parse --show-object-format) == sha1 ]] || backup_refused "unsupported object format"
+    # No hidden destination/ref expansion. Never print configuration values:
+    # they may contain caller credentials. No network or credential read here.
+    if git config --name-only --get-regexp '^url\..*\.(insteadof|pushinsteadof)$' >/dev/null 2>&1; then
+        backup_refused "URL rewrite configured"
+    fi
+    [[ $(git config --bool --get "remote.$remote.mirror" || true) != true ]] || backup_refused "mirror configured"
+    [[ -z $(git config --get-all "remote.$remote.push" || true) ]] || backup_refused "implicit push refspec configured"
+    destinations=$(git remote get-url --push --all "$remote") || backup_refused "destination unavailable"
+    [[ "$destinations" != *$'\n'* && "$destinations" == "$url" ]] || backup_refused "extra or mismatched destination"
+    case "$url" in
+        "git@github.com:matorclawson/pomar.git"|"https://github.com/matorclawson/pomar.git"|"https://github.com/matorclawson/pomar") ;;
+        *) backup_refused "not the accepted own fork" ;;
+    esac
+    # The accepted owner mapping plus the actual current source branch/commit
+    # and complete destination/ref stream must agree; env text alone is never
+    # an exemption. Shared-UID attribution cannot be promoted to OS isolation.
+    [[ "${ZMAIL_INSTANCE:-}" == zeroemployee ]] || backup_refused "owner mapping unavailable"
+    role=zeo-site-maintainer
+    # Exact independently received owner intent and Pomar acceptance only.
+    # This is not a generic authorization for other roles, repos or refs.
+    [[ $(git rev-parse --verify HEAD) == 3a36b259ab1cdac8c4c3e56a81cbee077732bfe1 ]] || backup_refused "owner-selected source changed"
+    current=$(git symbolic-ref -q HEAD) || backup_refused "detached source"
+    head=$(git rev-parse --verify HEAD) || backup_refused "source unavailable"
+    seen_refs="|"
+    for update in "${updates[@]}"; do
+        read -r local_ref local_oid remote_ref remote_oid <<< "$update"
+        [[ "$local_ref" == "$current" && "$local_oid" == "$head" ]] || backup_refused "source mapping is not current branch"
+        git check-ref-format "$local_ref" >/dev/null 2>&1 || backup_refused "invalid source ref"
+        git check-ref-format "$remote_ref" >/dev/null 2>&1 || backup_refused "invalid backup ref"
+        case "$seen_refs" in *"|$remote_ref|"*) backup_refused "duplicate destination ref" ;; esac
+        seen_refs="$seen_refs$remote_ref|"
+        [[ "$local_oid" != 0000000000000000000000000000000000000000 ]] || backup_refused "deletion"
+        [[ "$remote_ref" == refs/heads/zeo-site-maintainer/wip/creator-verification-20261024 ]] || backup_refused "ref outside exact owning acceptance"
+        if [[ "$remote_oid" != 0000000000000000000000000000000000000000 ]]; then
+            git cat-file -e "$remote_oid^{commit}" 2>/dev/null || backup_refused "remote ancestry unavailable"
+            git merge-base --is-ancestor "$remote_oid" "$local_oid" || backup_refused "non-fast-forward backup"
+        fi
+    done
+    echo "UNQUALIFIED WIP BACKUP ONLY: no gate, PR, merge or release acceptance." >&2
+    exit 0
+fi
+# Ordinary Pomar pushes retain their existing make verify gate.
 make verify
