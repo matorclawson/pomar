@@ -34,9 +34,29 @@ enum AgentLaunchCustody {
         return String(cString: path)
     }
 
+    // Internal raw observations only. Every value still passes the checks below;
+    // no observer returns an approval, Record, process identity or trust decision.
+    struct ExecutableAccess {
+        var path: () throws -> String = AgentLaunchCustody.observedExecutablePath
+        var metadata: (String, UnsafeMutablePointer<stat>) -> Int32 = { Darwin.lstat($0, $1) }
+        var openDescriptor: (String, Int32) -> Int32 = { Darwin.open($0, $1) }
+        var descriptorMetadata: (Int32, UnsafeMutablePointer<stat>) -> Int32 = { Darwin.fstat($0, $1) }
+    }
+
     static func write(directory: String, rootfs: String, environment: String,
                       session: String, incarnation: String, sourceSHA: String,
                       fullSync: (Int32) -> Int32 = { fcntl($0, F_FULLFSYNC) }) throws {
+        try writeObserved(directory: directory, rootfs: rootfs, environment: environment,
+            session: session, incarnation: incarnation, sourceSHA: sourceSHA,
+            executable: ExecutableAccess(), fullSync: fullSync)
+    }
+
+    // Fixture entry is internal and has no runtime/config/environment binding.
+    // Native PID, UID and birth, all file predicates and persistence are shared.
+    static func writeObserved(directory: String, rootfs: String, environment: String,
+                              session: String, incarnation: String, sourceSHA: String,
+                              executable access: ExecutableAccess,
+                              fullSync: (Int32) -> Int32 = { fcntl($0, F_FULLFSYNC) }) throws {
         var parent = stat()
         guard lstat(directory, &parent) == 0, parent.st_mode & S_IFMT == S_IFDIR,
               parent.st_uid == getuid(), parent.st_mode & 0o077 == 0,
@@ -56,16 +76,16 @@ enum AgentLaunchCustody {
         guard proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &identity, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size,
               identity.pbi_pid == UInt32(getpid()), identity.pbi_uid == getuid(), identity.pbi_start_tvsec > 0
         else { throw Failure.identity }
-        let executable = try observedExecutablePath()
+        let executable = try access.path()
         var exe = stat()
-        guard lstat(executable, &exe) == 0, exe.st_mode & S_IFMT == S_IFREG,
+        guard access.metadata(executable, &exe) == 0, exe.st_mode & S_IFMT == S_IFREG,
               exe.st_size > 0, exe.st_size <= 256 * 1024 * 1024 else { throw Failure.executable }
-        let exeFD = open(executable, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let exeFD = access.openDescriptor(executable, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard exeFD >= 0 else { throw Failure.executable }
         let exeHandle = FileHandle(fileDescriptor: exeFD, closeOnDealloc: true)
         defer { try? exeHandle.close() }
         var openedExe = stat(), afterExe = stat()
-        guard fstat(exeFD, &openedExe) == 0, openedExe.st_dev == exe.st_dev, openedExe.st_ino == exe.st_ino,
+        guard access.descriptorMetadata(exeFD, &openedExe) == 0, openedExe.st_dev == exe.st_dev, openedExe.st_ino == exe.st_ino,
               openedExe.st_uid == getuid() || openedExe.st_uid == 0,
               openedExe.st_mode & 0o022 == 0, openedExe.st_nlink == 1 else { throw Failure.executable }
         var hasher = SHA256()
@@ -75,7 +95,7 @@ enum AgentLaunchCustody {
             guard executableBytes <= openedExe.st_size else { throw Failure.executable }
             hasher.update(data: chunk)
         }
-        guard executableBytes == openedExe.st_size, fstat(exeFD, &afterExe) == 0,
+        guard executableBytes == openedExe.st_size, access.descriptorMetadata(exeFD, &afterExe) == 0,
               afterExe.st_dev == openedExe.st_dev, afterExe.st_ino == openedExe.st_ino,
               afterExe.st_size == openedExe.st_size,
               afterExe.st_mtimespec.tv_sec == openedExe.st_mtimespec.tv_sec,
