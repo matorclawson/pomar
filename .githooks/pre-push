@@ -82,12 +82,12 @@ if [[ "$backup" == 1 ]]; then
     seen_refs="|"
     for update in "${updates[@]}"; do
         read -r local_ref local_oid remote_ref remote_oid <<< "$update"
+        [[ "$local_oid" != 0000000000000000000000000000000000000000 ]] || backup_refused "deletion"
         [[ "$local_ref" == "$current" && "$local_oid" == "$head" ]] || backup_refused "source mapping is not current branch"
         git check-ref-format "$local_ref" >/dev/null 2>&1 || backup_refused "invalid source ref"
         git check-ref-format "$remote_ref" >/dev/null 2>&1 || backup_refused "invalid backup ref"
         case "$seen_refs" in *"|$remote_ref|"*) backup_refused "duplicate destination ref" ;; esac
         seen_refs="$seen_refs$remote_ref|"
-        [[ "$local_oid" != 0000000000000000000000000000000000000000 ]] || backup_refused "deletion"
         [[ "$remote_ref" == refs/heads/zeo-site-maintainer/wip/creator-verification-20261024 ]] || backup_refused "ref outside exact owning acceptance"
         if [[ "$remote_oid" != 0000000000000000000000000000000000000000 ]]; then
             git cat-file -e "$remote_oid^{commit}" 2>/dev/null || backup_refused "remote ancestry unavailable"

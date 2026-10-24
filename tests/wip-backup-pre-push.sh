@@ -4,7 +4,8 @@
 # production hook installation, credentials or source-worktree mutation.
 set -euo pipefail
 source_root=$(git rev-parse --show-toplevel)
-hook=$source_root/.githooks/pre-push
+hook=${WIP_HOOK_UNDER_TEST:-$source_root/.githooks/pre-push}
+test_base_path=$PATH
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/zeo-wip-hook.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/home" "$scratch/tools"
@@ -35,18 +36,42 @@ export PATH="$scratch/tools:$PATH"
 printf '%s %s %s %s
 ' "$local_ref" "$head" "$ref" "$zero" > "$scratch/valid"
 run() {
-    local name=$1 want=$2 input=$3 destination=${4:-$url} code
+    local name=$1 want=$2 input=$3 destination=${4:-$url} expected=${5:-} code
     if "$hook" origin "$destination" < "$input" > "$scratch/stdout" 2> "$scratch/stderr"; then code=0; else code=$?; fi
     if [[ "$want" == pass ]]; then
         [[ "$code" == 0 ]] || { echo "FAIL expected backup: $name" >&2; exit 1; }
+        grep -Fxq 'UNQUALIFIED WIP BACKUP ONLY: no gate, PR, merge or release acceptance.' "$scratch/stderr" || { echo "FAIL backup success marker missing: $name" >&2; exit 1; }
     else
         [[ "$code" != 0 ]] || { echo "FAIL exception admitted: $name" >&2; exit 1; }
+        if [[ "$name" == ordinary-still-gated ]]; then
+            [[ "$code" == 47 && -f "$TEST_MAKE_LOG" ]] && grep -qx verify "$TEST_MAKE_LOG" || { echo "FAIL ordinary gate boundary: $name" >&2; exit 1; }
+            return
+        fi
+        if [[ -z "$expected" ]]; then
+            case "$name" in
+                empty) expected='empty update stream' ;;
+                malformed) expected='malformed update' ;;
+                delete) expected='deletion' ;;
+                tag|mixed-all-or-nothing|foreign-owner-ref) expected='ref outside exact owning acceptance' ;;
+                duplicate-destination-ref) expected='duplicate destination ref' ;;
+                foreign-context|missing-context) expected='owner mapping unavailable' ;;
+                gold|foreign-fork) expected='not the accepted own fork' ;;
+                mismatched-actual-argument|duplicate-push-destination) expected='extra or mismatched destination' ;;
+                mirror-config) expected='mirror configured or ambiguous' ;;
+                implicit-refspec) expected='implicit push refspec configured' ;;
+                rewrite) expected='URL rewrite configured' ;;
+                non-fast-forward) expected='non-fast-forward backup' ;;
+                missing-ancestry) expected='remote ancestry unavailable' ;;
+                *) echo "FAIL no intended refusal bound: $name" >&2; exit 1 ;;
+            esac
+        fi
+        grep -Fxq "WIP BACKUP REFUSED: $expected" "$scratch/stderr" || { echo "FAIL wrong refusal boundary: $name" >&2; exit 1; }
     fi
 }
 run own-fork-owner-backup pass "$scratch/valid"
 run_guard() {
     local name=$1 input=$2 expected=$3
-    run "$name" refuse "$input"
+    run "$name" refuse "$input" "$url" "$expected"
     case "$(cat "$scratch/stderr")" in
         *"$expected"*) ;;
         *) echo "FAIL wrong refusal boundary: $name" >&2; exit 1 ;;
@@ -62,9 +87,9 @@ for suffix in mixed tag delete malformed valid; do
         malformed) printf 'malformed' > "$scratch/partial" ;;
         valid) printf '%s %s %s %s' "$local_ref" "$head" "$ref" "$zero" > "$scratch/partial" ;;
     esac
-    run_guard "partial-alone-$suffix" "$scratch/partial" 'partial or unreadable update record'
     cat "$scratch/valid" "$scratch/partial" > "$scratch/valid-and-partial"
     run_guard "valid-then-partial-$suffix" "$scratch/valid-and-partial" 'partial or unreadable update record'
+    run_guard "partial-alone-$suffix" "$scratch/partial" 'partial or unreadable update record'
 done
 # A closed input descriptor must fail capture, not look like clean EOF.
 if "$hook" origin "$url" <&- > "$scratch/stdout" 2> "$scratch/stderr"; then
@@ -161,5 +186,28 @@ printf '%s %s refs/heads/main %s
 ' "$local_ref" "$head" "$zero" > "$scratch/ordinary"
 run ordinary-still-gated refuse "$scratch/ordinary"
 [[ -f "$TEST_MAKE_LOG" ]] && grep -qx verify "$TEST_MAKE_LOG" || { echo "ordinary make verify guard bypassed" >&2; exit 1; }
+# Optional paths below are fixture-only; production hooks never read these
+# variables. Child runs avoid recursive mutation and restore the actual source.
+if [[ "${WIP_HOOK_MUTATION_CHILD:-0}" != 1 ]]; then
+    for mutation in eof config; do
+        mutant=$scratch/hook-$mutation
+        awk -v target="$mutation" '
+            target == "eof" && index($0, "partial or unreadable update record") { print "        :"; changed++; next }
+            target == "config" && index($0, "[[ \"$config_status\" == 1 ]]") { print "        :"; changed++; next }
+            { print }
+            END { if ((target == "eof" && changed != 1) || (target == "config" && changed != 3)) exit 2 }
+        ' "$hook" > "$mutant" || { echo "FAIL mutant source mismatch: $mutation" >&2; exit 1; }
+        chmod +x "$mutant"
+        if (cd "$source_root" && PATH="$test_base_path" WIP_HOOK_MUTATION_CHILD=1 WIP_HOOK_UNDER_TEST="$mutant" "$BASH" "$source_root/tests/wip-backup-pre-push.sh") > "$scratch/mutant-$mutation.log" 2>&1; then
+            echo "FAIL mutant survived: $mutation" >&2; exit 1
+        fi
+        case "$mutation" in
+            eof) assertion='FAIL exception admitted: valid-then-partial-mixed' ;;
+            config) assertion='FAIL exception admitted: config-read-error-rewrite' ;;
+        esac
+        grep -Fxq "$assertion" "$scratch/mutant-$mutation.log" || { echo "FAIL unrelated mutant failure: $mutation" >&2; exit 1; }
+        (cd "$source_root" && PATH="$test_base_path" WIP_HOOK_MUTATION_CHILD=1 WIP_HOOK_UNDER_TEST="$hook" "$BASH" "$source_root/tests/wip-backup-pre-push.sh") > "$scratch/fixed-$mutation.log" 2>&1 || { echo "FAIL fixed source after mutant: $mutation" >&2; exit 1; }
+    done
+fi
 printf '%s
 ' 'PASS actual hook backup/refusal fixture; no network push or live adoption'

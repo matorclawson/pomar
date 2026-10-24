@@ -33,3 +33,19 @@ then independently treat config-query errors as absence. Each must fail its
 intended refusal assertion, with the fixed source passing again. These controls
 and mutants have not been executed by this source contribution. Formatting,
 source commits and static review are not a harness, mutant or full-gate receipt.
+
+
+Every refusal case now binds its expected exact closed-hook diagnostic; success
+requires the backup-only marker as well as exit0. Ordinary Runtime refusal and
+Pomar's fixture make-verify invocation have separate exact boundary assertions.
+Deletion is checked before current-source equality so its control reaches the
+intended guard. A generic nonzero exit is never sufficient refusal evidence.
+
+After the full pristine suite passes, the harness makes private hook copies for
+two exact mutants: remove only the nonempty partial-record guard, or treat the
+three config-query errors as absence. Each child must fail the specific accepted
+bad-input assertion (valid-then-partial-mixed or config-read-error-rewrite).
+Unrelated parse/setup/other-guard failures refuse kill credit. The unchanged
+source suite must pass again after each mutant. These fixture-only hook-path
+selectors do not exist in the production hook or authorize live installation.
+No pristine or mutant result has been executed or accepted from this source edit.
