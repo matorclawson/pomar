@@ -630,3 +630,24 @@ func launchRootfsPostFlushChangeRetainsReceiptAndBlocksReplay(_ kind: String) th
         #expect(try Data(contentsOf: receipt) == retained)
     }
 }
+
+@Test func launchRootfsRejectsDirectoryEvenWithPrivateFileMode() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        let saved = directory.appendingPathComponent("retained-file.ext4")
+        try #require(rename(request.rootfs, saved.path) == 0)
+        try FileManager.default.createDirectory(atPath: request.rootfs,
+            withIntermediateDirectories: false, attributes: [.posixPermissions: 0o600])
+        defer {
+            chmod(request.rootfs, 0o700)
+            try? FileManager.default.removeItem(atPath: request.rootfs)
+            rename(saved.path, request.rootfs)
+        }
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "rootfs-kind",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-rootfs-kind.json").path))
+    }
+}
