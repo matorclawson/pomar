@@ -577,6 +577,16 @@ func launchRootfsRefusesInvalidDirectoryOrPath(_ kind: String) throws {
     }
 }
 
+// Untested guard: native self proc_pidinfo failure or short result (no kernel identity override).
+// Untested guard: native self PID mismatch (no process identity override).
+// Untested guard: native self UID mismatch (no caller identity override).
+// Untested guard: native self birth seconds equal zero (no kernel identity override).
+// Untested guard: foreign rootfs owner (no chown or alternate actor).
+// Untested guard: foreign parent owner (no chown or alternate actor).
+// Untested guard: early rootfs descriptor/path device mismatch (no production-reachable swap seam).
+// Untested guard: early rootfs descriptor/path inode mismatch (no production-reachable swap seam).
+// Untested independently: rootfs O_NOFOLLOW and early identity overlap for this symlink.
+// This is a combined refusal check, never independent mutant proof for either guard.
 @Test func launchRootfsRefusesSymlinkBeforeReceipt() throws {
     try withFenceIdentityFixture { request, _, directory in
         let (_, access) = try ownedLaunchExecutable(in: directory)
@@ -631,18 +641,27 @@ func launchRootfsPostFlushChangeRetainsReceiptAndBlocksReplay(_ kind: String) th
     }
 }
 
-@Test func launchRootfsRejectsDirectoryEvenWithPrivateFileMode() throws {
+@Test func launchRootfsRejectsSingleLinkFIFOWithPrivateFileMode() throws {
     try withFenceIdentityFixture { request, _, directory in
         let (_, access) = try ownedLaunchExecutable(in: directory)
         let saved = directory.appendingPathComponent("retained-file.ext4")
         try #require(rename(request.rootfs, saved.path) == 0)
-        try FileManager.default.createDirectory(atPath: request.rootfs,
-            withIntermediateDirectories: false, attributes: [.posixPermissions: 0o600])
         defer {
-            chmod(request.rootfs, 0o700)
-            try? FileManager.default.removeItem(atPath: request.rootfs)
+            unlink(request.rootfs)
             rename(saved.path, request.rootfs)
         }
+        try #require(mkfifo(request.rootfs, 0o600) == 0)
+        // Keep a reader/writer present: the production read-only FIFO open must
+        // not block. No process is spawned and no fixture executable is run.
+        let holder = Darwin.open(request.rootfs, O_RDWR | O_NONBLOCK | O_CLOEXEC)
+        try #require(holder >= 0)
+        defer { close(holder) }
+        var file = stat()
+        try #require(lstat(request.rootfs, &file) == 0)
+        try #require(file.st_mode & S_IFMT == S_IFIFO)
+        try #require(file.st_mode & 0o777 == 0o600)
+        try #require(file.st_uid == getuid())
+        try #require(file.st_nlink == 1)
         expectCustodyRefusal {
             try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
                 environment: request.environment, session: request.session, incarnation: "rootfs-kind",
