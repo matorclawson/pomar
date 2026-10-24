@@ -47,6 +47,10 @@ run() {
             [[ "$code" == 47 && -f "$TEST_MAKE_LOG" ]] && grep -qx verify "$TEST_MAKE_LOG" || { echo "FAIL ordinary gate boundary: $name" >&2; exit 1; }
             return
         fi
+        if grep -Fxq 'UNQUALIFIED WIP BACKUP ONLY: no gate, PR, merge or release acceptance.' "$scratch/stderr"; then
+            echo "FAIL refused case emitted backup success: $name" >&2; exit 1
+        fi
+        [[ ! -e "$TEST_MAKE_LOG" ]] || { echo "FAIL WIP refusal invoked ordinary gate: $name" >&2; exit 1; }
         if [[ -z "$expected" ]]; then
             case "$name" in
                 empty) expected='empty update stream' ;;
