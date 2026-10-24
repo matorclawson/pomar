@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import Testing
@@ -193,14 +194,37 @@ private func missingOwnExecutable() -> AgentFenceProbe.ProcessAccess {
     }
 }
 
+
+// An owned, inert file exercises the production file validation independently
+// of the foreign-owned SwiftPM host that loads this test image. Never executed.
+private func ownedLaunchExecutable(in directory: URL) throws -> (URL, AgentLaunchCustody.ExecutableAccess) {
+    let file = directory.appendingPathComponent("owned-executable")
+    try Data("owned inert executable fixture".utf8).write(to: file)
+    try #require(chmod(file.path, 0o700) == 0)
+    var access = AgentLaunchCustody.ExecutableAccess()
+    access.path = { file.path }
+    return (file, access)
+}
+
+private func expectExecutableRefusal(_ body: () throws -> Void) {
+    do { try body(); Issue.record("Unsafe executable observation was accepted") }
+    catch AgentLaunchCustody.Failure.executable(_) { }
+    catch { Issue.record("Wrong executable failure boundary: \(error)") }
+}
+
 @Test func launchCustodyIsPrivateExactAndNeverReplacesAnIncarnation() throws {
     try withFenceIdentityFixture { request, identity, directory in
-        try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+        let (executableFile, access) = try ownedLaunchExecutable(in: directory)
+        try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
             environment: request.environment, session: request.session, incarnation: request.incarnation,
-            sourceSHA: String(repeating: "a", count: 40))
+            sourceSHA: String(repeating: "a", count: 40), executable: access)
         let receipt = directory.appendingPathComponent("launch-custody-actor.json")
         let bytes = try Data(contentsOf: receipt)
         let object = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        #expect(object["helperExecutable"] as? String == executableFile.path)
+        #expect(object["helperFileSHA256"] as? String == "640213d502b9f6fd416891127273e2b21af3f9244512a08f1b24ddc842feb528")
+        #expect((object["helperPID"] as? NSNumber)?.int32Value == getpid())
+        #expect((object["observerUID"] as? NSNumber)?.uint32Value == getuid())
         #expect(object["stage"] as? String == "before-virtualization-create")
         #expect((object["helperBirthSeconds"] as? NSNumber)?.uint64Value == identity.pbi_start_tvsec)
         #expect((object["helperBirthMicroseconds"] as? NSNumber)?.uint64Value == identity.pbi_start_tvusec)
@@ -210,32 +234,39 @@ private func missingOwnExecutable() -> AgentFenceProbe.ProcessAccess {
         #expect(record.st_mode & 0o777 == 0o600)
         #expect((object["rootfsInode"] as? NSNumber)?.uint64Value == disk.st_ino)
         #expect(throws: AgentLaunchCustody.Failure.self) {
-            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
                 environment: "changed", session: request.session, incarnation: request.incarnation,
-                sourceSHA: String(repeating: "b", count: 40))
+                sourceSHA: String(repeating: "b", count: 40), executable: access)
         }
         #expect(try Data(contentsOf: receipt) == bytes)
     }
 }
 
+private func expectCustodyRefusal(_ body: () throws -> Void) {
+    do { try body(); Issue.record("Unsafe rootfs custody was accepted") }
+    catch AgentLaunchCustody.Failure.custody { }
+    catch { Issue.record("Wrong rootfs custody failure boundary: \(error)") }
+}
+
 @Test func launchCustodyRefusesPublicOrLinkedWorkspaceBeforeReceipt() throws {
     try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
         chmod(request.rootfs, 0o644)
         defer { chmod(request.rootfs, 0o600) }
-        #expect(throws: AgentLaunchCustody.Failure.self) {
-            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
                 environment: request.environment, session: request.session, incarnation: "public",
-                sourceSHA: String(repeating: "a", count: 40))
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
         }
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-public.json").path))
         chmod(request.rootfs, 0o600)
         let link = directory.appendingPathComponent("alias.ext4")
         #expect(Darwin.link(request.rootfs, link.path) == 0)
         defer { unlink(link.path) }
-        #expect(throws: AgentLaunchCustody.Failure.self) {
-            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
                 environment: request.environment, session: request.session, incarnation: "linked",
-                sourceSHA: String(repeating: "a", count: 40))
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
         }
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-linked.json").path))
     }
@@ -284,25 +315,29 @@ private func missingOwnExecutable() -> AgentFenceProbe.ProcessAccess {
 
 @Test func launchReceiptFullFlushFailureIsRetainedAndBlocksReplay() throws {
     try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
         for failOn in [1, 2] {
             let incarnation = "flush-\(failOn)"
             var calls = 0
             #expect(throws: AgentLaunchCustody.Failure.self) {
-                try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
                     environment: request.environment, session: request.session, incarnation: incarnation,
-                    sourceSHA: String(repeating: "a", count: 40), fullSync: { fd in
+                    sourceSHA: String(repeating: "a", count: 40), executable: access, fullSync: { fd in
                         calls += 1
                         if calls == failOn { errno = EIO; return -1 }
                         return fcntl(fd, F_FULLFSYNC)
                     })
             }
+            try #require(calls == failOn)
             let receipt = directory.appendingPathComponent("launch-custody-" + incarnation + ".json")
             #expect(FileManager.default.fileExists(atPath: receipt.path))
+            let retained = try Data(contentsOf: receipt)
             #expect(throws: AgentLaunchCustody.Failure.self) {
-                try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
                     environment: request.environment, session: request.session, incarnation: incarnation,
-                    sourceSHA: String(repeating: "a", count: 40))
+                    sourceSHA: String(repeating: "a", count: 40), executable: access)
             }
+            #expect(try Data(contentsOf: receipt) == retained)
         }
     }
 }
@@ -316,5 +351,348 @@ private func missingOwnExecutable() -> AgentFenceProbe.ProcessAccess {
         #expect(getuid() != 0)
         #expect(throws: (any Error).self) { try AgentFenceDiagnostic.run(request) }
         #expect(throws: (any Error).self) { try AgentFenceDiagnostic.readRequest(target.rootfs) }
+    }
+}
+
+// Record the actual test process executable rather than inferring it from the
+// package image or an installed helper with an unobserved relationship to it.
+@Test func nativeLaunchExecutableIdentityDiagnostic() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let path = try AgentLaunchCustody.observedExecutablePath()
+        var file = stat()
+        try #require(lstat(path, &file) == 0)
+        let regular = file.st_mode & S_IFMT == S_IFREG
+        let allowedOwner = file.st_uid == getuid() || file.st_uid == 0
+        let hash = regular && file.st_size > 0 && file.st_size <= 256 * 1024 * 1024
+            ? SHA256.hash(data: try Data(contentsOf: URL(fileURLWithPath: path)))
+                .map { String(format: "%02x", $0) }.joined() : "UNREAD"
+        print("NATIVE_EXECUTABLE_OBSERVATION path=\(path) uid=\(file.st_uid) caller=\(getuid()) mode=\(file.st_mode) nlink=\(file.st_nlink) bytes=\(file.st_size) sha256=\(hash) allowedOwner=\(allowedOwner)")
+        try #require(regular && file.st_size > 0 && file.st_size <= 256 * 1024 * 1024)
+        try #require(file.st_mode & 0o022 == 0 && file.st_nlink == 1)
+        if allowedOwner {
+            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "native-diagnostic",
+                sourceSHA: String(repeating: "a", count: 40))
+            let receipt = directory.appendingPathComponent("launch-custody-native-diagnostic.json")
+            let object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: receipt)) as? [String: Any])
+            #expect(object["helperExecutable"] as? String == path)
+            #expect(object["helperFileSHA256"] as? String == hash)
+        } else {
+            do {
+                try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                    environment: request.environment, session: request.session, incarnation: "native-diagnostic",
+                    sourceSHA: String(repeating: "a", count: 40))
+                Issue.record("Native foreign-owner executable was accepted")
+            } catch AgentLaunchCustody.Failure.executable(let evidence) {
+                // A nonexistent/alternate path and unrelated executable failure
+                // must not impersonate dispatch to this actual native observer.
+                #expect(evidence.path == path)
+                #expect(evidence.predicate == .owner)
+                #expect(evidence.fileOwner == file.st_uid)
+                #expect(evidence.callerUID == getuid())
+            } catch { Issue.record("Wrong native failure boundary: \(error)") }
+        }
+    }
+}
+
+@Test(arguments: ["directory", "symlink", "group-writable", "other-writable", "hardlink"])
+func launchExecutableFilePolicyRefusesUnsafeFiles(_ kind: String) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (file, original) = try ownedLaunchExecutable(in: directory)
+        var access = original
+        switch kind {
+        case "directory": access.path = { directory.path }
+        case "symlink":
+            let alias = directory.appendingPathComponent("alias-executable")
+            try #require(symlink(file.path, alias.path) == 0)
+            access.path = { alias.path }
+        case "group-writable": try #require(chmod(file.path, 0o720) == 0)
+        case "other-writable": try #require(chmod(file.path, 0o702) == 0)
+        case "hardlink": try #require(Darwin.link(file.path, directory.appendingPathComponent("hardlink").path) == 0)
+        default: Issue.record("Unknown fixture")
+        }
+        expectExecutableRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "file-policy",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-file-policy.json").path))
+    }
+}
+
+@Test func launchExecutableNoFollowRejectsSameInodeBehindNewSymlink() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (file, original) = try ownedLaunchExecutable(in: directory)
+        var access = original
+        let moved = directory.appendingPathComponent("moved-original")
+        var transitioned = false
+        access.openDescriptor = { path, flags in
+            guard rename(path, moved.path) == 0, symlink(moved.path, path) == 0 else { return -1 }
+            transitioned = true
+            return Darwin.open(path, flags)
+        }
+        expectExecutableRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "nofollow",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        try #require(transitioned)
+        #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+}
+
+@Test func launchExecutableRefusesReplacementInodeBeforeOpen() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, original) = try ownedLaunchExecutable(in: directory)
+        var access = original
+        var replaced = false
+        access.openDescriptor = { path, flags in
+            guard rename(path, directory.appendingPathComponent("old-inode").path) == 0 else { return -1 }
+            do { try Data("owned inert executable fixture".utf8).write(to: URL(fileURLWithPath: path)) }
+            catch { return -1 }
+            guard chmod(path, 0o700) == 0 else { return -1 }
+            replaced = true
+            return Darwin.open(path, flags)
+        }
+        expectExecutableRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "inode",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        try #require(replaced)
+    }
+}
+
+@Test(arguments: ["device", "short-read", "mtime"])
+func launchExecutableRefusesChangedOrIncompleteObservation(_ kind: String) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (file, original) = try ownedLaunchExecutable(in: directory)
+        var access = original
+        var calls = 0
+        if kind == "short-read" || kind == "device" {
+            access.metadata = { path, data in
+                let result = Darwin.lstat(path, data)
+                if result == 0 && kind == "short-read" { data.pointee.st_size += 1 }
+                if result == 0 && kind == "device" { data.pointee.st_dev ^= 1 }
+                return result
+            }
+        }
+        access.descriptorMetadata = { fd, data in
+            calls += 1
+            if kind == "mtime" && calls == 2 {
+                do { try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1234567890)], ofItemAtPath: file.path) }
+                catch { Issue.record("Could not change owned fixture mtime: \(error)") }
+            }
+            let result = Darwin.fstat(fd, data)
+            if result == 0 && kind == "short-read" { data.pointee.st_size += 1 }
+            return result
+        }
+        expectExecutableRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "observation",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(calls > 0)
+    }
+}
+
+@Test(arguments: [1, 2])
+func launchReceiptSyncFailureRetainsBytesAndBlocksReplay(_ failOn: Int) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        var calls = 0
+        do {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "fsync",
+                sourceSHA: String(repeating: "a", count: 40), executable: access,
+                fileSync: { fd in
+                    calls += 1
+                    if calls == failOn { errno = EIO; return -1 }
+                    return Darwin.fsync(fd)
+                })
+            Issue.record("Failed native sync was accepted")
+        } catch AgentLaunchCustody.Failure.persistence { }
+        catch { Issue.record("Wrong sync failure boundary: \(error)") }
+        try #require(calls == failOn)
+        let receipt = directory.appendingPathComponent("launch-custody-fsync.json")
+        let retained = try Data(contentsOf: receipt)
+        #expect(!retained.isEmpty)
+        #expect(throws: AgentLaunchCustody.Failure.self) {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "fsync",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(try Data(contentsOf: receipt) == retained)
+    }
+}
+
+@Test(arguments: ["directory", "empty", "oversize"])
+func launchExecutableRejectsInvalidKindOrSizeBeforeOpen(_ kind: String) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (file, original) = try ownedLaunchExecutable(in: directory)
+        var access = original
+        if kind == "directory" { access.path = { directory.path } }
+        else {
+            let handle = try FileHandle(forWritingTo: file)
+            // Sparse oversize fixture: no large allocation, read or execution.
+            try handle.truncate(atOffset: kind == "empty" ? 0 : 256 * 1024 * 1024 + 1)
+            try handle.close()
+        }
+        var opened = false
+        access.openDescriptor = { _, _ in
+            opened = true
+            Issue.record("Invalid executable kind or size reached open")
+            return -1
+        }
+        expectExecutableRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "pre-open",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!opened)
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-pre-open.json").path))
+    }
+}
+
+@Test(arguments: ["directory-mode", "path"])
+func launchRootfsRefusesInvalidDirectoryOrPath(_ kind: String) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        var rootfs = request.rootfs
+        if kind == "directory-mode" {
+            try #require(chmod(directory.path, 0o770) == 0)
+        } else {
+            let alternate = directory.appendingPathComponent("alternate.ext4")
+            try Data("retained writer fixture".utf8).write(to: alternate)
+            try #require(chmod(alternate.path, 0o600) == 0)
+            rootfs = alternate.path
+        }
+        defer { chmod(directory.path, 0o700) }
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: rootfs,
+                environment: request.environment, session: request.session, incarnation: "rootfs-boundary",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-rootfs-boundary.json").path))
+    }
+}
+
+// Untested guard: native self proc_pidinfo failure or short result (no kernel identity override).
+// Untested guard: native self PID mismatch (no process identity override).
+// Untested guard: native self UID mismatch (no caller identity override).
+// Untested guard: native self birth seconds equal zero (no kernel identity override).
+// Untested guard: foreign rootfs owner (no chown or alternate actor).
+// Untested guard: foreign parent owner (no chown or alternate actor).
+// Untested guard: early rootfs descriptor/path device mismatch (no production-reachable swap seam).
+// Untested guard: early rootfs descriptor/path inode mismatch (no production-reachable swap seam).
+// The full-entry symlink refusal overlaps O_NOFOLLOW and early identity.
+// O_NOFOLLOW has a separate direct test of the fixed native operation below;
+// this full-entry check is never separate mutant proof for early identity.
+@Test func launchRootfsRefusesSymlinkBeforeReceipt() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        let retained = directory.appendingPathComponent("retained-original.ext4")
+        try #require(rename(request.rootfs, retained.path) == 0)
+        try #require(symlink(retained.path, request.rootfs) == 0)
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "rootfs-symlink",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-rootfs-symlink.json").path))
+    }
+}
+
+@Test(arguments: ["inode", "mode"])
+func launchRootfsPostFlushChangeRetainsReceiptAndBlocksReplay(_ kind: String) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        var changed = false
+        do {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "post-flush",
+                sourceSHA: String(repeating: "a", count: 40), executable: access,
+                fullSync: { fd in
+                    let result = fcntl(fd, F_FULLFSYNC)
+                    if result == 0 && !changed {
+                        if kind == "inode" {
+                            guard rename(request.rootfs, directory.appendingPathComponent("pre-flush.ext4").path) == 0 else { return -1 }
+                            do { try Data("retained writer fixture".utf8).write(to: URL(fileURLWithPath: request.rootfs)) }
+                            catch { return -1 }
+                        }
+                        guard chmod(request.rootfs, kind == "mode" ? 0o644 : 0o600) == 0 else { return -1 }
+                        changed = true
+                    }
+                    return result
+                })
+            Issue.record("Changed rootfs custody was accepted")
+        } catch AgentLaunchCustody.Failure.persistence { }
+        catch { Issue.record("Wrong post-flush failure boundary: \(error)") }
+        try #require(changed)
+        try #require(chmod(request.rootfs, 0o600) == 0)
+        let receipt = directory.appendingPathComponent("launch-custody-post-flush.json")
+        let retained = try Data(contentsOf: receipt)
+        #expect(!retained.isEmpty)
+        #expect(throws: AgentLaunchCustody.Failure.self) {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "post-flush",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(try Data(contentsOf: receipt) == retained)
+    }
+}
+
+@Test func launchRootfsRejectsSingleLinkFIFOWithPrivateFileMode() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (_, access) = try ownedLaunchExecutable(in: directory)
+        let saved = directory.appendingPathComponent("retained-file.ext4")
+        try #require(rename(request.rootfs, saved.path) == 0)
+        defer {
+            unlink(request.rootfs)
+            rename(saved.path, request.rootfs)
+        }
+        try #require(mkfifo(request.rootfs, 0o600) == 0)
+        // Keep a reader/writer present: the production read-only FIFO open must
+        // not block. No process is spawned and no fixture executable is run.
+        let holder = Darwin.open(request.rootfs, O_RDWR | O_NONBLOCK | O_CLOEXEC)
+        try #require(holder >= 0)
+        defer { close(holder) }
+        var file = stat()
+        try #require(lstat(request.rootfs, &file) == 0)
+        try #require(file.st_mode & S_IFMT == S_IFIFO)
+        try #require(file.st_mode & 0o777 == 0o600)
+        try #require(file.st_uid == getuid())
+        try #require(file.st_nlink == 1)
+        expectCustodyRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "rootfs-kind",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-rootfs-kind.json").path))
+    }
+}
+
+@Test func launchRootfsNativeOpenRefusesSymlinkToValidOwnedFile() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        var file = stat()
+        try #require(lstat(request.rootfs, &file) == 0)
+        try #require(file.st_mode & S_IFMT == S_IFREG)
+        try #require(file.st_mode & 0o777 == 0o600)
+        try #require(file.st_uid == getuid())
+        try #require(file.st_nlink == 1)
+        let alias = directory.appendingPathComponent("rootfs-native-alias")
+        try #require(symlink(request.rootfs, alias.path) == 0)
+        defer { unlink(alias.path) }
+        // Exercise the exact fixed native operation used by the production
+        // entry, before any subsequent path/descriptor identity comparison.
+        let opened = AgentLaunchCustody.openRootfsDescriptor(alias.path)
+        if opened >= 0 { close(opened) }
+        #expect(opened < 0, "Native rootfs nofollow accepted a symlink to a valid owned file")
+        let direct = AgentLaunchCustody.openRootfsDescriptor(request.rootfs)
+        try #require(direct >= 0)
+        defer { close(direct) }
+        var observed = stat()
+        try #require(fstat(direct, &observed) == 0)
+        #expect(observed.st_dev == file.st_dev && observed.st_ino == file.st_ino)
     }
 }

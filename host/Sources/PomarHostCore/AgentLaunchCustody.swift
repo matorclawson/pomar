@@ -25,18 +25,69 @@ enum AgentLaunchCustody {
         let rootfsBytes: Int64
         let stage = "before-virtualization-create"
     }
-    enum Failure: Error { case custody, identity, executable, persistence }
+    // Failure evidence is output only; it is never an authorization input.
+    struct ExecutableFailureEvidence: Sendable {
+        enum Predicate: String, Sendable, Equatable { case nativePath, metadata, open, identity, owner, policy, readBound, consistency }
+        let path: String?
+        let predicate: Predicate
+        let fileOwner: uid_t?
+        let callerUID: uid_t
+    }
+    enum Failure: Error {
+        case custody, identity, persistence
+        case executable(ExecutableFailureEvidence)
+    }
+
+    private static func executableFailure(_ predicate: ExecutableFailureEvidence.Predicate,
+                                          path: String?, fileOwner: uid_t? = nil) -> Failure {
+        .executable(ExecutableFailureEvidence(path: path, predicate: predicate,
+            fileOwner: fileOwner, callerUID: getuid()))
+    }
+
+    // A native observation, not a trust or authorization decision.
+    static func observedExecutablePath() throws -> String {
+        var path = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { throw executableFailure(.nativePath, path: nil) }
+        return String(cString: path)
+    }
+
+    // Internal raw observations only. Every value still passes the checks below;
+    // no observer returns an approval, Record, process identity or trust decision.
+    struct ExecutableAccess {
+        var path: () throws -> String = AgentLaunchCustody.observedExecutablePath
+        var metadata: (String, UnsafeMutablePointer<stat>) -> Int32 = { Darwin.lstat($0, $1) }
+        var openDescriptor: (String, Int32) -> Int32 = { Darwin.open($0, $1) }
+        var descriptorMetadata: (Int32, UnsafeMutablePointer<stat>) -> Int32 = { Darwin.fstat($0, $1) }
+    }
 
     static func write(directory: String, rootfs: String, environment: String,
                       session: String, incarnation: String, sourceSHA: String,
                       fullSync: (Int32) -> Int32 = { fcntl($0, F_FULLFSYNC) }) throws {
+        try writeObserved(directory: directory, rootfs: rootfs, environment: environment,
+            session: session, incarnation: incarnation, sourceSHA: sourceSHA,
+            executable: ExecutableAccess(), fullSync: fullSync)
+    }
+
+    // Fixed native operation shared by production and its direct refusal test.
+    // No callback or configurable path to the production entry is introduced.
+    static func openRootfsDescriptor(_ path: String) -> Int32 {
+        Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    }
+
+    // Fixture entry is internal and has no runtime/config/environment binding.
+    // Native PID, UID and birth, all file predicates and persistence are shared.
+    static func writeObserved(directory: String, rootfs: String, environment: String,
+                              session: String, incarnation: String, sourceSHA: String,
+                              executable access: ExecutableAccess,
+                              fullSync: (Int32) -> Int32 = { fcntl($0, F_FULLFSYNC) },
+                              fileSync: (Int32) -> Int32 = { Darwin.fsync($0) }) throws {
         var parent = stat()
         guard lstat(directory, &parent) == 0, parent.st_mode & S_IFMT == S_IFDIR,
               parent.st_uid == getuid(), parent.st_mode & 0o077 == 0,
               rootfs == directory + "/workspace.ext4",
               !incarnation.isEmpty, incarnation.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") })
         else { throw Failure.custody }
-        let fd = open(rootfs, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let fd = openRootfsDescriptor(rootfs)
         guard fd >= 0 else { throw Failure.custody }
         defer { close(fd) }
         var disk = stat(), current = stat()
@@ -49,32 +100,33 @@ enum AgentLaunchCustody {
         guard proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &identity, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size,
               identity.pbi_pid == UInt32(getpid()), identity.pbi_uid == getuid(), identity.pbi_start_tvsec > 0
         else { throw Failure.identity }
-        var path = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { throw Failure.executable }
-        let executable = String(cString: path)
+        let executable = try access.path()
         var exe = stat()
-        guard lstat(executable, &exe) == 0, exe.st_mode & S_IFMT == S_IFREG,
-              exe.st_size > 0, exe.st_size <= 256 * 1024 * 1024 else { throw Failure.executable }
-        let exeFD = open(executable, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard exeFD >= 0 else { throw Failure.executable }
+        guard access.metadata(executable, &exe) == 0, exe.st_mode & S_IFMT == S_IFREG,
+              exe.st_size > 0, exe.st_size <= 256 * 1024 * 1024 else { throw executableFailure(.metadata, path: executable) }
+        let exeFD = access.openDescriptor(executable, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard exeFD >= 0 else { throw executableFailure(.open, path: executable) }
         let exeHandle = FileHandle(fileDescriptor: exeFD, closeOnDealloc: true)
         defer { try? exeHandle.close() }
         var openedExe = stat(), afterExe = stat()
-        guard fstat(exeFD, &openedExe) == 0, openedExe.st_dev == exe.st_dev, openedExe.st_ino == exe.st_ino,
-              openedExe.st_uid == getuid() || openedExe.st_uid == 0,
-              openedExe.st_mode & 0o022 == 0, openedExe.st_nlink == 1 else { throw Failure.executable }
+        guard access.descriptorMetadata(exeFD, &openedExe) == 0, openedExe.st_dev == exe.st_dev, openedExe.st_ino == exe.st_ino
+        else { throw executableFailure(.identity, path: executable) }
+        guard openedExe.st_uid == getuid() || openedExe.st_uid == 0
+        else { throw executableFailure(.owner, path: executable, fileOwner: openedExe.st_uid) }
+        guard openedExe.st_mode & 0o022 == 0, openedExe.st_nlink == 1
+        else { throw executableFailure(.policy, path: executable) }
         var hasher = SHA256()
         var executableBytes = 0
         while let chunk = try exeHandle.read(upToCount: 65536), !chunk.isEmpty {
             executableBytes += chunk.count
-            guard executableBytes <= openedExe.st_size else { throw Failure.executable }
+            guard executableBytes <= openedExe.st_size else { throw executableFailure(.readBound, path: executable) }
             hasher.update(data: chunk)
         }
-        guard executableBytes == openedExe.st_size, fstat(exeFD, &afterExe) == 0,
+        guard executableBytes == openedExe.st_size, access.descriptorMetadata(exeFD, &afterExe) == 0,
               afterExe.st_dev == openedExe.st_dev, afterExe.st_ino == openedExe.st_ino,
               afterExe.st_size == openedExe.st_size,
               afterExe.st_mtimespec.tv_sec == openedExe.st_mtimespec.tv_sec,
-              afterExe.st_mtimespec.tv_nsec == openedExe.st_mtimespec.tv_nsec else { throw Failure.executable }
+              afterExe.st_mtimespec.tv_nsec == openedExe.st_mtimespec.tv_nsec else { throw executableFailure(.consistency, path: executable) }
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         let record = Record(environment: environment, session: session, incarnation: incarnation,
             sourceSHA: sourceSHA, observedAt: ISO8601DateFormatter().string(from: Date()), observerUID: getuid(),
@@ -97,12 +149,12 @@ enum AgentLaunchCustody {
                 offset += n
             }
         }
-        guard fsync(output) == 0, fullSync(output) == 0, lstat(rootfs, &current) == 0,
+        guard fileSync(output) == 0, fullSync(output) == 0, lstat(rootfs, &current) == 0,
               current.st_dev == disk.st_dev, current.st_ino == disk.st_ino,
               current.st_uid == disk.st_uid, current.st_mode & 0o777 == 0o600 else { throw Failure.persistence }
         let directoryFD = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directoryFD >= 0 else { throw Failure.persistence }
         defer { close(directoryFD) }
-        guard fsync(directoryFD) == 0, fullSync(directoryFD) == 0 else { throw Failure.persistence }
+        guard fileSync(directoryFD) == 0, fullSync(directoryFD) == 0 else { throw Failure.persistence }
     }
 }
