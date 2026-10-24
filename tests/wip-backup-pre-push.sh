@@ -73,6 +73,70 @@ run() {
     fi
 }
 run own-fork-owner-backup pass "$scratch/valid"
+# Reproduce Git's hook environment using private source repositories only.
+# The first descendant tool creates another repository: inherited Git-local
+# variables must not redirect its administrative files into the source.
+real_head=$(command -v head)
+cat > "$scratch/tools/head" <<'ENV_HEAD'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${WIP_ENV_TARGET:-}" ]]; then
+    for name in $WIP_ENV_NAMES; do
+        if declare -p "$name" >/dev/null 2>&1; then
+            echo "FAIL inherited Git-local environment reached descendant: $name" >&2
+            exit 93
+        fi
+    done
+    git -C "$WIP_ENV_TARGET" init -q
+fi
+exec "$WIP_REAL_HEAD" "$@"
+ENV_HEAD
+chmod +x "$scratch/tools/head"
+export WIP_REAL_HEAD="$real_head"
+env_source=$scratch/env-source
+git clone -q --no-hardlinks "$fixture" "$env_source"
+git -C "$env_source" remote set-url origin "$url"
+git -C "$env_source" worktree add -q --detach "$scratch/env-linked" HEAD
+git_local_names=$(git rev-parse --local-env-vars)
+source_snapshot() {
+    git -C "$env_source" rev-parse HEAD
+    git -C "$env_source" for-each-ref --format='%(refname) %(objectname)'
+    git hash-object "$env_source/.git/config" "$env_source/.git/index"
+    if [[ -e "$env_source/.git/worktrees/env-linked/index" ]]; then
+        git hash-object "$env_source/.git/worktrees/env-linked/index"
+    fi
+}
+for env_kind in clone linked; do
+    if [[ "$env_kind" == clone ]]; then
+        env_work=$env_source
+        env_git=$env_source/.git
+    else
+        env_work=$scratch/env-linked
+        env_git=$env_source/.git/worktrees/env-linked
+    fi
+    # Detached linked worktree cannot enter the WIP guard: attach its own safe
+    # branch, then bind that exact same-name ref for the regression invocation.
+    git -C "$env_work" checkout -q -B "zeo-rt/wip/env-$env_kind"
+    env_oid=$(git -C "$env_work" rev-parse HEAD)
+    env_ref=$(git -C "$env_work" symbolic-ref HEAD)
+    printf '%s %s %s %s\n' "$env_ref" "$env_oid" "$env_ref" "$zero" > "$scratch/env-input"
+    mkdir "$scratch/env-target-$env_kind"
+    source_snapshot > "$scratch/env-before"
+    if (cd "$env_work" && GIT_DIR="$env_git" GIT_WORK_TREE="$env_work" \
+        GIT_COMMON_DIR="$env_source/.git" GIT_INDEX_FILE="$env_git/index" \
+        WIP_ENV_NAMES="$git_local_names" WIP_ENV_TARGET="$scratch/env-target-$env_kind" \
+        "$hook" origin "$url" < "$scratch/env-input") > "$scratch/env-out" 2> "$scratch/env-err"; then
+        :
+    else
+        cat "$scratch/env-err" >&2
+        echo "FAIL Git-local sanitization: $env_kind" >&2; exit 1
+    fi
+    [[ -d "$scratch/env-target-$env_kind/.git" ]] || { echo "FAIL foreign fixture administrative directory: $env_kind" >&2; exit 1; }
+    source_snapshot > "$scratch/env-after"
+    cmp -s "$scratch/env-before" "$scratch/env-after" || { echo "FAIL source HEAD/refs/index/config changed: $env_kind" >&2; exit 1; }
+done
+unset WIP_REAL_HEAD
+rm "$scratch/tools/head"
 run_guard() {
     local name=$1 input=$2 expected=$3
     run "$name" refuse "$input" "$url" "$expected"
@@ -267,9 +331,10 @@ rm -f "$TEST_MAKE_LOG"
 # Optional paths below are fixture-only; production hooks never read these
 # variables. Child runs avoid recursive mutation and restore the actual source.
 if [[ "${WIP_HOOK_MUTATION_CHILD:-0}" != 1 ]]; then
-    for mutation in eof config seat destination nonff deletion second topic; do
+    for mutation in eof config seat destination nonff deletion second topic git_env; do
         mutant=$scratch/hook-$mutation
         awk -v target="$mutation" '
+            target == "git_env" && $0 == "unset $git_local_env" { print "# sanitization deliberately removed"; changed++; next }
             target == "eof" && index($0, "partial or unreadable update record") { print "        :"; changed++; next }
             target == "config" && index($0, "[[ \"$config_status\" == 1 ]]") { print "        :"; changed++; next }
             target == "seat" && index($0, "owner mapping unavailable") { print "        *) role=${ZMAIL_INSTANCE:-} ;;"; changed++; next }
@@ -279,7 +344,7 @@ if [[ "${WIP_HOOK_MUTATION_CHILD:-0}" != 1 ]]; then
             target == "second" && index($0, "backup_refused \"exactly one backup update required\"") { print "    :"; changed++; next }
             target == "topic" && index($0, "backup_refused \"topic syntax refused\"") { print "        :"; changed++; next }
             { print }
-            END { if ((target == "eof" && changed != 1) || (target == "config" && changed != 3) || (target == "seat" && changed != 1) || (target == "destination" && changed != 1) || (target == "nonff" && changed != 1) || (target == "deletion" && changed != 1) || (target == "second" && changed != 1) || (target == "topic" && changed != 1)) exit 2 }
+            END { if ((target == "git_env" && changed != 1) || (target == "eof" && changed != 1) || (target == "config" && changed != 3) || (target == "seat" && changed != 1) || (target == "destination" && changed != 1) || (target == "nonff" && changed != 1) || (target == "deletion" && changed != 1) || (target == "second" && changed != 1) || (target == "topic" && changed != 1)) exit 2 }
         ' "$hook" > "$mutant" || { echo "FAIL mutant source mismatch: $mutation" >&2; exit 1; }
         chmod +x "$mutant"
         if (cd "$source_root" && PATH="$test_base_path" WIP_HOOK_MUTATION_CHILD=1 WIP_HOOK_UNDER_TEST="$mutant" "$BASH" "$source_root/tests/wip-backup-pre-push.sh") > "$scratch/mutant-$mutation.log" 2>&1; then
@@ -294,6 +359,7 @@ if [[ "${WIP_HOOK_MUTATION_CHILD:-0}" != 1 ]]; then
             deletion) assertion='FAIL exception admitted: delete' ;;
             second) assertion='FAIL exception admitted: second-update-mutant-control' ;;
             topic) assertion='FAIL exception admitted: invalid-topic-Upper' ;;
+            git_env) assertion='FAIL Git-local sanitization: clone' ;;
         esac
         grep -Fxq "$assertion" "$scratch/mutant-$mutation.log" || { echo "FAIL unrelated mutant failure: $mutation" >&2; exit 1; }
         (cd "$source_root" && PATH="$test_base_path" WIP_HOOK_MUTATION_CHILD=1 WIP_HOOK_UNDER_TEST="$hook" "$BASH" "$source_root/tests/wip-backup-pre-push.sh") > "$scratch/fixed-$mutation.log" 2>&1 || { echo "FAIL fixed source after mutant: $mutation" >&2; exit 1; }

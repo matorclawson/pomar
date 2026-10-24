@@ -7,6 +7,12 @@ set -euo pipefail
 backup_refused() { echo "WIP BACKUP REFUSED: $1" >&2; exit 1; }
 root=$(git rev-parse --show-toplevel) || exit 1
 cd "$root"
+# Git exports repository-local variables into hooks. Resolve the source first,
+# then remove those names before any gate or foreign-repository subprocess.
+# Otherwise git -C in a test fixture can mutate the source repository instead.
+git_local_env=$(git rev-parse --local-env-vars) || backup_refused "Git environment names unavailable"
+# Intentional splitting: Git returns trusted variable NAMES, never their values.
+unset $git_local_env
 # Capture a bounded complete stream first. A failed read must not masquerade
 # as clean EOF after earlier valid updates. This is private scratch, not source.
 umask 077

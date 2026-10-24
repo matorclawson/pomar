@@ -113,3 +113,16 @@ All these controls remain AUTHORED, NOT_RUN until permitted execution.
 The next owning SOW done_when must require actual LIVE backup proof: owner
 remote WIP ref equals exact intended full H. Adoption, documentation merge,
 source agreement or a gate alone cannot satisfy this criterion.
+
+## Git hook environment containment
+
+After resolving and entering the source root, the hook obtains variable names
+from `git rev-parse --local-env-vars` and unsets all of them before descendant
+tools or the ordinary gate. This prevents inherited `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_COMMON_DIR` and `GIT_INDEX_FILE` from redirecting foreign fixture operations
+into the source repository. Failure to enumerate names refuses the operation.
+The harness covers a plain clone and linked worktree, requires a separate
+fixture administrative directory and unchanged source HEAD, refs, index and
+configuration, and removes sanitization for an intended-failure mutant followed
+by a pristine restored control. Authored controls require actual qualification;
+source inspection alone does not establish that they passed.
