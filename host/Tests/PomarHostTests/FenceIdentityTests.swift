@@ -208,7 +208,7 @@ private func ownedLaunchExecutable(in directory: URL) throws -> (URL, AgentLaunc
 
 private func expectExecutableRefusal(_ body: () throws -> Void) {
     do { try body(); Issue.record("Unsafe executable observation was accepted") }
-    catch AgentLaunchCustody.Failure.executable { }
+    catch AgentLaunchCustody.Failure.executable(_) { }
     catch { Issue.record("Wrong executable failure boundary: \(error)") }
 }
 
@@ -376,8 +376,13 @@ private func expectExecutableRefusal(_ body: () throws -> Void) {
                     environment: request.environment, session: request.session, incarnation: "native-diagnostic",
                     sourceSHA: String(repeating: "a", count: 40))
                 Issue.record("Native foreign-owner executable was accepted")
-            } catch AgentLaunchCustody.Failure.executable {
-                // Exact native guard refusal, not a setup/persistence error.
+            } catch AgentLaunchCustody.Failure.executable(let evidence) {
+                // A nonexistent/alternate path and unrelated executable failure
+                // must not impersonate dispatch to this actual native observer.
+                #expect(evidence.path == path)
+                #expect(evidence.predicate == .owner)
+                #expect(evidence.fileOwner == file.st_uid)
+                #expect(evidence.callerUID == getuid())
             } catch { Issue.record("Wrong native failure boundary: \(error)") }
         }
     }

@@ -25,12 +25,29 @@ enum AgentLaunchCustody {
         let rootfsBytes: Int64
         let stage = "before-virtualization-create"
     }
-    enum Failure: Error { case custody, identity, executable, persistence }
+    // Failure evidence is output only; it is never an authorization input.
+    struct ExecutableFailureEvidence: Sendable {
+        enum Predicate: String, Sendable, Equatable { case nativePath, metadata, open, identity, owner, policy, readBound, consistency }
+        let path: String?
+        let predicate: Predicate
+        let fileOwner: uid_t?
+        let callerUID: uid_t
+    }
+    enum Failure: Error {
+        case custody, identity, persistence
+        case executable(ExecutableFailureEvidence)
+    }
+
+    private static func executableFailure(_ predicate: ExecutableFailureEvidence.Predicate,
+                                          path: String?, fileOwner: uid_t? = nil) -> Failure {
+        .executable(ExecutableFailureEvidence(path: path, predicate: predicate,
+            fileOwner: fileOwner, callerUID: getuid()))
+    }
 
     // A native observation, not a trust or authorization decision.
     static func observedExecutablePath() throws -> String {
         var path = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { throw Failure.executable }
+        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { throw executableFailure(.nativePath, path: nil) }
         return String(cString: path)
     }
 
@@ -80,27 +97,30 @@ enum AgentLaunchCustody {
         let executable = try access.path()
         var exe = stat()
         guard access.metadata(executable, &exe) == 0, exe.st_mode & S_IFMT == S_IFREG,
-              exe.st_size > 0, exe.st_size <= 256 * 1024 * 1024 else { throw Failure.executable }
+              exe.st_size > 0, exe.st_size <= 256 * 1024 * 1024 else { throw executableFailure(.metadata, path: executable) }
         let exeFD = access.openDescriptor(executable, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard exeFD >= 0 else { throw Failure.executable }
+        guard exeFD >= 0 else { throw executableFailure(.open, path: executable) }
         let exeHandle = FileHandle(fileDescriptor: exeFD, closeOnDealloc: true)
         defer { try? exeHandle.close() }
         var openedExe = stat(), afterExe = stat()
-        guard access.descriptorMetadata(exeFD, &openedExe) == 0, openedExe.st_dev == exe.st_dev, openedExe.st_ino == exe.st_ino,
-              openedExe.st_uid == getuid() || openedExe.st_uid == 0,
-              openedExe.st_mode & 0o022 == 0, openedExe.st_nlink == 1 else { throw Failure.executable }
+        guard access.descriptorMetadata(exeFD, &openedExe) == 0, openedExe.st_dev == exe.st_dev, openedExe.st_ino == exe.st_ino
+        else { throw executableFailure(.identity, path: executable) }
+        guard openedExe.st_uid == getuid() || openedExe.st_uid == 0
+        else { throw executableFailure(.owner, path: executable, fileOwner: openedExe.st_uid) }
+        guard openedExe.st_mode & 0o022 == 0, openedExe.st_nlink == 1
+        else { throw executableFailure(.policy, path: executable) }
         var hasher = SHA256()
         var executableBytes = 0
         while let chunk = try exeHandle.read(upToCount: 65536), !chunk.isEmpty {
             executableBytes += chunk.count
-            guard executableBytes <= openedExe.st_size else { throw Failure.executable }
+            guard executableBytes <= openedExe.st_size else { throw executableFailure(.readBound, path: executable) }
             hasher.update(data: chunk)
         }
         guard executableBytes == openedExe.st_size, access.descriptorMetadata(exeFD, &afterExe) == 0,
               afterExe.st_dev == openedExe.st_dev, afterExe.st_ino == openedExe.st_ino,
               afterExe.st_size == openedExe.st_size,
               afterExe.st_mtimespec.tv_sec == openedExe.st_mtimespec.tv_sec,
-              afterExe.st_mtimespec.tv_nsec == openedExe.st_mtimespec.tv_nsec else { throw Failure.executable }
+              afterExe.st_mtimespec.tv_nsec == openedExe.st_mtimespec.tv_nsec else { throw executableFailure(.consistency, path: executable) }
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         let record = Record(environment: environment, session: session, incarnation: incarnation,
             sourceSHA: sourceSHA, observedAt: ISO8601DateFormatter().string(from: Date()), observerUID: getuid(),
