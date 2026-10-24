@@ -27,6 +27,13 @@ enum AgentLaunchCustody {
     }
     enum Failure: Error { case custody, identity, executable, persistence }
 
+    // A native observation, not a trust or authorization decision.
+    static func observedExecutablePath() throws -> String {
+        var path = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { throw Failure.executable }
+        return String(cString: path)
+    }
+
     static func write(directory: String, rootfs: String, environment: String,
                       session: String, incarnation: String, sourceSHA: String,
                       fullSync: (Int32) -> Int32 = { fcntl($0, F_FULLFSYNC) }) throws {
@@ -49,9 +56,7 @@ enum AgentLaunchCustody {
         guard proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &identity, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size,
               identity.pbi_pid == UInt32(getpid()), identity.pbi_uid == getuid(), identity.pbi_start_tvsec > 0
         else { throw Failure.identity }
-        var path = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(getpid(), &path, UInt32(path.count)) > 0 else { throw Failure.executable }
-        let executable = String(cString: path)
+        let executable = try observedExecutablePath()
         var exe = stat()
         guard lstat(executable, &exe) == 0, exe.st_mode & S_IFMT == S_IFREG,
               exe.st_size > 0, exe.st_size <= 256 * 1024 * 1024 else { throw Failure.executable }

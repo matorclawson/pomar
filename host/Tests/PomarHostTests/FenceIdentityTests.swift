@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import Testing
@@ -316,5 +317,37 @@ private func missingOwnExecutable() -> AgentFenceProbe.ProcessAccess {
         #expect(getuid() != 0)
         #expect(throws: (any Error).self) { try AgentFenceDiagnostic.run(request) }
         #expect(throws: (any Error).self) { try AgentFenceDiagnostic.readRequest(target.rootfs) }
+    }
+}
+
+// Record the actual test process executable rather than inferring it from the
+// package image or an installed helper with an unobserved relationship to it.
+@Test func nativeLaunchExecutableIdentityDiagnostic() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let path = try AgentLaunchCustody.observedExecutablePath()
+        var file = stat()
+        try #require(lstat(path, &file) == 0)
+        let regular = file.st_mode & S_IFMT == S_IFREG
+        let allowedOwner = file.st_uid == getuid() || file.st_uid == 0
+        let hash = regular && file.st_size > 0 && file.st_size <= 256 * 1024 * 1024
+            ? SHA256.hash(data: try Data(contentsOf: URL(fileURLWithPath: path)))
+                .map { String(format: "%02x", $0) }.joined() : "UNREAD"
+        print("NATIVE_EXECUTABLE_OBSERVATION path=\(path) uid=\(file.st_uid) caller=\(getuid()) mode=\(file.st_mode) nlink=\(file.st_nlink) bytes=\(file.st_size) sha256=\(hash) allowedOwner=\(allowedOwner)")
+        try #require(regular && file.st_size > 0 && file.st_size <= 256 * 1024 * 1024)
+        try #require(file.st_mode & 0o022 == 0 && file.st_nlink == 1)
+        if allowedOwner {
+            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "native-diagnostic",
+                sourceSHA: String(repeating: "a", count: 40))
+        } else {
+            do {
+                try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                    environment: request.environment, session: request.session, incarnation: "native-diagnostic",
+                    sourceSHA: String(repeating: "a", count: 40))
+                Issue.record("Native foreign-owner executable was accepted")
+            } catch AgentLaunchCustody.Failure.executable {
+                // Exact native guard refusal, not a setup/persistence error.
+            } catch { Issue.record("Wrong native failure boundary: \(error)") }
+        }
     }
 }
