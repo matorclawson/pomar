@@ -68,6 +68,12 @@ enum AgentLaunchCustody {
             executable: ExecutableAccess(), fullSync: fullSync)
     }
 
+    // Fixed native operation shared by production and its direct refusal test.
+    // No callback or configurable path to the production entry is introduced.
+    static func openRootfsDescriptor(_ path: String) -> Int32 {
+        Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    }
+
     // Fixture entry is internal and has no runtime/config/environment binding.
     // Native PID, UID and birth, all file predicates and persistence are shared.
     static func writeObserved(directory: String, rootfs: String, environment: String,
@@ -81,7 +87,7 @@ enum AgentLaunchCustody {
               rootfs == directory + "/workspace.ext4",
               !incarnation.isEmpty, incarnation.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") })
         else { throw Failure.custody }
-        let fd = open(rootfs, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let fd = openRootfsDescriptor(rootfs)
         guard fd >= 0 else { throw Failure.custody }
         defer { close(fd) }
         var disk = stat(), current = stat()

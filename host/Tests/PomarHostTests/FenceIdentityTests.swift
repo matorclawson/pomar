@@ -585,8 +585,9 @@ func launchRootfsRefusesInvalidDirectoryOrPath(_ kind: String) throws {
 // Untested guard: foreign parent owner (no chown or alternate actor).
 // Untested guard: early rootfs descriptor/path device mismatch (no production-reachable swap seam).
 // Untested guard: early rootfs descriptor/path inode mismatch (no production-reachable swap seam).
-// Untested independently: rootfs O_NOFOLLOW and early identity overlap for this symlink.
-// This is a combined refusal check, never independent mutant proof for either guard.
+// The full-entry symlink refusal overlaps O_NOFOLLOW and early identity.
+// O_NOFOLLOW has a separate direct test of the fixed native operation below;
+// this full-entry check is never separate mutant proof for early identity.
 @Test func launchRootfsRefusesSymlinkBeforeReceipt() throws {
     try withFenceIdentityFixture { request, _, directory in
         let (_, access) = try ownedLaunchExecutable(in: directory)
@@ -668,5 +669,30 @@ func launchRootfsPostFlushChangeRetainsReceiptAndBlocksReplay(_ kind: String) th
                 sourceSHA: String(repeating: "a", count: 40), executable: access)
         }
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-rootfs-kind.json").path))
+    }
+}
+
+@Test func launchRootfsNativeOpenRefusesSymlinkToValidOwnedFile() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        var file = stat()
+        try #require(lstat(request.rootfs, &file) == 0)
+        try #require(file.st_mode & S_IFMT == S_IFREG)
+        try #require(file.st_mode & 0o777 == 0o600)
+        try #require(file.st_uid == getuid())
+        try #require(file.st_nlink == 1)
+        let alias = directory.appendingPathComponent("rootfs-native-alias")
+        try #require(symlink(request.rootfs, alias.path) == 0)
+        defer { unlink(alias.path) }
+        // Exercise the exact fixed native operation used by the production
+        // entry, before any subsequent path/descriptor identity comparison.
+        let opened = AgentLaunchCustody.openRootfsDescriptor(alias.path)
+        if opened >= 0 { close(opened) }
+        #expect(opened < 0, "Native rootfs nofollow accepted a symlink to a valid owned file")
+        let direct = AgentLaunchCustody.openRootfsDescriptor(request.rootfs)
+        try #require(direct >= 0)
+        defer { close(direct) }
+        var observed = stat()
+        try #require(fstat(direct, &observed) == 0)
+        #expect(observed.st_dev == file.st_dev && observed.st_ino == file.st_ino)
     }
 }
