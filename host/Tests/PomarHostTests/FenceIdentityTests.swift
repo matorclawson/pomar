@@ -366,6 +366,10 @@ private func expectExecutableRefusal(_ body: () throws -> Void) {
             try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
                 environment: request.environment, session: request.session, incarnation: "native-diagnostic",
                 sourceSHA: String(repeating: "a", count: 40))
+            let receipt = directory.appendingPathComponent("launch-custody-native-diagnostic.json")
+            let object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: receipt)) as? [String: Any])
+            #expect(object["helperExecutable"] as? String == path)
+            #expect(object["helperFileSHA256"] as? String == hash)
         } else {
             do {
                 try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
@@ -507,5 +511,33 @@ func launchReceiptSyncFailureRetainsBytesAndBlocksReplay(_ failOn: Int) throws {
                 sourceSHA: String(repeating: "a", count: 40), executable: access)
         }
         #expect(try Data(contentsOf: receipt) == retained)
+    }
+}
+
+@Test(arguments: ["directory", "empty", "oversize"])
+func launchExecutableRejectsInvalidKindOrSizeBeforeOpen(_ kind: String) throws {
+    try withFenceIdentityFixture { request, _, directory in
+        let (file, original) = try ownedLaunchExecutable(in: directory)
+        var access = original
+        if kind == "directory" { access.path = { directory.path } }
+        else {
+            let handle = try FileHandle(forWritingTo: file)
+            // Sparse oversize fixture: no large allocation, read or execution.
+            try handle.truncate(atOffset: kind == "empty" ? 0 : 256 * 1024 * 1024 + 1)
+            try handle.close()
+        }
+        var opened = false
+        access.openDescriptor = { _, _ in
+            opened = true
+            Issue.record("Invalid executable kind or size reached open")
+            return -1
+        }
+        expectExecutableRefusal {
+            try AgentLaunchCustody.writeObserved(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "pre-open",
+                sourceSHA: String(repeating: "a", count: 40), executable: access)
+        }
+        #expect(!opened)
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-pre-open.json").path))
     }
 }
