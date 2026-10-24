@@ -977,11 +977,11 @@ func (n *Native) Open(ctx context.Context) error {
 		j.Phase = prefix + "-" + step
 		return n.Save(j) // file sync + rename + directory sync before effect
 	}, func(on bool) error {
-		args := []string{"drain"}
+		var args []string
 		if !on {
 			args = append(args, "-off")
 		}
-		b, err := owner(ctx, args...)
+		b, err := owner(ctx, "drain", args...)
 		if err != nil {
 			return err
 		}
@@ -1013,16 +1013,22 @@ func (n *Native) Open(ctx context.Context) error {
 	return nil
 }
 
+// Validate every retained recovery input before any service command. The UID
+// is fixed to root by the native route; private fixtures use their own owner.
+func recoveryArchive(path string, m Manifest, uid uint32) error {
+	if _, err := pinnedOwnedFile(filepath.Join(path, "manager-table.json"), m.ManagerTable, uid); err != nil {
+		return err
+	}
+	return archivedBinaries(path, m.Baseline, uid)
+}
+
 func (n *Native) Restore(ctx context.Context, j Journal) error {
 	if !n.rollback || n.lock == nil || j.Archive != n.ArchivePath {
 		return fmt.Errorf("original rollback binding required")
 	}
-	if _, err := pinnedOwnedFile(filepath.Join(n.ArchivePath, "manager-table.json"), n.M.ManagerTable, 0); err != nil {
-		return err
-	}
 	// Verify every recovery binary before stopping a working manager, even if
 	// the archive was already checked when the journal was loaded.
-	if err := archivedBinaries(n.ArchivePath, n.M.Baseline, 0); err != nil {
+	if err := recoveryArchive(n.ArchivePath, n.M, 0); err != nil {
 		return err
 	}
 	if pid, birth, err := n.process(ctx); err == nil {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	hostcapacity "github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
@@ -52,7 +52,7 @@ func migratedManagerTableAt(t *testing.T, root string) (string, string, string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := manager.Open(manager.Config{Venue: v, Procs: noTableProcesses{}, UID: os.Getuid(), Host: capacity.Host{CPUSlots: 2, MemoryBytes: 8 << 30}, Poll: time.Hour})
+	m, err := manager.Open(manager.Config{Venue: v, Procs: noTableProcesses{}, UID: os.Getuid(), Host: hostcapacity.Host{CPUSlots: 2, MemoryBytes: 8 << 30}, Poll: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}

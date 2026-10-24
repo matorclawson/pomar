@@ -162,3 +162,37 @@ func TestApplyReturnsPostOpenCallerFailureAsItsOwnPhase(t *testing.T) {
 		t.Fatal(j, f.events, err)
 	}
 }
+
+// sow: pomar-SOW-87. Interrupt the rollback transaction itself, not only the
+// happy-path restore or the shared admission-opening sequence.
+func TestRollbackInterruptionsRetainOriginalBindingAndDoNotSkipVerification(t *testing.T) {
+	original := Journal{Schema: "pomar.service-upgrade-journal/v1", ManifestSHA: "original", Phase: "installing", Archive: "retained-archive", SigningPolicy: "internal_certificate", Before: Observation{Pin: "baseline", History: "frozen-history", ManagerTableHistory: "frozen-table"}}
+	for _, failure := range []string{"save:rolling-back", "fence", "restore", "start", "verify", "save:rollback-opening", "open", "save:rolled-back"} {
+		t.Run(failure, func(t *testing.T) {
+			f := &fakeDriver{fail: failure}
+			interrupted, err := Rollback(context.Background(), f, original, original.ManifestSHA)
+			if err == nil || interrupted.Archive != original.Archive || interrupted.Before != original.Before || interrupted.ManifestSHA != original.ManifestSHA {
+				t.Fatal("interruption lost the original recovery binding", interrupted, err)
+			}
+			if failure != "open" && failure != "save:rolled-back" && contains(f.events, "open") {
+				t.Fatal("rollback reopened before all recovery checks succeeded", f.events)
+			}
+			if failure == "save:rolling-back" && (contains(f.events, "fence") || contains(f.events, "restore")) {
+				t.Fatal("rollback effect without durable intent", f.events)
+			}
+			if failure == "save:rolled-back" && !strings.Contains(err.Error(), "baseline admission reopened") {
+				t.Fatal("post-open journal failure concealed", err)
+			}
+			// Repeating explicit rollback must run the restore guard and verify
+			// again. A changed-history refusal cannot be skipped on recovery.
+			refusing := &fakeDriver{fail: "restore"}
+			if _, err := Rollback(context.Background(), refusing, interrupted, original.ManifestSHA); err == nil || contains(refusing.events, "start") || contains(refusing.events, "open") {
+				t.Fatal("interrupted rollback bypassed the restore refusal", refusing.events, err)
+			}
+			resumed := &fakeDriver{}
+			if got, err := Rollback(context.Background(), resumed, interrupted, original.ManifestSHA); err != nil || got.Phase != "rolled-back" || !contains(resumed.events, "restore") || !contains(resumed.events, "verify") || !contains(resumed.events, "open") {
+				t.Fatal("explicit rollback failed to revalidate and converge", got, resumed.events, err)
+			}
+		})
+	}
+}

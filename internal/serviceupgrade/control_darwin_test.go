@@ -4,7 +4,6 @@ package serviceupgrade
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,16 +122,28 @@ func TestRollbackArchiveChecksBothBinariesBeforeRecovery(t *testing.T) {
 	if err := archivedBinaries(path, build, uint32(os.Getuid())); err == nil {
 		t.Fatal("corrupted second recovery binary accepted")
 	}
-	lock, err := os.CreateTemp(t.TempDir(), "fake-lock")
-	if err != nil {
+	// Exercise the same complete preflight as Native.Restore, with the
+	// fixture's owner rather than requiring privileged test files. A missing
+	// table must not accidentally satisfy the corrupted-binary assertion.
+	table := []byte("[]\n")
+	if err := os.WriteFile(filepath.Join(path, "manager-table.json"), table, 0600); err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Close()
-	n := &Native{M: Manifest{Baseline: build}, ArchivePath: path, rollback: true, lock: lock}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err = n.Restore(ctx, Journal{Archive: path})
+	m := Manifest{Baseline: build, ManagerTable: FilePin{digest(table), int64(len(table))}}
+	err := recoveryArchive(path, m, uint32(os.Getuid()))
 	if err == nil || !strings.Contains(err.Error(), "archived pomar") {
 		t.Fatal("archive was not refused before service commands", err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "pomar-host"), []byte("original pomar-host\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoveryArchive(path, m, uint32(os.Getuid())); err != nil {
+		t.Fatal("complete restored archive refused", err)
+	}
+	if err := os.Remove(filepath.Join(path, "manager-table.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoveryArchive(path, m, uint32(os.Getuid())); err == nil {
+		t.Fatal("table omission accepted")
 	}
 }
