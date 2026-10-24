@@ -27,6 +27,7 @@ The response includes a short `summary` and these structured fields:
 | `log.availability`, `bytes`, `last_output_at`, `quiet_seconds` | Missing, unreadable, empty and available output are distinct; unknown amounts/times are null |
 | `log.tail_text`, `tail_offset`, `tail_bytes` | A bounded live output tail with raw byte offset/count; invalid UTF-8 is replaced for display |
 | `log.window_truncated`, `changed_during_read` | The window omits older bytes, or the file changed during this read |
+| `log.tail_text_truncated` | Optional display-only flag: JSON escaping required a shorter text suffix; raw byte-window metadata is unchanged |
 | `registry.event_counts`, `cache_hits_observed`, `cache_misses_observed` | Actual received/cache/upstream/connect/first-byte/send_short/completion events in the inspected trace window |
 | `registry.pending_observed`, `completed_status_counts`, `last_transfer_at` | Observed requests without a completion, HTTP outcomes and last observed network transfer. A completed 2xx is excluded from `last_transfer_at` when its own request also logged a `send_short` (docs/job-failure-diagnostics.md: a 2xx status alone is never proof the guest received every byte), or when this window's own evidence for that request is incomplete (a bounded tail window can retain a completion while an earlier `send_short` for the same request fell outside it) |
 | `registry.window_truncated`, `changed_during_read`, `events_before_window_start`, `events_after_window_end`, `events_out_of_order`, `events_in_future` | The same truncation/mid-read-change/unbound-event facts as `log.*` above, but for the registry trace; these feed `install_stall`'s own source-status and trigger facts below, not just `registry.*` on its own |
@@ -141,6 +142,12 @@ carried, which `send_short_requests` contradicts). Its coverage is a trace
 window, not a complete request ledger; reused legacy request IDs are
 identified explicitly. Resource sample age can remain unknown after a
 manager restart.
+
+The `tail_text` JSON string is also bounded to 16 KiB, including its quotes
+and JSON escaping. The display retains a valid UTF-8 suffix and sets
+`tail_text_truncated` when this additional bound removes text. `tail_offset`,
+`tail_bytes` and `window_truncated` continue to describe the raw read window.
+Complete log bytes, phase classification and signed results are unchanged.
 
 The live tail is always **provisional**. This route does not change the existing
 final-log API, its byte cap/hash, result signature or verification. Use

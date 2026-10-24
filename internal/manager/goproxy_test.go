@@ -128,7 +128,7 @@ func TestGoproxyCacheKeptWhileAttemptsAreLive(t *testing.T) {
 	}
 	m.cfg.Budgets = []cache.Budget{{Name: "goproxy", Prefix: "goproxy", Bytes: 1 << 20, Evict: true, Class: venue.ClassCache, KeepWhileLive: true}}
 	m.mu.Lock()
-	m.t.entries["live"] = &Entry{Attempt: "live", State: StateRunning}
+	m.t.entries["live"] = &Entry{Attempt: "live", State: StateRunning, ResultPolicy: m.resultPolicy()}
 	m.mu.Unlock()
 	rep, err := m.Caches(true)
 	if err != nil {
@@ -139,7 +139,10 @@ func TestGoproxyCacheKeptWhileAttemptsAreLive(t *testing.T) {
 	}
 	m.mu.Lock()
 	m.t.entries["live"].State = StateExited
+	m.freezeResult(m.t.entries["live"])
 	m.mu.Unlock()
+	// The frozen result no longer reads goproxy. Retain its unresolved
+	// record while allowing the independent shared cache to be evicted.
 	rep, err = m.Caches(true)
 	if err != nil {
 		t.Fatal(err)
@@ -147,4 +150,11 @@ func TestGoproxyCacheKeptWhileAttemptsAreLive(t *testing.T) {
 	if len(rep.Evicted) != 1 || v.IsOpen(venue.KindVolume, "goproxy") {
 		t.Fatalf("with no live attempt, the over-budget cache was kept: %+v", rep)
 	}
+	m.mu.Lock()
+	e := m.t.entries["live"]
+	if e == nil || !e.Terminal() || e.Publication.Intent == nil || m.resultDisposable(*e) {
+		m.mu.Unlock()
+		t.Fatal("cache eviction lost or released unresolved completion evidence")
+	}
+	m.mu.Unlock()
 }

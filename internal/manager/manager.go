@@ -182,8 +182,10 @@ type Manager struct {
 	// npmProxies are the live attempts' npm registries (an npm class's).
 	npmProxies map[string]*proxyListener
 	// vmOrphans are the VM services no live attempt accounts for.
-	vmOrphans map[int]*VMOrphan
-	lastSweep time.Time
+	vmOrphans     map[int]*VMOrphan
+	lastSweep     time.Time
+	resultCursor  int // round-robin bounded publication work; not execution authority
+	closureCursor int // separate bounded maintenance; never dispatch authority
 	// syncMu serialises the manager's own mirror syncs: two fetches into one
 	// mirror would contend for git's locks.
 	syncMu sync.Mutex
@@ -286,6 +288,7 @@ func Open(cfg Config) (*Manager, error) {
 	}
 	m.verifyBases()
 	m.reopenProxies()
+	m.recoverResults(time.Now())
 	m.evict()
 	go m.watch()
 	return m, nil
@@ -705,6 +708,8 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 		e.Source = pinnedSource(src, sha)
 		e.Source.Reach = reach
 	}
+	e.ResultPolicy = m.resultPolicy()
+	e.ClosureRequired = true
 	m.t.entries[id] = e
 	if err := m.t.save(); err != nil {
 		return Entry{}, err
@@ -866,6 +871,12 @@ func (m *Manager) removeLocked(id, note string) error {
 	if !e.Terminal() {
 		return fmt.Errorf("manager: attempt %s is %s; stop it first", id, e.State)
 	}
+	if e.terminalCleanup || m.cfg.Venue.IsOpen(venue.KindVM, id) {
+		return fmt.Errorf("manager: terminal VM cleanup pending; record retained")
+	}
+	if !m.resultDisposable(*e) {
+		return fmt.Errorf("manager: unresolved result publication; evidence retained")
+	}
 	v := m.cfg.Venue
 	if v.IsOpen(venue.KindVolume, "attempt-"+id) {
 		if err := v.TeardownNote(venue.KindVolume, "attempt-"+id, note); err != nil {
@@ -904,6 +915,7 @@ func (m *Manager) watch() {
 // spawned while the watcher waited for the lock. An end is recorded only
 // when a second, fresh listing agrees.
 func (m *Manager) poll() {
+	m.recoverResults(time.Now())
 	m.mu.Lock()
 	var live []Entry
 	for _, e := range m.t.entries {
@@ -1093,6 +1105,18 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 		m.mu.Unlock()
 		return
 	}
+	snapshot := *e
+	m.mu.Unlock()
+	// Mirror metadata may invoke git with a bounded timeout. Never hold the
+	// admission/status lock while waiting for that external process. Nothing
+	// terminal is exposed or persisted until its intent is ready below.
+	repository := m.resultRepository(snapshot)
+	m.mu.Lock()
+	e = m.t.entries[id]
+	if e == nil || e.Terminal() {
+		m.mu.Unlock()
+		return
+	}
 	// A compromised host fails the attempt under the condition's name,
 	// whatever shape the failure took. Even an exit 0 is failed: on the
 	// bounded volume the guest's fsync got EIO and a command that went on
@@ -1121,12 +1145,21 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 	}
 	m.closeProxy(id)
 	m.closeNPM(id)
-	m.t.save()
-	final := *e
+	m.freezeResultWithRepository(e, repository)
+	// Terminal state and its frozen intent share one fsynced table transaction.
+	// On failure keep RAM observation and all evidence; poll retries that save.
+	if err := m.t.save(); err != nil {
+		m.event("result-persist-error", id, e.PID, err.Error())
+		m.mu.Unlock()
+		m.cleanupTerminalVMs()
+		return
+	}
+	e.completionSaved = true
+	pid := e.PID
 	m.mu.Unlock()
-	m.event("ended-"+string(st), id, e.PID, reason)
-	m.writeResult(final)
-	m.teardownVM(id)
+	m.event("ended-"+string(st), id, pid, reason)
+	m.cleanupTerminalVMs()
+	m.recoverResults(time.Now())
 	m.evict()
 }
 

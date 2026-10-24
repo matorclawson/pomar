@@ -188,7 +188,15 @@ func TestRetainedDispatchingCompletionIsNotSuccess(t *testing.T) {
 func TestFlagsAreValidatedBeforeAnyRequest(t *testing.T) {
 	root, _, calls := hostWith(t)
 	recs := records(root)
-	os.Mkdir(filepath.Join(root, "open"), 0o755)
+	openRecords := filepath.Join(root, "open")
+	if err := os.Mkdir(openRecords, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Mkdir is filtered by the caller's umask. This intentionally non-private
+	// fixture must remain non-private even in a private qualification runner.
+	if err := os.Chmod(openRecords, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for name, args := range map[string][]string{
 		"-operation-id alone":         {"-operation-id", "op-1"},
 		"-records alone":              {"-records", recs},

@@ -92,6 +92,7 @@ func TestFinishUsesAdmittedOutputCapAfterTableReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State, e.ExitCode, e.OutputNames = StateRunning, nil, []string{"report.json"}
 	e.Class.OutputCapBytes = 4
 	m.mu.Lock()
@@ -210,6 +211,7 @@ func TestFinishRecordsAndServesOutputs(t *testing.T) {
 	os.MkdirAll(filepath.Join(rec, outputsDir), 0o700)
 	os.WriteFile(filepath.Join(rec, outputsDir, "report.json"), []byte("the report"), 0o600)
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State, e.ExitCode, e.OutputNames = StateRunning, nil, []string{"report.json", "absent.txt"}
 	m.mu.Lock()
 	m.t.entries[id] = &e

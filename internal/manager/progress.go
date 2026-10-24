@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"syscall"
 )
@@ -48,17 +49,19 @@ type ProgressResources struct {
 }
 
 type ProgressLog struct {
-	Availability        string     `json:"availability"`
-	Bytes               *int64     `json:"bytes"`
-	LastOutputAt        *time.Time `json:"last_output_at"`
-	QuietSeconds        *int64     `json:"quiet_seconds"`
-	TailOffset          int64      `json:"tail_offset"`
-	TailBytes           int        `json:"tail_bytes"`
-	TailText            string     `json:"tail_text"`
-	WindowTruncated     bool       `json:"window_truncated"`
-	ChangedDuringRead   bool       `json:"changed_during_read"`
-	Provisional         bool       `json:"provisional"`
-	TerminalLogRecorded bool       `json:"terminal_log_recorded"`
+	Availability string     `json:"availability"`
+	Bytes        *int64     `json:"bytes"`
+	LastOutputAt *time.Time `json:"last_output_at"`
+	QuietSeconds *int64     `json:"quiet_seconds"`
+	TailOffset   int64      `json:"tail_offset"`
+	TailBytes    int        `json:"tail_bytes"`
+	TailText     string     `json:"tail_text"`
+	// TailTextTruncated describes display-only truncation; raw window metadata is unchanged.
+	TailTextTruncated   bool `json:"tail_text_truncated,omitempty"`
+	WindowTruncated     bool `json:"window_truncated"`
+	ChangedDuringRead   bool `json:"changed_during_read"`
+	Provisional         bool `json:"provisional"`
+	TerminalLogRecorded bool `json:"terminal_log_recorded"`
 }
 
 // WorkloadPhase is an explicit bounded log marker, never a screen inference.
@@ -350,7 +353,7 @@ func (m *Manager) progressOf(e Entry, now time.Time) *AttemptProgress {
 		p.Log.Availability, p.Log.Bytes = "AVAILABLE", &size
 		p.Log.TailOffset, p.Log.TailBytes = offset, len(b)
 		p.Log.WindowTruncated, p.Log.ChangedDuringRead = offset > 0, changed
-		p.Log.TailText = strings.ToValidUTF8(string(b), "\uFFFD")
+		p.Log.TailText, p.Log.TailTextTruncated = progressTailText(b)
 		if fi.Size() == 0 {
 			p.Log.Availability = "NO_OUTPUT_YET"
 		}
@@ -674,4 +677,32 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 		p.LongestGapSeconds = &seconds
 	}
 	return p
+}
+
+// progressTailText retains the longest valid UTF-8 suffix whose JSON string
+// encoding fits the display budget, including quotes and HTML escaping.
+// Raw log offsets, phase observations and complete logs keep their original bytes.
+func progressTailText(b []byte) (string, bool) {
+	text := strings.ToValidUTF8(string(b), "\uFFFD")
+	start, encoded := len(text), 2
+	for start > 0 {
+		r, size := utf8.DecodeLastRuneInString(text[:start])
+		cost := size
+		switch r {
+		case '"', '\\', '\b', '\f', '\n', '\r', '\t':
+			cost = 2
+		case '<', '>', '&', '\u2028', '\u2029':
+			cost = 6
+		default:
+			if r < 0x20 {
+				cost = 6
+			}
+		}
+		if encoded+cost > progressLogWindow {
+			break
+		}
+		encoded += cost
+		start -= size
+	}
+	return text[start:], start > 0
 }

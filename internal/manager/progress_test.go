@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/zeroemployeeorg/pomar/internal/npmproxy"
 )
@@ -27,6 +28,7 @@ func TestLiveProgressOnAuthorizedGetDoesNotRequireOrModifyFinalLog(t *testing.T)
 	}
 	now := time.Now().UTC()
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State = StateRunning
 	e.ExitCode = nil
 	e.PID = 1234
@@ -59,6 +61,71 @@ func TestLiveProgressOnAuthorizedGetDoesNotRequireOrModifyFinalLog(t *testing.T)
 	m.finish(id, StateExited, "", &code)
 	if _, _, _, err := c.Log(id, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProgressTailSerializedBoundPreservesRawWindow(t *testing.T) {
+	m, c, v := openSigning(t, false)
+	id := "tail-json-bound"
+	rec := filepath.Join(v.Root(), attemptsDir, id)
+	if err := os.MkdirAll(rec, 0700); err != nil {
+		t.Fatal(err)
+	}
+	e := terminalEntry(id)
+	e.State, e.ExitCode, e.PID = StateRunning, nil, 1234
+	m.mu.Lock()
+	m.t.entries[id] = &e
+	m.mu.Unlock()
+	for name, raw := range map[string][]byte{
+		"ordinary formatting": []byte("install started\n\tstill working\n"),
+		"full ASCII window":   bytes.Repeat([]byte("a"), progressLogWindow),
+		"JSON escaping":       bytes.Repeat([]byte{0, '\n', '\t', '<', '>', '&', '"', '\\'}, progressLogWindow/8),
+		"Unicode":             []byte(strings.Repeat("\u2028\u2029\ufffd\U0001f600", 2000)),
+		"invalid UTF8":        bytes.Repeat([]byte{0xff, '<', 0xfe, '&', '\n'}, progressLogWindow/5+100),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(rec, logName), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var got Entry
+			if err := c.Do("GET", "/v1/attempts/"+id, nil, &got); err != nil || got.Progress == nil {
+				t.Fatalf("authorized progress GET: %v", err)
+			}
+			log := got.Progress.Log
+			wire, err := json.Marshal(log.TailText)
+			if err != nil || len(wire) > progressLogWindow {
+				t.Errorf("tail JSON string exceeds %d bytes: got %d, error %v", progressLogWindow, len(wire), err)
+			}
+			offset := max(0, len(raw)-progressLogWindow)
+			valid := strings.ToValidUTF8(string(raw[offset:]), "\ufffd")
+			if !strings.HasSuffix(valid, log.TailText) || log.TailText == "" {
+				t.Error("display must retain an unchanged valid-UTF8 suffix, including formatting")
+			}
+			if log.TailText != valid && strings.HasSuffix(valid, log.TailText) {
+				// Check maximality with encoding/json, independently of the
+				// implementation's per-rune cost calculation.
+				omitted := strings.TrimSuffix(valid, log.TailText)
+				_, size := utf8.DecodeLastRuneInString(omitted)
+				longer, err := json.Marshal(omitted[len(omitted)-size:] + log.TailText)
+				if err != nil || len(longer) <= progressLogWindow {
+					t.Fatalf("tail is not maximal: adding the preceding rune uses %d bytes (budget %d), error %v", len(longer), progressLogWindow, err)
+				}
+			}
+			if log.TailOffset != int64(offset) || log.TailBytes != len(raw)-offset || log.WindowTruncated != (offset > 0) {
+				t.Error("display limiting changed the observed raw window")
+			}
+			full, _ := json.Marshal(valid)
+			meta, _ := json.Marshal(log)
+			var fields struct {
+				Truncated bool `json:"tail_text_truncated"`
+			}
+			if err := json.Unmarshal(meta, &fields); err != nil || fields.Truncated != (len(full) > progressLogWindow) {
+				t.Errorf("display truncation: got %v want %v", fields.Truncated, len(full) > progressLogWindow)
+			}
+			if len(full) <= progressLogWindow && log.TailText != valid {
+				t.Error("in-bound tail changed")
+			}
+		})
 	}
 }
 
@@ -112,6 +179,7 @@ func TestProgressDoesNotBroadenClassReaders(t *testing.T) {
 	m, _, v := openSigning(t, false)
 	id := "private-progress"
 	e := terminalEntry(id)
+	e.ResultPolicy = m.resultPolicy()
 	e.State = StateRunning
 	m.mu.Lock()
 	m.t.entries[id] = &e

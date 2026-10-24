@@ -5,6 +5,7 @@
 package manager
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
+	"github.com/zeroemployeeorg/pomar/internal/result"
 )
 
 // State is an attempt's state as the manager knows it.
@@ -33,6 +35,21 @@ const (
 
 // Entry is one attempt.
 type Entry struct {
+	// ResultPolicy is frozen at admission; Publication is trusted completion intent.
+	ResultPolicy ResultPolicy `json:"result_policy,omitzero"`
+	Publication  Publication  `json:"publication,omitzero"`
+	// ClosureRequired is an admission fact, never retroactively assigned to
+	// legacy attempts that lack trustworthy helper cleanup acknowledgments.
+	ClosureRequired bool        `json:"closure_required,omitempty"`
+	Closure         Publication `json:"closure,omitzero"`
+	// ClosureObservationDeadline bounds attempts to obtain missing observations.
+	// Frozen signing/publication intents never expire through this deadline.
+	ClosureObservationDeadline time.Time `json:"closure_observation_deadline,omitzero"`
+	closureSaved               bool
+	completionSaved            bool
+	// terminalCleanup reserves this original while its VM data is removed outside m.mu.
+	terminalCleanup bool
+
 	Attempt string   `json:"attempt"`
 	Command []string `json:"command"`
 	PID     int      `json:"pid"`
@@ -124,6 +141,8 @@ func (e Entry) Terminal() bool {
 	return false
 }
 
+const tableSchema = "pomar.manager-table/v2"
+
 type table struct {
 	path    string
 	entries map[string]*Entry
@@ -138,15 +157,42 @@ func loadTable(path string) (*table, error) {
 	if err != nil {
 		return nil, fmt.Errorf("manager: %w", err)
 	}
+	// Legacy managers decode a top-level array. The v2 envelope is deliberately
+	// incompatible with that decoder: an older binary must refuse to load,
+	// rather than dropping frozen publication and closure fields on its save.
+	payload := bytes.TrimSpace(b)
+	if len(payload) > 0 && payload[0] == '{' {
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &envelope); err != nil {
+			return nil, fmt.Errorf("manager: table: %w", err)
+		}
+		var schema string
+		if err := json.Unmarshal(envelope["schema"], &schema); err != nil || schema != tableSchema || len(envelope) != 2 {
+			return nil, errors.New("manager: unsupported table format; refuse incompatible downgrade or migration")
+		}
+		payload = bytes.TrimSpace(envelope["entries"])
+		if len(payload) == 0 || payload[0] != '[' {
+			return nil, errors.New("manager: v2 table entries must be an array")
+		}
+	}
 	var list []*Entry
-	if err := json.Unmarshal(b, &list); err != nil {
+	if err := json.Unmarshal(payload, &list); err != nil {
 		return nil, fmt.Errorf("manager: table: %w", err)
 	}
 	for _, e := range list {
+		if e == nil || e.Attempt == "" {
+			return nil, errors.New("manager: invalid table entry")
+		}
+		if _, duplicate := t.entries[e.Attempt]; duplicate {
+			return nil, errors.New("manager: duplicate table attempt")
+		}
 		if e.DiskFull && e.HostCondition == "" {
 			e.HostCondition = capacity.ReasonHostDiskFull
 		}
 		e.DiskFull = false
+		// Visibility after restart is not proof that a prior directory sync succeeded.
+		// Re-acknowledge retained intent before publishing or serving a new proof.
+		e.completionSaved = false
 		t.entries[e.Attempt] = e
 	}
 	return t, nil
@@ -155,7 +201,10 @@ func loadTable(path string) (*table, error) {
 // save writes the table atomically: a temp file in the same directory, synced,
 // then renamed over the old one.
 func (t *table) save() error {
-	b, err := json.MarshalIndent(t.list(), "", "  ")
+	b, err := json.MarshalIndent(struct {
+		Schema  string  `json:"schema"`
+		Entries []Entry `json:"entries"`
+	}{Schema: tableSchema, Entries: t.list()}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -178,7 +227,7 @@ func (t *table) save() error {
 	if err := os.Rename(tmp, t.path); err != nil {
 		return fmt.Errorf("manager: %w", err)
 	}
-	return nil
+	return result.SyncDir(filepath.Dir(t.path))
 }
 
 func (t *table) list() []Entry {
