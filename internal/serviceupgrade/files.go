@@ -100,6 +100,20 @@ func durableWrite(path string, b []byte, mode os.FileMode) error {
 }
 
 func durableWriteOwned(path string, b []byte, mode os.FileMode, uid uint32) error {
+	return durableWriteOwnedWithHooks(path, b, mode, uid, durableWriteHooks{})
+}
+
+// Private, per-call test seams. Production has no mutable global override,
+// environment switch or configurable filesystem operation.
+type durableWriteHooks struct {
+	beforeOpen         func() error
+	afterOpen          func(*os.Root) error
+	beforeWrite        func(*os.Root) error
+	beforePendingCheck func(*os.Root, string) error
+	beforeRename       func(*os.Root, string) error
+}
+
+func durableWriteOwnedWithHooks(path string, b []byte, mode os.FileMode, uid uint32, hooks durableWriteHooks) error {
 	parent := filepath.Dir(path)
 	if err := directory(parent, uid, 0); err != nil {
 		return err
@@ -108,11 +122,21 @@ func durableWriteOwned(path string, b []byte, mode os.FileMode, uid uint32) erro
 	if err != nil {
 		return err
 	}
+	if hooks.beforeOpen != nil {
+		if err := hooks.beforeOpen(); err != nil {
+			return err
+		}
+	}
 	root, err := os.OpenRoot(parent)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
+	if hooks.afterOpen != nil {
+		if err := hooks.afterOpen(root); err != nil {
+			return err
+		}
+	}
 	opened, err := root.Stat(".")
 	if err != nil || !os.SameFile(before, opened) {
 		return fmt.Errorf("write directory replaced while opening")
@@ -123,7 +147,12 @@ func durableWriteOwned(path string, b []byte, mode os.FileMode, uid uint32) erro
 	}
 	// All effects below are relative to this descriptor. A manager-owner rename
 	// or ancestor symlink swap cannot redirect a privileged write elsewhere.
-	if err := durableWriteIn(root, filepath.Base(path), b, mode, uid); err != nil {
+	if hooks.beforeWrite != nil {
+		if err := hooks.beforeWrite(root); err != nil {
+			return err
+		}
+	}
+	if err := durableWriteInWithHooks(root, filepath.Base(path), b, mode, uid, hooks); err != nil {
 		return err
 	}
 	after, err := os.Lstat(parent)
@@ -134,6 +163,10 @@ func durableWriteOwned(path string, b []byte, mode os.FileMode, uid uint32) erro
 }
 
 func durableWriteIn(root *os.Root, name string, b []byte, mode os.FileMode, uid uint32) error {
+	return durableWriteInWithHooks(root, name, b, mode, uid, durableWriteHooks{})
+}
+
+func durableWriteInWithHooks(root *os.Root, name string, b []byte, mode os.FileMode, uid uint32, hooks durableWriteHooks) error {
 	tmp := ".pomar-upgrade-pending-" + rand.Text()
 	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
@@ -159,6 +192,11 @@ func durableWriteIn(root *os.Root, name string, b []byte, mode os.FileMode, uid 
 	if err != nil {
 		return err
 	}
+	if hooks.beforePendingCheck != nil {
+		if err := hooks.beforePendingCheck(root, tmp); err != nil {
+			return err
+		}
+	}
 	linked, err := root.Lstat(tmp)
 	if err != nil || !os.SameFile(written, linked) || !linked.Mode().IsRegular() {
 		return fmt.Errorf("pending file replaced; write refused")
@@ -166,8 +204,17 @@ func durableWriteIn(root *os.Root, name string, b []byte, mode os.FileMode, uid 
 	if err = f.Close(); err != nil {
 		return err
 	}
+	if hooks.beforeRename != nil {
+		if err := hooks.beforeRename(root, tmp); err != nil {
+			return err
+		}
+	}
 	if err = root.Rename(tmp, name); err != nil {
 		return err
+	}
+	installed, err := root.Lstat(name)
+	if err != nil || !installed.Mode().IsRegular() || !os.SameFile(written, installed) {
+		return fmt.Errorf("published file identity changed; retain recovery uncertainty")
 	}
 	dir, err := root.Open(".")
 	if err != nil {

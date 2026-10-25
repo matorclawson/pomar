@@ -113,3 +113,105 @@ func TestDurableWriteDoesNotFollowDestinationSymlink(t *testing.T) {
 		t.Fatal("replacement is not an owned regular file", err)
 	}
 }
+
+func TestDurableWriteChecksReplacementAtActualRaceBoundaries(t *testing.T) {
+	for _, stage := range []string{"before-open", "after-open-mode", "before-write", "before-pending-check", "before-rename"} {
+		t.Run(stage, func(t *testing.T) {
+			d := t.TempDir()
+			parent, held, outside := filepath.Join(d, "manager"), filepath.Join(d, "held"), filepath.Join(d, "outside")
+			for _, p := range []string{parent, outside} {
+				if e := os.Mkdir(p, 0700); e != nil {
+					t.Fatal(e)
+				}
+			}
+			target := filepath.Join(parent, "table.json")
+			sentinel := filepath.Join(outside, "table.json")
+			if e := os.WriteFile(sentinel, []byte("outside sentinel"), 0600); e != nil {
+				t.Fatal(e)
+			}
+			called, renameReached := false, false
+			hooks := durableWriteHooks{}
+			replacePending := func(root *os.Root, name string) error {
+				called = true
+				if e := root.Remove(name); e != nil {
+					return e
+				}
+				return root.WriteFile(name, []byte("raced replacement"), 0600)
+			}
+			switch stage {
+			case "before-open":
+				hooks.beforeOpen = func() error {
+					called = true
+					if e := os.Rename(parent, held); e != nil {
+						return e
+					}
+					return os.Mkdir(parent, 0700)
+				}
+			case "after-open-mode":
+				hooks.afterOpen = func(*os.Root) error { called = true; return os.Chmod(parent, 0770) }
+			case "before-write":
+				hooks.beforeWrite = func(*os.Root) error {
+					called = true
+					if e := os.Rename(parent, held); e != nil {
+						return e
+					}
+					return os.Symlink(outside, parent)
+				}
+			case "before-pending-check":
+				hooks.beforePendingCheck = replacePending
+				hooks.beforeRename = func(*os.Root, string) error { renameReached = true; return nil }
+			case "before-rename":
+				hooks.beforeRename = replacePending
+			}
+			e := durableWriteOwnedWithHooks(target, []byte("frozen table"), 0600, uint32(os.Getuid()), hooks)
+			if !called || e == nil {
+				t.Fatal("race boundary did not refuse", called, e)
+			}
+			b, e := os.ReadFile(sentinel)
+			if e != nil || string(b) != "outside sentinel" {
+				t.Fatal("race redirected a write outside the owned descriptor", string(b), e)
+			}
+			switch stage {
+			case "before-open", "after-open-mode", "before-pending-check":
+				if _, e := os.Lstat(target); !os.IsNotExist(e) {
+					t.Fatal("invalid input reached publication", e)
+				}
+				if renameReached {
+					t.Fatal("changed pending file reached rename")
+				}
+			case "before-write":
+				b, e := os.ReadFile(filepath.Join(held, "table.json"))
+				if e != nil || string(b) != "frozen table" {
+					t.Fatal("descriptor did not retain its original directory", string(b), e)
+				}
+			case "before-rename":
+				// A late replacement can reach rename, but must never be acknowledged as
+				// the frozen publication. Retain the changed evidence; do not erase/reset it.
+				b, e := os.ReadFile(target)
+				if e != nil || string(b) != "raced replacement" {
+					t.Fatal("late-race control did not reach publication", string(b), e)
+				}
+			}
+		})
+	}
+}
+
+func TestDurableWriteRaceHooksPreserveUnchangedPositive(t *testing.T) {
+	d := t.TempDir()
+	target := filepath.Join(d, "table.json")
+	var stages []string
+	hook := func(name string) func(*os.Root) error {
+		return func(*os.Root) error { stages = append(stages, name); return nil }
+	}
+	pending := func(name string) func(*os.Root, string) error {
+		return func(*os.Root, string) error { stages = append(stages, name); return nil }
+	}
+	h := durableWriteHooks{beforeOpen: func() error { stages = append(stages, "before-open"); return nil }, afterOpen: hook("after-open"), beforeWrite: hook("before-write"), beforePendingCheck: pending("before-pending-check"), beforeRename: pending("before-rename")}
+	if e := durableWriteOwnedWithHooks(target, []byte("frozen table"), 0600, uint32(os.Getuid()), h); e != nil {
+		t.Fatal(e)
+	}
+	b, e := os.ReadFile(target)
+	if e != nil || string(b) != "frozen table" || len(stages) != 5 {
+		t.Fatal("unchanged publication or boundary order lost", string(b), stages, e)
+	}
+}
