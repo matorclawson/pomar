@@ -42,6 +42,8 @@ var sourceCommit = "unknown"
 
 const usage = `usage:
   pomar version
+  pomar postgres run -work-root DIR -tools MANIFEST -tools-sha256 HEX -cwd DIR [OPTIONS] -- /absolute/GATE [ARGS...]
+                                    disposable same-account PostgreSQL17; no service or TCP listener
   pomar seats [-root DIR] [-json] [-menu]  list the declared seats; -menu offers a numbered pick
   pomar session serve|new|ls|show|screen|send|attach|stop ...
                                     named programs on terminals that outlive every client; "pomar session" for its usage
@@ -136,6 +138,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return installCmd(args[1:], stdout, stderr)
 	case args[0] == "upgrade":
 		return upgradeCmd(args[1:], stdout, stderr)
+	case args[0] == "postgres":
+		return postgresCmd(args[1:], stdout, stderr)
 	case args[0] == "server":
 		return serverCmd(args[1:], stdout, stderr)
 	case args[0] == "run":
