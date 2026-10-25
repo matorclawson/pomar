@@ -1,6 +1,7 @@
 package serviceupgrade
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -99,15 +100,46 @@ func durableWrite(path string, b []byte, mode os.FileMode) error {
 }
 
 func durableWriteOwned(path string, b []byte, mode os.FileMode, uid uint32) error {
-	if err := directory(filepath.Dir(path), uid, 0); err != nil {
+	parent := filepath.Dir(path)
+	if err := directory(parent, uid, 0); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".pomar-upgrade-pending-")
+	before, err := os.Lstat(parent)
 	if err != nil {
 		return err
 	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	opened, err := root.Stat(".")
+	if err != nil || !os.SameFile(before, opened) {
+		return fmt.Errorf("write directory replaced while opening")
+	}
+	meta, ok := opened.Sys().(*syscall.Stat_t)
+	if !ok || !opened.IsDir() || meta.Uid != uid || opened.Mode().Perm()&0022 != 0 {
+		return fmt.Errorf("opened write directory custody refused")
+	}
+	// All effects below are relative to this descriptor. A manager-owner rename
+	// or ancestor symlink swap cannot redirect a privileged write elsewhere.
+	if err := durableWriteIn(root, filepath.Base(path), b, mode, uid); err != nil {
+		return err
+	}
+	after, err := os.Lstat(parent)
+	if err != nil || !os.SameFile(opened, after) {
+		return fmt.Errorf("write directory replaced; retain recovery uncertainty")
+	}
+	return nil
+}
+
+func durableWriteIn(root *os.Root, name string, b []byte, mode os.FileMode, uid uint32) error {
+	tmp := ".pomar-upgrade-pending-" + rand.Text()
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(tmp)
 	defer f.Close()
 	if uid != uint32(os.Geteuid()) {
 		if err = f.Chown(int(uid), -1); err != nil {
@@ -123,13 +155,26 @@ func durableWriteOwned(path string, b []byte, mode os.FileMode, uid uint32) erro
 	if err = f.Sync(); err != nil {
 		return err
 	}
+	written, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	linked, err := root.Lstat(tmp)
+	if err != nil || !os.SameFile(written, linked) || !linked.Mode().IsRegular() {
+		return fmt.Errorf("pending file replaced; write refused")
+	}
 	if err = f.Close(); err != nil {
 		return err
 	}
-	if err = os.Rename(tmp, path); err != nil {
+	if err = root.Rename(tmp, name); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func syncDirectory(path string) error {

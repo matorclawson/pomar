@@ -50,3 +50,66 @@ func TestBoundedFileReadRejectsIndirectionAndFIFO(t *testing.T) {
 		t.Fatal("fifo blocked")
 	}
 }
+
+// A directory owner can replace the original pathname while the upgrader is
+// root. The opened directory must remain the only destination for every effect.
+func TestDurableWriteAnchorsEffectsAcrossDirectorySymlinkReplacement(t *testing.T) {
+	d := t.TempDir()
+	parent, moved, outside := filepath.Join(d, "manager"), filepath.Join(d, "retained"), filepath.Join(d, "outside")
+	for _, p := range []string{parent, outside} {
+		if err := os.Mkdir(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sentinel := filepath.Join(outside, "table.json")
+	if err := os.WriteFile(sentinel, []byte("must remain unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.Rename(parent, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := durableWriteIn(root, "table.json", []byte("archived table"), 0600, uint32(os.Getuid())); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(sentinel)
+	if err != nil || string(got) != "must remain unchanged" {
+		t.Fatal("directory replacement redirected the write", string(got), err)
+	}
+	got, err = os.ReadFile(filepath.Join(moved, "table.json"))
+	if err != nil || string(got) != "archived table" {
+		t.Fatal("write did not stay in the opened directory", string(got), err)
+	}
+	if err := durableWriteOwned(filepath.Join(parent, "table.json"), []byte("refused"), 0600, uint32(os.Getuid())); err == nil {
+		t.Fatal("initial symlink directory accepted")
+	}
+}
+
+func TestDurableWriteDoesNotFollowDestinationSymlink(t *testing.T) {
+	d := t.TempDir()
+	sentinel, target := filepath.Join(d, "sentinel"), filepath.Join(d, "table.json")
+	if err := os.WriteFile(sentinel, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sentinel, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := durableWriteOwned(target, []byte("replacement"), 0600, uint32(os.Getuid())); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(sentinel)
+	if err != nil || string(got) != "untouched" {
+		t.Fatal("followed destination symlink", string(got), err)
+	}
+	st, err := os.Lstat(target)
+	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0600 {
+		t.Fatal("replacement is not an owned regular file", err)
+	}
+}
