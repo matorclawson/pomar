@@ -62,18 +62,25 @@ type Config struct {
 }
 
 type Result struct {
-	Schema           string    `json:"schema"`
-	Root             string    `json:"root"`
-	ManifestSHA256   string    `json:"manifest_sha256"`
-	Version          string    `json:"version"`
-	Started          time.Time `json:"started"`
-	Finished         time.Time `json:"finished"`
-	GateExit         *int      `json:"gate_exit,omitempty"`
-	GateError        string    `json:"gate_error,omitempty"`
-	CleanupError     string    `json:"cleanup_error,omitempty"`
-	Error            string    `json:"error,omitempty"`
-	LogsComplete     bool      `json:"logs_complete"`
-	CleanupConfirmed bool      `json:"cleanup_confirmed"`
+	Schema           string            `json:"schema"`
+	Root             string            `json:"root"`
+	ManifestSHA256   string            `json:"manifest_sha256"`
+	Version          string            `json:"version"`
+	Started          time.Time         `json:"started"`
+	Finished         time.Time         `json:"finished"`
+	GateExit         *int              `json:"gate_exit,omitempty"`
+	GateError        string            `json:"gate_error,omitempty"`
+	CleanupError     string            `json:"cleanup_error,omitempty"`
+	Error            string            `json:"error,omitempty"`
+	LogsComplete     bool              `json:"logs_complete"`
+	CleanupConfirmed bool              `json:"cleanup_confirmed"`
+	Directory        DirectoryIdentity `json:"directory"`
+}
+
+type DirectoryIdentity struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+	UID    uint32 `json:"uid"`
 }
 
 func hash(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
@@ -554,6 +561,15 @@ func Run(ctx context.Context, c Config) (r Result, err error) {
 		return r, e
 	}
 	defer root.Close()
+	info, e := root.Stat(".")
+	if e != nil {
+		return r, e
+	}
+	identity, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || identity.Uid != uint32(os.Geteuid()) || info.Mode().Perm() != 0700 {
+		return r, errors.New("invocation custody unavailable")
+	}
+	r.Directory = DirectoryIdentity{uint64(identity.Dev), uint64(identity.Ino), identity.Uid}
 	finish := func() {
 		r.Finished = time.Now().UTC()
 		if err != nil {
@@ -586,10 +602,11 @@ func Run(ctx context.Context, c Config) (r Result, err error) {
 		return r, e
 	}
 	if e := persist(root, "intent.json", struct {
-		Config  Config    `json:"config"`
-		Tools   string    `json:"tools_sha256"`
-		Started time.Time `json:"started"`
-	}{c, c.ManifestSHA256, r.Started}); e != nil {
+		Config    Config            `json:"config"`
+		Tools     string            `json:"tools_sha256"`
+		Directory DirectoryIdentity `json:"directory"`
+		Started   time.Time         `json:"started"`
+	}{c, c.ManifestSHA256, r.Directory, r.Started}); e != nil {
 		return r, e
 	}
 	parent, e := work.Open(".")
