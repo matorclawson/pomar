@@ -50,6 +50,11 @@ and never gain group/other write permissions. Actual target-UID access and
 immutable ownership must be qualified by the adopting owner. The old ordinary
 copy behavior is unchanged.
 
+The handle and its one-use state are in-process only. They are not a durable
+request fence across a host/service crash, and a missing handle never proves an
+original did not start. The adopting custodian must bind preparation and Start
+to its existing durable identity and uncertainty recovery before native use.
+
 The owner closes an abandoned handle. Once consumed, only the existing session
 lifetime cleans it, after process Wait and the existing process-group kill.
 Known Start failure cleans the preparation and permanently consumes its handle.
