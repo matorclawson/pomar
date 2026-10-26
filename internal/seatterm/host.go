@@ -132,6 +132,12 @@ func (h *SessionHost) record(r AuditRecord) error {
 // with the same pair returns the session it made, and never starts a
 // second program; a retry asking for a different spec is refused.
 func (h *SessionHost) Create(operation, principal string, spec SessionSpec) (*TermSession, bool, error) {
+	if spec.Prepared != nil {
+		// Own the invocation before journaling or validation can yield to another
+		// caller. The verified PATH and the executed environment must be one copy.
+		spec.Command.Args = append([]string(nil), spec.Command.Args...)
+		spec.Command.Env = append([]string(nil), spec.Command.Env...)
+	}
 	if operation == "" || principal == "" || !sessionWord.MatchString(spec.Name) || !sessionWord.MatchString(spec.Kind) || !filepath.IsAbs(spec.Command.Path) ||
 		spec.Cols < 1 || spec.Cols > MaxCols || spec.Rows < 1 || spec.Rows > MaxRows {
 		return nil, false, errors.New("a session needs an operation ID, a principal, a name, a kind, its command's absolute path and a bounded window size")

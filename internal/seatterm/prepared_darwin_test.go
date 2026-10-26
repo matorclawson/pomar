@@ -325,3 +325,32 @@ func TestPreparedRequiresCompleteOwnerPolicyAndCannotBeForgedByJSON(t *testing.T
 		t.Fatal("abandoned preparation reused")
 	}
 }
+
+func TestPreparedCreateFreezesArgumentsAndEnvironmentBeforeAudit(t *testing.T) {
+	root, c, pins := preparedFixture(t)
+	p := prepareFixture(t, root, c, pins)
+	c = preparedCommand(root, c, p)
+	unexpected := filepath.Join(root, "unexpected")
+	h := NewSessionHost(func(r AuditRecord) error {
+		if r.Action == "create" && r.Phase == "intent" {
+			c.Env[0] = "PATH=."
+			c.Args[0] = unexpected
+		}
+		return nil
+	})
+	s, _, err := h.Create("frozen-invocation", "owner", preparedSpec(c, p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("frozen invocation did not finish")
+	}
+	if _, err := os.Stat(filepath.Join(root, "launched")); err != nil {
+		t.Fatal("original arguments were changed", err)
+	}
+	if _, err := os.Stat(unexpected); !os.IsNotExist(err) {
+		t.Fatal("caller alias changed executed arguments", err)
+	}
+}

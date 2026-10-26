@@ -31,6 +31,10 @@ share the one-use state. A prepared session's replay fingerprint includes that
 identity and the expected-pin declaration; exact replay returns the original
 session, whereas a changed pin conflicts.
 
+Prepared session creation owns copies of arguments/environment before journaling,
+so lookup verification and actual Start use the same invocation even if the
+caller later changes its slice aliases.
+
 Immediately before Start, preparation verifies the private inode/mode, bytes
 and size, then resolves the selected lookups in the actual explicit Command.Env
 PATH. Empty, relative, duplicate, noncanonical or unbounded PATH entries refuse.
