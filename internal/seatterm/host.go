@@ -93,9 +93,11 @@ type AuditRecord struct {
 // exactly Command.Env: the host adds nothing, not even PATH, TERM or HOME,
 // so whoever makes the spec names each one.
 type SessionSpec struct {
-	Name       string
-	Kind       string // agent, shell, or another lower-case word
-	Command    Command
+	Name    string
+	Kind    string // agent, shell, or another lower-case word
+	Command Command
+	// Prepared is an owner-only in-process identity, never an HTTP/JSON token.
+	Prepared   *PreparedExecutable `json:"-"`
 	Cols, Rows uint16
 }
 
@@ -130,6 +132,12 @@ func (h *SessionHost) record(r AuditRecord) error {
 // with the same pair returns the session it made, and never starts a
 // second program; a retry asking for a different spec is refused.
 func (h *SessionHost) Create(operation, principal string, spec SessionSpec) (*TermSession, bool, error) {
+	if spec.Prepared != nil {
+		// Own the invocation before journaling or validation can yield to another
+		// caller. The verified PATH and the executed environment must be one copy.
+		spec.Command.Args = append([]string(nil), spec.Command.Args...)
+		spec.Command.Env = append([]string(nil), spec.Command.Env...)
+	}
 	if operation == "" || principal == "" || !sessionWord.MatchString(spec.Name) || !sessionWord.MatchString(spec.Kind) || !filepath.IsAbs(spec.Command.Path) ||
 		spec.Cols < 1 || spec.Cols > MaxCols || spec.Rows < 1 || spec.Rows > MaxRows {
 		return nil, false, errors.New("a session needs an operation ID, a principal, a name, a kind, its command's absolute path and a bounded window size")
@@ -224,6 +232,12 @@ func (h *SessionHost) pruneOps() {
 func fingerprint(s SessionSpec) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%q\x00%q\x00%q\x00%q\x00%q\x00%q\x00%d\x00%d\x00%d\x00%d",
 		s.Name, s.Kind, s.Command.Path, s.Command.Args, s.Command.Env, s.Command.Dir, s.Command.UID, s.Command.GID, s.Cols, s.Rows)))
+	if s.Prepared != nil {
+		// Ordinary fingerprints remain unchanged. A prepared replay also binds the
+		// exact one-use identity and its still-required expected-pin declaration.
+		sum = sha256.Sum256([]byte(fmt.Sprintf("%x\x00%s\x00%s\x00%t", sum,
+			s.Prepared.identity(), s.Command.ExpectedSHA256, s.Command.PreservesInstallPath)))
+	}
 	return hex.EncodeToString(sum[:])
 }
 
@@ -444,7 +458,20 @@ type pendingWrite struct {
 	cols, rows uint16 // a resize when data is nil
 }
 
-func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, error) {
+func startSession(h *SessionHost, id string, spec SessionSpec) (session *TermSession, err error) {
+	var finishPrepared func() error
+	started := false
+	if spec.Prepared != nil {
+		finishPrepared, err = spec.Prepared.consume(spec.Command)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if !started {
+				err = errors.Join(err, finishPrepared())
+			}
+		}()
+	}
 	master, tty, err := openPTY()
 	if err != nil {
 		return nil, err
@@ -469,7 +496,10 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	if c.UID >= 0 && c.GID >= 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(c.UID), Gid: uint32(c.GID)}
 	}
-	closeAfterStart, err := checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256, c.PreservesInstallPath)
+	var closeAfterStart func()
+	if spec.Prepared == nil {
+		closeAfterStart, err = checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256, c.PreservesInstallPath)
+	}
 	if err != nil {
 		slave.Close()
 		master.Close()
@@ -484,6 +514,7 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 		master.Close()
 		return nil, err
 	}
+	started = true
 	s := &TermSession{ID: id, Name: spec.Name, Kind: spec.Kind, host: h, master: master, tty: tty, cmd: cmd,
 		writes: make(chan pendingWrite, inputQueue), done: make(chan struct{}), reaped: make(chan struct{}),
 		cols: spec.Cols, rows: spec.Rows, viewers: map[*Client]struct{}{},
@@ -510,6 +541,9 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 		// time Stop gets to look).
 		s.groupSurvived = groupExists(cmd.Process.Pid)
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if finishPrepared != nil {
+			s.waitErr = errors.Join(s.waitErr, finishPrepared())
+		}
 		close(s.reaped)
 	}()
 	go s.pump()

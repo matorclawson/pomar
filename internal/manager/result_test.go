@@ -20,6 +20,9 @@ import (
 // openSigning opens a manager with a signing key (or none) and a control
 // socket, and serves it.
 func openSigning(t *testing.T, sign bool) (*Manager, *Client, *venue.Venue) {
+	return openSigningWithSpace(t, sign, nil)
+}
+func openSigningWithSpace(t *testing.T, sign bool, space func() (venue.Space, error)) (*Manager, *Client, *venue.Venue) {
 	t.Helper()
 	base := shortDir(t)
 	root := filepath.Join(base, "root")
@@ -45,7 +48,7 @@ func openSigning(t *testing.T, sign bool) (*Manager, *Client, *venue.Venue) {
 	os.Chmod(run, 0o750)
 	self, _ := os.Executable()
 	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour,
-		Host: capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB}, CtlSocket: filepath.Join(run, "ctl.sock"), Signer: signer})
+		Space: space, Host: capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB}, CtlSocket: filepath.Join(run, "ctl.sock"), Signer: signer})
 	if err != nil {
 		t.Fatal(err)
 	}
