@@ -4,4 +4,16 @@
 # clone with `make hooks`.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+# Git sets GIT_DIR (and sometimes GIT_WORK_TREE) in every hook's own
+# environment -- confirmed directly: without this unset, that leaks into
+# every subprocess make verify spawns, including internal/agentenv's own
+# test fixtures that run their own `git -C <tmpdir> init`. git's own
+# precedence gives an explicit GIT_DIR priority over -C's working-directory
+# selection for where it looks for repository administrative data, so those
+# fixture commands silently reinitialize/commit onto THIS repo's real .git
+# instead of the fresh tempdir they intended -- reproduced directly (in a
+# disposable clone, not this one): with GIT_DIR set, the affected test both
+# fails AND leaves a spurious "fixture" commit on HEAD; with it unset, the
+# same test passes cleanly and HEAD is untouched.
+unset GIT_DIR GIT_WORK_TREE
 make verify
