@@ -13,7 +13,7 @@ import (
 // lifting it lets starts through again (the elders' ruling of 2026-09-27
 // 17:21Z §2 item 2).
 func TestDrainRefusesNewStartsAndLeavesLiveOnes(t *testing.T) {
-	m, ctl, v := openSigning(t, false)
+	m, ctl, v := openSigningWithSpace(t, false, healthyFixtureSpace)
 	owner := NewClient(v.Root())
 	m.mu.Lock()
 	m.t.entries["live-1"] = &Entry{Attempt: "live-1", State: StateRunning, Class: capacity.CI, Created: time.Now()}
