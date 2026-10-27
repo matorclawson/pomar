@@ -287,14 +287,7 @@ class BoundaryTests(unittest.TestCase):
         # that this fixture became the active virtual environment.
         env = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C', '__PYVENV_LAUNCHER__': str(python)}
         probe = 'import sys,json; print(json.dumps({"prefix":sys.prefix,"site_loaded":"site" in sys.modules,"no_site":sys.flags.no_site}))'
-        isolated = subprocess.run([str(python), '-I', '-S', '-B', '-c', probe],
-                                  env=env, check=True, timeout=10, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        isolated_observation = json.loads(isolated.stdout)
-        print('site-fixture-no-site ' + json.dumps(isolated_observation), flush=True)
-        self.assertEqual(isolated_observation['prefix'], str(envroot))
-        self.assertEqual(isolated_observation['no_site'], 1)
-        self.assertFalse(isolated_observation['site_loaded'])
-        self.assertFalse(sentinel.exists())
+        # First prove the exact owned fixture actually runs site startup.
         control = subprocess.run([str(python), '-I', '-B', '-c', probe], env=env, check=True, timeout=10,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         control_observation = json.loads(control.stdout)
@@ -302,7 +295,16 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(control_observation['prefix'], str(envroot))
         self.assertEqual(control_observation['no_site'], 0)
         self.assertTrue(control_observation['site_loaded'])
-        self.assertTrue(sentinel.exists())  # Positive control uses only our inert owned venv.
+        self.assertTrue(sentinel.exists())
+        sentinel.unlink()  # Only this exact newly created synthetic marker.
+        isolated = subprocess.run([str(python), '-I', '-S', '-B', '-c', probe],
+                                  env=env, check=True, timeout=10, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        isolated_observation = json.loads(isolated.stdout)
+        print('site-fixture-no-site ' + json.dumps(isolated_observation) + ' stderr=' + repr(isolated.stderr), flush=True)
+        self.assertEqual(isolated_observation['prefix'], str(envroot))
+        self.assertEqual(isolated_observation['no_site'], 1)
+        self.assertFalse(isolated_observation['site_loaded'])
+        self.assertFalse(sentinel.exists())
 
     def test_fixed_version_source_pins_are_not_placeholders(self):
         self.assertEqual(ns['PG_SHA'], 'dd27f2b3c59e73ed14aa3324901242bf69a032a6347805f274e6260322d42979')
