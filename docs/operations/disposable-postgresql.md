@@ -55,6 +55,52 @@ sandbox or a signed execution observer.
 
 ## Independently selected tool manifest
 
+### Fixed disposable Vault fixture (source; not installed or qualified here)
+
+An independently selected tools manifest may explicitly set
+`"fixture_profile": "supabase-vault-0.3.1"` for PostgreSQL **17.11**. Omission
+keeps the ordinary no-preload behavior. Unknown profiles refuse. The caller must
+also request `-extension supabase_vault@0.3.1`; a manifest profile alone does not
+start or enable it. There is no caller-supplied preload list, command or GUC.
+
+The full prefix inventory must contain regular pinned `lib/supabase_vault.so`,
+the fixed-version/schema/module control file, `supabase_vault--0.3.0.sql` and
+`supabase_vault--0.3.0--0.3.1.sql`. Genuine upstream0.3.1 installs through that
+SQL upgrade chain, not an invented0.3.1 base SQL file. Native sodium/crypto link
+closure, actual extension versions and real SQL must still be qualified; file
+presence or a synthetic test is not that qualification. This profile does not
+create pgcrypto in a guessed schema: the consuming gate creates it in its
+reviewed `extensions` schema using the genuine pinned prefix.
+
+For this profile only, the helper durably records nonsecret fixture intent,
+then generates32 cryptographically random synthetic bytes for each new cluster.
+The64-hex protocol is stored in a private0600 file, served by one fixed0700
+getkey script inside that original's owned0700 directory. Because upstream uses
+`popen`, only canonical paths composed of ASCII letters, digits, `/`, `_`, `-`
+and `.` are accepted. Neither the key nor its digest is placed in public
+metadata, logs or environment. The script invokes only `/bin/cat` with the
+internally constructed key path; no external key service or production key is
+read. The server starts with exactly `shared_preload_libraries=supabase_vault`
+and this internally constructed `vault.getkey_script`. Plain clusters retain
+their previous argument list.
+
+Original server shutdown, stream handling, absent custody markers and unchanged
+directory identity must be confirmed before the exact original key/helper files
+are unlinked and the directory is synced. File identity, bytes, modes, ownership
+and single-link custody are rechecked. A changed path, failed write/sync/removal
+or uncertain shutdown prevents a clean result. Private original state is then
+held for supported owner reconciliation; it is never reused by a later cluster.
+A successful key cleanup retains the ordinary nonsecret evidence/data root.
+Deletion is unlinking, not a promise of physical-media erasure. Shared-account
+processes still are not an OS isolation boundary.
+
+`POMAR_POSTGRES_VAULT_TEST_MANIFEST` and its separate `_SHA256` select the
+opt-in real Vault encryption/decryption/pgcrypto/cleanup test. Without both it
+skips; ordinary tests do not infer native tool authority. Executed native smoke,
+the consumer's complete migrations/four assertions, independent lifecycle review
+and actual Scheduler admission remain required. No service, installed release
+or consumer result follows from these source changes.
+
 The JSON schema is `pomar.postgres-tools/v1`. The separate manifest SHA256 is
 mandatory; an input cannot select its own expected hash. Unknown/duplicate keys,
 trailing documents, a wrong host version or an incomplete closure refuse.

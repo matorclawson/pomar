@@ -48,6 +48,15 @@ type Tools struct {
 	BootstrapRole    string            `json:"bootstrap_role"`
 	Files            []FilePin         `json:"files"`
 	RoleProfiles     map[string]string `json:"role_profiles,omitempty"`
+	FixtureProfile   string            `json:"fixture_profile,omitempty"`
+}
+
+const vaultFixtureProfile = "supabase-vault-0.3.1"
+
+var vaultFixtureFiles = []string{
+	"lib/supabase_vault.so", "share/extension/supabase_vault.control",
+	"share/extension/supabase_vault--0.3.0.sql",
+	"share/extension/supabase_vault--0.3.0--0.3.1.sql",
 }
 
 type Config struct {
@@ -284,6 +293,16 @@ func VerifyTools(ctx context.Context, path, expected string) (*Tools, error) {
 			return nil, errors.New("reviewed role profile pin missing")
 		}
 	}
+	if t.FixtureProfile != "" {
+		if t.FixtureProfile != vaultFixtureProfile || t.Version != "17.11" {
+			return nil, errors.New("unsupported fixed fixture profile")
+		}
+		for _, name := range vaultFixtureFiles {
+			if p, ok := pins[name]; !ok || p.Link != "" {
+				return nil, errors.New("fixed Vault fixture closure missing")
+			}
+		}
+	}
 	seen := map[string]bool{}
 	type inode struct{ device, number uint64 }
 	counts := map[inode]uint64{}
@@ -354,6 +373,31 @@ func VerifyTools(ctx context.Context, path, expected string) (*Tools, error) {
 	for id, count := range counts {
 		if count != linkCounts[id] {
 			return nil, errors.New("tool hardlink has an alias outside the inventoried prefix")
+		}
+	}
+	if t.FixtureProfile == vaultFixtureProfile {
+		name := "share/extension/supabase_vault.control"
+		b, e := pinned(filepath.Join(t.Prefix, name), pins[name].Bytes, t.Owner)
+		if e != nil || hash(b) != pins[name].SHA256 {
+			return nil, errors.New("Vault control changed")
+		}
+		settings := map[string]string{}
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			key, value, ok := strings.Cut(line, "=")
+			key = strings.TrimSpace(key)
+			if !ok || settings[key] != "" {
+				return nil, errors.New("ambiguous Vault control")
+			}
+			settings[key] = strings.TrimSpace(value)
+		}
+		for key, value := range map[string]string{"default_version": "'0.3.1'", "module_pathname": "'$libdir/supabase_vault'", "schema": "vault", "relocatable": "false"} {
+			if settings[key] != value {
+				return nil, errors.New("fixed Vault control binding differs")
+			}
 		}
 	}
 	return &t, ctx.Err()
@@ -511,6 +555,141 @@ func persistBytes(root *os.Root, name string, b []byte) error {
 	return errors.Join(d.Sync(), d.Close())
 }
 
+// Vault invokes its getkey path through popen. Accept no shell metacharacters,
+// whitespace, relative components or alternate user-supplied executable here.
+func vaultPath(path string) bool {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return false
+	}
+	for _, c := range path {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("/_-.", c)) {
+			return false
+		}
+	}
+	return true
+}
+
+type vaultFixture struct {
+	keyInfo, helperInfo os.FileInfo
+	keyHash, helperHash string // Private in-memory checks only; never serialized.
+}
+
+func fixtureFile(root *os.Root, name string, b []byte, mode os.FileMode) (os.FileInfo, error) {
+	f, e := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	if e != nil {
+		return nil, e
+	}
+	n, e := f.Write(b)
+	if e == nil && n != len(b) {
+		e = io.ErrShortWrite
+	}
+	if e == nil {
+		e = f.Chmod(mode)
+	}
+	if e == nil {
+		e = f.Sync()
+	}
+	st, se := f.Stat()
+	return st, errors.Join(e, se, f.Close())
+}
+
+func prepareVaultFixture(root *os.Root, run string) (*vaultFixture, error) {
+	if !vaultPath(run) {
+		return nil, errors.New("unsafe fixed Vault helper path")
+	}
+	if e := boundDirectory(root, run); e != nil {
+		return nil, e
+	}
+	if e := persist(root, "vault-fixture-intent.json", struct {
+		Profile    string `json:"profile"`
+		Key        string `json:"private_key_path"`
+		Helper     string `json:"helper_path"`
+		Generation string `json:"generation"`
+	}{vaultFixtureProfile, "vault-root-key", "vault-getkey", "crypto/rand 32 fresh synthetic bytes; never reused"}); e != nil {
+		return nil, e
+	}
+	f := &vaultFixture{}
+	var key [32]byte
+	if _, e := rand.Read(key[:]); e != nil {
+		return f, e
+	}
+	b := []byte(hex.EncodeToString(key[:]) + "\n")
+	f.keyHash = hash(b)
+	var e error
+	f.keyInfo, e = fixtureFile(root, "vault-root-key", b, 0600)
+	clear(key[:])
+	clear(b)
+	if e != nil {
+		return f, e
+	}
+	helper := []byte("#!/bin/sh\nexec /bin/cat '" + filepath.Join(run, "vault-root-key") + "'\n")
+	f.helperHash = hash(helper)
+	f.helperInfo, e = fixtureFile(root, "vault-getkey", helper, 0700)
+	if e != nil {
+		return f, e
+	}
+	d, e := root.Open(".")
+	if e != nil {
+		return f, e
+	}
+	return f, errors.Join(d.Sync(), d.Close())
+}
+
+func (f *vaultFixture) verify(root *os.Root, run string) error {
+	if e := boundDirectory(root, run); e != nil {
+		return e
+	}
+	for _, x := range []struct {
+		name   string
+		info   os.FileInfo
+		digest string
+		mode   os.FileMode
+	}{
+		{"vault-root-key", f.keyInfo, f.keyHash, 0600}, {"vault-getkey", f.helperInfo, f.helperHash, 0700},
+	} {
+		st, e := root.Lstat(x.name)
+		if e != nil || x.info == nil || !os.SameFile(st, x.info) || !st.Mode().IsRegular() || st.Mode().Perm() != x.mode {
+			return errors.New("Vault fixture identity/mode changed; retain private custody")
+		}
+		b, e := pinned(filepath.Join(run, x.name), 4096, uint32(os.Geteuid()))
+		if e != nil || hash(b) != x.digest {
+			clear(b)
+			return errors.New("Vault fixture content/custody changed")
+		}
+		clear(b)
+	}
+	return nil
+}
+
+func (f *vaultFixture) cleanup(root *os.Root, run string, stopped bool) error {
+	if !stopped {
+		return errors.New("Vault fixture retained: original shutdown unconfirmed")
+	}
+	if e := f.verify(root, run); e != nil {
+		return e
+	}
+	// No glob, recursive removal or saved-PID action; only this original's files.
+	if e := root.Remove("vault-getkey"); e != nil {
+		return e
+	}
+	if e := root.Remove("vault-root-key"); e != nil {
+		return e
+	}
+	d, e := root.Open(".")
+	if e != nil {
+		return e
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
+
+func postgresArgs(run, socket string, fixture bool) []string {
+	args := []string{"-D", filepath.Join(run, "data"), "-k", socket, "-h", "", "-p", "5432", "-c", "unix_socket_permissions=0700", "-c", "logging_collector=off"}
+	if fixture {
+		args = append(args, "-c", "shared_preload_libraries=supabase_vault", "-c", "vault.getkey_script="+filepath.Join(run, "vault-getkey"))
+	}
+	return args
+}
+
 // Run never reuses or removes an invocation root. An interrupted/incomplete root
 // remains evidence, not authority to signal a process from a saved PID.
 func Run(ctx context.Context, c Config) (r Result, err error) {
@@ -528,6 +707,10 @@ func Run(ctx context.Context, c Config) (r Result, err error) {
 		return r, e
 	}
 	r.Version = tools.Version
+	vault := tools.FixtureProfile == vaultFixtureProfile
+	if vault && (c.Extensions["supabase_vault"] != "0.3.1" || !vaultPath(c.WorkRoot)) {
+		return r, errors.New("fixed Vault profile requires explicit supabase_vault@0.3.1 and safe owned work path")
+	}
 	if c.RoleProfile != "" && tools.RoleProfiles[c.RoleProfile] == "" {
 		return r, errors.New("unadopted role profile")
 	}
@@ -536,6 +719,10 @@ func Run(ctx context.Context, c Config) (r Result, err error) {
 		files[p.Path] = p.Link == ""
 	}
 	for name, version := range c.Extensions {
+		// Upstream0.3.1 installs via0.3.0 plus its pinned upgrade script.
+		if vault && name == "supabase_vault" {
+			continue
+		}
 		if !files["share/extension/"+name+".control"] || !files["share/extension/"+name+"--"+version+".sql"] {
 			return r, fmt.Errorf("required extension not in pinned closure: %s@%s", name, version)
 		}
@@ -662,7 +849,27 @@ func Run(ctx context.Context, c Config) (r Result, err error) {
 	if e := boundDirectory(root, run); e != nil {
 		return r, e
 	}
-	server := exec.Command(filepath.Join(tools.Prefix, "bin/postgres"), "-D", filepath.Join(run, "data"), "-k", socket, "-h", "", "-p", "5432", "-c", "unix_socket_permissions=0700", "-c", "logging_collector=off")
+	var fixture *vaultFixture
+	serverStarted := false
+	if vault {
+		fixture, e = prepareVaultFixture(root, run)
+		defer func() {
+			// Before Start succeeds there is no original server to depend on the key.
+			if fixture != nil && !serverStarted {
+				if e := fixture.cleanup(root, run, true); e != nil {
+					r.CleanupError = "incomplete private Vault preparation cleanup"
+					err = errors.Join(err, e)
+				}
+			}
+		}()
+		if e != nil {
+			return r, e
+		}
+		if e := fixture.verify(root, run); e != nil {
+			return r, e
+		}
+	}
+	server := exec.Command(filepath.Join(tools.Prefix, "bin/postgres"), postgresArgs(run, socket, vault)...)
 	server.Env = env
 	server.Dir = run
 	server.Stdout = logs[0]
@@ -674,6 +881,7 @@ func Run(ctx context.Context, c Config) (r Result, err error) {
 	if e := server.Start(); e != nil {
 		return r, e
 	}
+	serverStarted = true
 	// Process is the exact child returned by Start, never reconstructed from PID.
 	done := make(chan struct{})
 	var serverErr error
@@ -735,6 +943,13 @@ func Run(ctx context.Context, c Config) (r Result, err error) {
 			r.CleanupConfirmed = false
 			r.CleanupError = e.Error()
 			err = errors.Join(err, e)
+		}
+		if fixture != nil {
+			if e := fixture.cleanup(root, run, r.CleanupConfirmed); e != nil {
+				r.CleanupConfirmed = false
+				r.CleanupError = "private Vault fixture cleanup unconfirmed"
+				err = errors.Join(err, e)
+			}
 		}
 		if e := persist(root, "cleanup.json", struct {
 			Started   time.Time `json:"started"`

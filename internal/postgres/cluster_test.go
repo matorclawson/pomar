@@ -4,8 +4,10 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -45,6 +47,263 @@ func fixtureTools(t *testing.T) (string, string, Tools) {
 		t.Fatal(e)
 	}
 	return path, hash(raw), m
+}
+
+func fixtureVaultTools(t *testing.T) (string, string, Tools) {
+	t.Helper()
+	path, _, m := fixtureTools(t)
+	m.FixtureProfile = vaultFixtureProfile
+	for _, name := range vaultFixtureFiles {
+		b := []byte("synthetic nonexecuted Vault closure\n")
+		if strings.HasSuffix(name, ".control") {
+			b = []byte("default_version = '0.3.1'\nmodule_pathname = '$libdir/supabase_vault'\nschema = vault\nrelocatable = false\n")
+		}
+		p := filepath.Join(m.Prefix, name)
+		if e := os.MkdirAll(filepath.Dir(p), 0700); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.WriteFile(p, b, 0600); e != nil {
+			t.Fatal(e)
+		}
+		m.Files = append(m.Files, FilePin{Path: name, SHA256: hash(b), Bytes: int64(len(b)), Mode: 0600})
+	}
+	b, _ := json.Marshal(m)
+	if e := os.WriteFile(path, b, 0600); e != nil {
+		t.Fatal(e)
+	}
+	return path, hash(b), m
+}
+
+func TestVaultFixedProfileRequiresExactPinnedClosureAndControl(t *testing.T) {
+	for _, change := range []string{"none", "unknown-profile", "wrong-server", "missing-upgrade", "wrong-control", "duplicate-control"} {
+		t.Run(change, func(t *testing.T) {
+			path, _, m := fixtureVaultTools(t)
+			switch change {
+			case "unknown-profile":
+				m.FixtureProfile = "caller-selected-command"
+			case "wrong-server":
+				m.Version = "17.12"
+			case "missing-upgrade":
+				m.Files = m.Files[:len(m.Files)-1]
+			case "wrong-control", "duplicate-control":
+				for i, p := range m.Files {
+					if !strings.HasSuffix(p.Path, ".control") {
+						continue
+					}
+					b, e := os.ReadFile(filepath.Join(m.Prefix, p.Path))
+					if e != nil {
+						t.Fatal(e)
+					}
+					if change == "wrong-control" {
+						b = bytes.Replace(b, []byte("schema = vault"), []byte("schema = elsewhere"), 1)
+					} else {
+						b = append(b, []byte("schema = vault\n")...)
+					}
+					if e := os.WriteFile(filepath.Join(m.Prefix, p.Path), b, 0600); e != nil {
+						t.Fatal(e)
+					}
+					m.Files[i].Bytes, m.Files[i].SHA256 = int64(len(b)), hash(b)
+				}
+			}
+			b, _ := json.Marshal(m)
+			if e := os.WriteFile(path, b, 0600); e != nil {
+				t.Fatal(e)
+			}
+			_, e := VerifyTools(context.Background(), path, hash(b))
+			if (change == "none") != (e == nil) {
+				t.Fatal("fixed profile closure decision differs", change, e)
+			}
+		})
+	}
+}
+
+func TestVaultFixedProfileRefusesMissingRequestBeforeInvocation(t *testing.T) {
+	path, h, _ := fixtureVaultTools(t)
+	work, e := filepath.EvalSymlinks(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	c := Config{Manifest: path, ManifestSHA256: h, WorkRoot: work, GateDir: work, Gate: []string{"/nonexecuted"}, Whole: time.Minute, Startup: time.Second, Stop: time.Second, LogBytes: 4096}
+	if _, e := Run(context.Background(), c); e == nil || !strings.Contains(e.Error(), "explicit supabase_vault") {
+		t.Fatal("missing explicit request did not refuse before start", e)
+	}
+	entries, e := os.ReadDir(work)
+	if e != nil || len(entries) != 0 {
+		t.Fatal("refusal created an invocation", e)
+	}
+}
+
+func TestVaultHelperPathRejectsShellInjectionAndDefaultsDoNotPreload(t *testing.T) {
+	for _, path := range []string{"relative", "/a/../b", "/a b", "/a;touch", "/a$(id)", "/a'quote", "/a\nline", "/a`id`"} {
+		if vaultPath(path) {
+			t.Fatal("shell-unsafe path accepted")
+		}
+	}
+	if !vaultPath("/owned/run-01_a.b") {
+		t.Fatal("safe owned path refused")
+	}
+	if strings.Contains(strings.Join(postgresArgs("/owned/run", "/owned/run/s", false), " "), "vault") {
+		t.Fatal("default profile preloads Vault")
+	}
+	args := strings.Join(postgresArgs("/owned/run", "/owned/run/s", true), " ")
+	if !strings.Contains(args, "shared_preload_libraries=supabase_vault") || !strings.Contains(args, "vault.getkey_script=/owned/run/vault-getkey") {
+		t.Fatal("fixed preload arguments missing")
+	}
+}
+
+func ownedVaultFixture(t *testing.T) (*os.Root, string, *vaultFixture) {
+	t.Helper()
+	// Canonicalize the fixture parent only; retain the real path identity.
+	path, e := filepath.EvalSymlinks(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
+	root, e := os.OpenRoot(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	f, e := prepareVaultFixture(root, path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return root, path, f
+}
+
+func TestVaultSyntheticKeyHelperAndConfirmedCleanup(t *testing.T) {
+	root, path, f := ownedVaultFixture(t)
+	if e := f.verify(root, path); e != nil {
+		t.Fatal(e)
+	}
+	key, e := os.ReadFile(filepath.Join(path, "vault-root-key"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer clear(key)
+	b, e := hex.DecodeString(strings.TrimSpace(string(key)))
+	if e != nil || len(b) != 32 {
+		t.Fatal("invalid synthetic key protocol")
+	}
+	clear(b)
+	// Exercise only our newly generated fixed helper; never a private owner key.
+	got, e := exec.Command(filepath.Join(path, "vault-getkey")).Output()
+	if e != nil || !bytes.Equal(got, key) {
+		clear(got)
+		t.Fatal("fixed helper did not return the original synthetic key")
+	}
+	clear(got)
+	intent, e := os.ReadFile(filepath.Join(path, "vault-fixture-intent.json"))
+	if e != nil || bytes.Contains(intent, bytes.TrimSpace(key)) || !bytes.Contains(intent, []byte(vaultFixtureProfile)) {
+		t.Fatal("intent missing or contains private bytes")
+	}
+	if e := f.cleanup(root, path, false); e == nil {
+		t.Fatal("uncertain original allowed key deletion")
+	}
+	if e := f.verify(root, path); e != nil {
+		t.Fatal("uncertain custody changed", e)
+	}
+	if e := f.cleanup(root, path, true); e != nil {
+		t.Fatal(e)
+	}
+	for _, name := range []string{"vault-root-key", "vault-getkey"} {
+		if _, e := root.Lstat(name); !os.IsNotExist(e) {
+			t.Fatal("confirmed shutdown retained key/helper", e)
+		}
+	}
+	if _, e := root.Lstat("vault-fixture-intent.json"); e != nil {
+		t.Fatal("nonsecret evidence removed", e)
+	}
+	if _, e := prepareVaultFixture(root, path); e == nil {
+		t.Fatal("original intent reused")
+	}
+}
+
+func TestVaultNewClustersNeverReuseKeysAndReplacementRefusesCleanup(t *testing.T) {
+	root, path, f := ownedVaultFixture(t)
+	_, otherPath, other := ownedVaultFixture(t)
+	if f.keyHash == other.keyHash {
+		t.Fatal("new cluster reused key")
+	}
+	out := filepath.Join(otherPath, "do-not-remove")
+	if e := os.WriteFile(out, []byte("unrelated"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e := root.Remove("vault-getkey"); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Symlink(out, filepath.Join(path, "vault-getkey")); e != nil {
+		t.Fatal(e)
+	}
+	if e := f.cleanup(root, path, true); e == nil {
+		t.Fatal("replaced helper authorized deletion")
+	}
+	if b, e := os.ReadFile(out); e != nil || string(b) != "unrelated" {
+		t.Fatal("unrelated file changed")
+	}
+	if _, e := root.Lstat("vault-root-key"); e != nil {
+		t.Fatal("uncertain replacement removed private original", e)
+	}
+}
+
+func TestVaultCleanupHoldsChangedKeyCustody(t *testing.T) {
+	for _, change := range []string{"bytes", "mode", "hardlink"} {
+		t.Run(change, func(t *testing.T) {
+			root, path, f := ownedVaultFixture(t)
+			key := filepath.Join(path, "vault-root-key")
+			switch change {
+			case "bytes":
+				if e := os.WriteFile(key, []byte(strings.Repeat("0", 64)+"\n"), 0600); e != nil {
+					t.Fatal(e)
+				}
+			case "mode":
+				if e := os.Chmod(key, 0644); e != nil {
+					t.Fatal(e)
+				}
+			case "hardlink":
+				if e := os.Link(key, filepath.Join(path, "unapproved-alias")); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if e := f.cleanup(root, path, true); e == nil {
+				t.Fatal("changed private custody accepted", change)
+			}
+			for _, name := range []string{"vault-root-key", "vault-getkey"} {
+				if _, e := root.Lstat(name); e != nil {
+					t.Fatal("uncertain cleanup removed original state", e)
+				}
+			}
+		})
+	}
+}
+
+func TestRealVaultFixtureEncryptDecryptAndCleanup(t *testing.T) {
+	path, h := os.Getenv("POMAR_POSTGRES_VAULT_TEST_MANIFEST"), os.Getenv("POMAR_POSTGRES_VAULT_TEST_MANIFEST_SHA256")
+	if path == "" || h == "" {
+		t.Skip("explicit genuine Vault prefix and separate admitted native original required")
+	}
+	tools, e := VerifyTools(context.Background(), path, h)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if tools.FixtureProfile != vaultFixtureProfile {
+		t.Fatal("genuine fixed Vault profile required")
+	}
+	work := shortWorkRoot(t)
+	sql := `CREATE SCHEMA extensions; CREATE EXTENSION pgcrypto WITH SCHEMA extensions; SELECT vault.create_secret('synthetic-only', 'fixture'); SELECT decrypted_secret = 'synthetic-only' FROM vault.decrypted_secrets WHERE name='fixture'; SELECT extensions.digest('fixture','sha256') IS NOT NULL, length(extensions.gen_random_uuid()::text)=36;`
+	c := Config{WorkRoot: work, GateDir: work, Manifest: path, ManifestSHA256: h, Whole: time.Minute, Startup: 20 * time.Second, Stop: 10 * time.Second, LogBytes: 1 << 20, Extensions: map[string]string{"supabase_vault": "0.3.1"}, Gate: []string{filepath.Join(tools.Prefix, "bin/psql"), "-X", "-v", "ON_ERROR_STOP=1", "-Atc", sql}}
+	r, e := Run(context.Background(), c)
+	if e != nil || !r.CleanupConfirmed || r.GateExit == nil || *r.GateExit != 0 {
+		t.Fatal("real Vault smoke/cleanup failed", r, e)
+	}
+	out, e := os.ReadFile(filepath.Join(r.Root, "gate.stdout"))
+	if e != nil || !strings.Contains(string(out), "\nt\nt|t\n") {
+		t.Fatal("real encryption/digest/UUID observations missing", e)
+	}
+	for _, name := range []string{"vault-root-key", "vault-getkey"} {
+		if _, e := os.Lstat(filepath.Join(r.Root, name)); !os.IsNotExist(e) {
+			t.Fatal("fixture secret retained after confirmed shutdown", e)
+		}
+	}
 }
 func TestManifestRefusesMutationOmissionExtrasAndWrongPlatform(t *testing.T) {
 	for _, change := range []string{"bytes", "unlisted", "missing", "platform", "manifest-digest", "duplicate-json", "symlink-parent"} {
