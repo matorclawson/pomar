@@ -593,14 +593,37 @@ func fixtureFile(root *os.Root, name string, b []byte, mode os.FileMode) (os.Fil
 	return st, errors.Join(e, se, f.Close())
 }
 
+// The public Run path always supplies these fixed filesystem operations. This
+// per-invocation seam is limited to the fixture transaction, so tests can model
+// short writes/sync failures without global hooks or caller-controlled options.
+type vaultFixtureIO struct {
+	intent func(*os.Root, string, any) error
+	file   func(*os.Root, string, []byte, os.FileMode) (os.FileInfo, error)
+	sync   func(*os.Root) error
+}
+
+func fixtureSync(root *os.Root) error {
+	d, e := root.Open(".")
+	if e != nil {
+		return e
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
+
+func fixedVaultIO() vaultFixtureIO { return vaultFixtureIO{persist, fixtureFile, fixtureSync} }
+
 func prepareVaultFixture(root *os.Root, run string) (*vaultFixture, error) {
+	return prepareVaultFixtureIO(root, run, fixedVaultIO())
+}
+
+func prepareVaultFixtureIO(root *os.Root, run string, store vaultFixtureIO) (*vaultFixture, error) {
 	if !vaultPath(run) {
 		return nil, errors.New("unsafe fixed Vault helper path")
 	}
 	if e := boundDirectory(root, run); e != nil {
 		return nil, e
 	}
-	if e := persist(root, "vault-fixture-intent.json", struct {
+	if e := store.intent(root, "vault-fixture-intent.json", struct {
 		Profile    string `json:"profile"`
 		Key        string `json:"private_key_path"`
 		Helper     string `json:"helper_path"`
@@ -616,7 +639,7 @@ func prepareVaultFixture(root *os.Root, run string) (*vaultFixture, error) {
 	b := []byte(hex.EncodeToString(key[:]) + "\n")
 	f.keyHash = hash(b)
 	var e error
-	f.keyInfo, e = fixtureFile(root, "vault-root-key", b, 0600)
+	f.keyInfo, e = store.file(root, "vault-root-key", b, 0600)
 	clear(key[:])
 	clear(b)
 	if e != nil {
@@ -624,15 +647,11 @@ func prepareVaultFixture(root *os.Root, run string) (*vaultFixture, error) {
 	}
 	helper := []byte("#!/bin/sh\nexec /bin/cat '" + filepath.Join(run, "vault-root-key") + "'\n")
 	f.helperHash = hash(helper)
-	f.helperInfo, e = fixtureFile(root, "vault-getkey", helper, 0700)
+	f.helperInfo, e = store.file(root, "vault-getkey", helper, 0700)
 	if e != nil {
 		return f, e
 	}
-	d, e := root.Open(".")
-	if e != nil {
-		return f, e
-	}
-	return f, errors.Join(d.Sync(), d.Close())
+	return f, store.sync(root)
 }
 
 func (f *vaultFixture) verify(root *os.Root, run string) error {
@@ -693,6 +712,10 @@ func postgresArgs(run, socket string, fixture bool) []string {
 // Run never reuses or removes an invocation root. An interrupted/incomplete root
 // remains evidence, not authority to signal a process from a saved PID.
 func Run(ctx context.Context, c Config) (r Result, err error) {
+	return runWithVaultIO(ctx, c, fixedVaultIO())
+}
+
+func runWithVaultIO(ctx context.Context, c Config, store vaultFixtureIO) (r Result, err error) {
 	r = Result{Schema: "pomar.postgres-run/v1", Started: time.Now().UTC(), ManifestSHA256: c.ManifestSHA256}
 	if ctx == nil {
 		return r, errors.New("context required")
@@ -852,17 +875,26 @@ func Run(ctx context.Context, c Config) (r Result, err error) {
 	var fixture *vaultFixture
 	serverStarted := false
 	if vault {
-		fixture, e = prepareVaultFixture(root, run)
+		fixture, e = prepareVaultFixtureIO(root, run, store)
 		defer func() {
 			// Before Start succeeds there is no original server to depend on the key.
 			if fixture != nil && !serverStarted {
-				if e := fixture.cleanup(root, run, true); e != nil {
+				cleanupErr := fixture.cleanup(root, run, true)
+				if cleanupErr != nil {
 					r.CleanupError = "incomplete private Vault preparation cleanup"
+					err = errors.Join(err, cleanupErr)
+				}
+				if e := persist(root, "vault-fixture-cleanup.json", struct {
+					NoServerStarted bool `json:"no_server_started"`
+					Confirmed       bool `json:"confirmed"`
+				}{true, cleanupErr == nil}); e != nil {
+					r.CleanupError = "private Vault preparation cleanup persistence unconfirmed"
 					err = errors.Join(err, e)
 				}
 			}
 		}()
 		if e != nil {
+			r.CleanupError = "private Vault preparation incomplete; no postmaster started"
 			return r, e
 		}
 		if e := fixture.verify(root, run); e != nil {

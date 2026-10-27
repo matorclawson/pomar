@@ -94,6 +94,17 @@ A successful key cleanup retains the ordinary nonsecret evidence/data root.
 Deletion is unlinking, not a promise of physical-media erasure. Shared-account
 processes still are not an OS isolation boundary.
 
+Behavioral source tests also drive the complete `Run` path using explicitly
+synthetic, non-database initdb/postmaster/psql files. Per-invocation fixture I/O
+faults cover intent failure, short key writes, file/directory sync uncertainty,
+key-created/helper-failed preparation and a pre-Start executable failure. A
+separate one-child synthetic shutdown test covers retained private state after
+the kill/uncertain branch. The public API always constructs fixed real I/O;
+these tests add no caller flags, global fault hooks or alternative controller.
+Before-Start successful key cleanup has its own synced nonsecret receipt;
+failure and uncertainty remain in the ordinary result. Such controls must
+actually execute before claiming coverage and do not qualify PostgreSQL or Vault.
+
 `POMAR_POSTGRES_VAULT_TEST_MANIFEST` and its separate `_SHA256` select the
 opt-in real Vault encryption/decryption/pgcrypto/cleanup test. Without both it
 skips; ordinary tests do not infer native tool authority. Executed native smoke,

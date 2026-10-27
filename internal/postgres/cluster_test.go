@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +22,10 @@ func fixtureTools(t *testing.T) (string, string, Tools) {
 	if os.Geteuid() == 0 {
 		t.Skip("production refuses root; use an ordinary test account")
 	}
-	d := t.TempDir()
+	d, e := filepath.EvalSymlinks(t.TempDir())
+	if e != nil {
+		t.Fatal(e)
+	}
 	prefix := filepath.Join(d, "tools")
 	if e := os.Mkdir(prefix, 0700); e != nil {
 		t.Fatal(e)
@@ -274,6 +279,164 @@ func TestVaultCleanupHoldsChangedKeyCustody(t *testing.T) {
 			}
 		})
 	}
+}
+
+// These fake initdb/postmaster/psql files exercise Run's effect ordering, not
+// PostgreSQL, SQL or native extension qualification. No system database is used.
+func syntheticVaultRun(t *testing.T, server string) Config {
+	t.Helper()
+	path, _, m := fixtureVaultTools(t)
+	scripts := map[string]string{
+		"bin/initdb":   "#!/bin/sh\nexec /bin/mkdir -m 700 \"$2\"\n",
+		"bin/postgres": server,
+		"bin/psql":     "#!/bin/sh\n[ -f synthetic-server-ready ] || exit 1\nprintf 't\\n'\n",
+	}
+	for i, pin := range m.Files {
+		s, ok := scripts[pin.Path]
+		if !ok {
+			continue
+		}
+		b := []byte(s)
+		if e := os.WriteFile(filepath.Join(m.Prefix, pin.Path), b, 0700); e != nil {
+			t.Fatal(e)
+		}
+		m.Files[i].SHA256, m.Files[i].Bytes = hash(b), int64(len(b))
+	}
+	b, _ := json.Marshal(m)
+	if e := os.WriteFile(path, b, 0600); e != nil {
+		t.Fatal(e)
+	}
+	work, e := filepath.EvalSymlinks(shortWorkRoot(t)) // Retained simulated original.
+	if e != nil {
+		t.Fatal(e)
+	}
+	return Config{Manifest: path, ManifestSHA256: hash(b), WorkRoot: work, GateDir: work,
+		Whole: 10 * time.Second, Startup: 2 * time.Second, Stop: time.Second, LogBytes: 1 << 20,
+		Extensions: map[string]string{"supabase_vault": "0.3.1"}, Gate: []string{"/bin/true"}}
+}
+
+func TestVaultRunPreparationFaultsNeverStartOrReplay(t *testing.T) {
+	for _, mode := range []string{"intent-write", "intent-sync", "key-short-write", "key-sync", "helper-create", "helper-sync", "directory-sync", "pre-start"} {
+		t.Run(mode, func(t *testing.T) {
+			// If reached this server writes a marker. None of these failures may
+			// reach Start, even if a fixture key already exists.
+			server := "#!/bin/sh\n: > unauthorized-postmaster\nexit 99\n"
+			if mode == "pre-start" {
+				server = "synthetic invalid executable, never a database\n"
+			}
+			c := syntheticVaultRun(t, server)
+			store := fixedVaultIO()
+			if mode == "intent-write" {
+				store.intent = func(*os.Root, string, any) error { return io.ErrShortWrite }
+			}
+			if mode == "intent-sync" {
+				store.intent = func(root *os.Root, name string, value any) error {
+					return errors.Join(persist(root, name, value), errors.New("synthetic intent sync uncertainty"))
+				}
+			}
+			store.file = func(root *os.Root, name string, b []byte, perm os.FileMode) (os.FileInfo, error) {
+				if mode == "helper-create" && name == "vault-getkey" {
+					return nil, os.ErrPermission
+				}
+				if mode == "key-short-write" && name == "vault-root-key" {
+					st, e := fixtureFile(root, name, b[:7], perm)
+					return st, errors.Join(e, io.ErrShortWrite)
+				}
+				st, e := fixtureFile(root, name, b, perm)
+				if mode == "key-sync" && name == "vault-root-key" || mode == "helper-sync" && name == "vault-getkey" {
+					return st, errors.Join(e, errors.New("synthetic fixture fsync failure"))
+				}
+				return st, e
+			}
+			if mode == "directory-sync" {
+				store.sync = func(*os.Root) error { return errors.New("synthetic directory sync failure") }
+			}
+			r, e := runWithVaultIO(context.Background(), c, store)
+			if e == nil || r.GateExit != nil || r.CleanupConfirmed || r.Root == "" {
+				t.Fatal("partial preparation became completion", mode, r, e)
+			}
+			if mode != "pre-start" && r.CleanupError == "" {
+				t.Fatal("private preparation failure omitted cleanup error", mode)
+			}
+			for _, name := range []string{"unauthorized-postmaster", "started.json", "gate-intent.json"} {
+				if _, e := os.Lstat(filepath.Join(r.Root, name)); !os.IsNotExist(e) {
+					t.Fatal("failure crossed the start/gate boundary", mode, name, e)
+				}
+			}
+			// Incomplete key-only or short-write state is held, never deleted
+			// based solely on an error or a failed helper creation.
+			hold := mode == "key-short-write" || mode == "key-sync" || mode == "helper-create"
+			_, keyErr := os.Lstat(filepath.Join(r.Root, "vault-root-key"))
+			if hold && keyErr != nil || !hold && !os.IsNotExist(keyErr) {
+				t.Fatal("wrong key retention decision", mode, keyErr)
+			}
+			if mode != "intent-write" {
+				root, e := os.OpenRoot(r.Root)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if _, e := prepareVaultFixture(root, r.Root); e == nil {
+					root.Close()
+					t.Fatal("incomplete original intent replayed")
+				}
+				root.Close()
+			}
+			if mode == "helper-sync" || mode == "directory-sync" || mode == "pre-start" {
+				b, e := os.ReadFile(filepath.Join(r.Root, "vault-fixture-cleanup.json"))
+				if e != nil {
+					t.Fatal(e)
+				}
+				var x struct {
+					NoServerStarted bool `json:"no_server_started"`
+					Confirmed       bool `json:"confirmed"`
+				}
+				if json.Unmarshal(b, &x) != nil || !x.NoServerStarted || !x.Confirmed {
+					t.Fatal("pre-start key cleanup not durably accounted")
+				}
+			}
+			b, e := os.ReadFile(filepath.Join(r.Root, "result.json"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var result Result
+			if json.Unmarshal(b, &result) != nil || result.Error == "" || result.CleanupConfirmed || result.GateExit != nil {
+				t.Fatal("failure result not persisted honestly")
+			}
+			t.Log("retained synthetic failure original", mode, r.Root)
+		})
+	}
+}
+
+func TestVaultRunUnknownShutdownRetainsPrivateOriginal(t *testing.T) {
+	// One exec'd sleep, no background descendants. SIGINT is inherited as
+	// ignored; Run must record its kill/uncertain branch rather than success.
+	c := syntheticVaultRun(t, "#!/bin/sh\ntrap '' INT\n: > synthetic-server-ready\nexec /bin/sleep 30\n")
+	r, e := Run(context.Background(), c)
+	if e == nil || r.CleanupConfirmed || r.CleanupError == "" || r.GateExit == nil || *r.GateExit != 0 {
+		t.Fatal("unknown shutdown became clean completion", r, e)
+	}
+	for _, name := range []string{"vault-root-key", "vault-getkey", "vault-fixture-intent.json", "result.json", "cleanup.json"} {
+		if _, e := os.Lstat(filepath.Join(r.Root, name)); e != nil {
+			t.Fatal("uncertain original private state or result missing", name, e)
+		}
+	}
+	root, e := os.OpenRoot(r.Root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer root.Close()
+	if _, e := prepareVaultFixture(root, r.Root); e == nil {
+		t.Fatal("unknown original reused")
+	}
+	b, e := os.ReadFile(filepath.Join(r.Root, "result.json"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var result Result
+	if json.Unmarshal(b, &result) != nil || result.CleanupConfirmed || result.CleanupError == "" {
+		t.Fatal("uncertain shutdown result omitted")
+	}
+	t.Log("retained simulated uncertain original", r.Root)
 }
 
 func TestManifestRefusesMutationOmissionExtrasAndWrongPlatform(t *testing.T) {
