@@ -88,6 +88,11 @@ func TestPreparedFinalExecutablePathAndSessionReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The program and lookup pins must name the same canonical executable.
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
 	c.Path = executable
 	c.ExpectedSHA256 = sha256OfFile(t, executable)
 	c.Args = []string{"-test.run=^TestPreparedChild$"}
