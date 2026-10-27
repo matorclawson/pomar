@@ -18,6 +18,7 @@ import time
 
 LIMIT = 16384
 HASH_LIMIT = 64 * 1024 * 1024
+JSON_DEPTH = 32
 REFS = ("source_head", "engine_ref", "profile_ref", "original_job_ref",
         "guest_instance_ref", "image_ref_sha256", "kernel_ref_sha256",
         "init_ref_sha256", "baseline_generation", "reset_generation",
@@ -59,6 +60,29 @@ def regular_bytes(path, limit):
 
 def load_json(path):
     data = regular_bytes(path, 65536)
+    # Bound decoder recursion before parsing; braces inside strings do not nest.
+    depth = 0
+    quoted = escaped = False
+    for byte in data:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):
+            depth += 1
+            if depth > JSON_DEPTH:
+                raise ValueError("JSON nesting limit")
+        elif byte in (93, 125):
+            depth -= 1
+            if depth < 0:
+                raise ValueError("JSON nesting invalid")
+    if depth or quoted:
+        raise ValueError("JSON nesting incomplete")
     def pairs(items):
         out = {}
         for key, value in items:
@@ -83,20 +107,72 @@ def safe_claim(value):
 
 class Probe:
     def __init__(self, fixture):
-        self.root = pathlib.Path(fixture).resolve() if fixture else None
+        self.root = pathlib.Path(os.path.abspath(fixture)) if fixture else None
+        self.root_fd = None
+        if self.root is not None:
+            # Open every component without following links, then retain the
+            # actual owned root FD. No checked pathname is reopened afterwards.
+            fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                for part in self.root.parts[1:]:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    os.close(fd)
+                    fd = child
+                info = os.fstat(fd)
+                if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                    raise ValueError("fixture root not owned and private from writers")
+                self.root_fd = fd
+                fd = None
+            finally:
+                if fd is not None:
+                    os.close(fd)
         self.scope = "SYNTHETIC_FIXTURE_NOT_GUEST" if fixture else "LOCAL_NAMESPACE_NOT_AUTHENTICATED_GUEST"
 
-    def path(self, name):
+    def close(self):
+        if self.root_fd is not None:
+            os.close(self.root_fd)
+            self.root_fd = None
+
+    def parent(self, name):
+        if self.root_fd is None:
+            raise ValueError("fixture root closed")
+        parts = pathlib.PurePosixPath(name).parts
+        parts = [part for part in parts if part != "/"]
+        if not parts or any(part in (".", "..") for part in parts):
+            raise ValueError("invalid fixture path")
+        fd = os.dup(self.root_fd)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            return fd, parts[-1]
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def open_file(self, name):
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
         if self.root is None:
-            return pathlib.Path(name)
-        path = self.root / name.lstrip("/")
-        # Fixture symlinks must never cause a read outside the synthetic tree.
-        path.resolve().relative_to(self.root)
-        return path
+            return os.open(str(pathlib.Path(name).resolve()), flags)
+        parent, leaf = self.parent(name)
+        try:
+            return os.open(leaf, flags, dir_fd=parent)
+        finally:
+            os.close(parent)
+
+    def read_link(self, name):
+        if self.root is None:
+            return os.readlink(name)
+        parent, leaf = self.parent(name)
+        try:
+            return os.readlink(leaf, dir_fd=parent)
+        finally:
+            os.close(parent)
 
     def read(self, name):
         try:
-            fd = os.open(str(self.path(name).resolve()), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            fd = self.open_file(name)
             with os.fdopen(fd, "rb") as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     return cell("REFUSED", reason="NON_REGULAR_READ_TARGET")
@@ -114,7 +190,9 @@ class Probe:
 
     def link(self, name):
         try:
-            return cell("OBSERVED", os.readlink(str(self.path(name)))[:4096], scope=self.scope)
+            value = self.read_link(name)
+            return cell("OBSERVED", value[:4096], scope=self.scope,
+                        capture_limit_bytes=4096, truncated=len(value) > 4096)
         except PermissionError:
             return cell("PERMISSION_DENIED", reason="READLINK_DENIED")
         except (OSError, ValueError):
@@ -122,8 +200,7 @@ class Probe:
 
     def digest(self, name):
         try:
-            path = self.path(name)
-            fd = os.open(str(path.resolve()), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+            fd = self.open_file(name)
             with os.fdopen(fd, "rb") as stream:
                 before = os.fstat(stream.fileno())
                 if not stat.S_ISREG(before.st_mode):
@@ -328,6 +405,7 @@ def main():
     report["execution"]["captured_observations_sha256"] = hashlib.sha256(raw).hexdigest()
     report["execution"]["raw_output_sha256"] = {"state": "UNKNOWN", "reason": "WHOLE_STDOUT_DIGEST_MUST_BE_RETAINED_BY_OUTER_RECEIVER"}
     encoded = json.dumps(report, sort_keys=True, separators=(",", ":"))
+    probe.close()
     if len(encoded.encode()) > 262144:
         raise ValueError("report limit exceeded")
     print(encoded)
@@ -335,7 +413,7 @@ def main():
 
 try:
     main()
-except (OSError, ValueError, TypeError, AttributeError, KeyError, json.JSONDecodeError):
+except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError, json.JSONDecodeError):
     # Never echo an input object, exception message, credential or private data.
     print(json.dumps({"schema": "pomar.ubuntu26-observation/v1", "stage": "METADATA_PRECHECK_ONLY",
                       "qualification": "REFUSED", "refusal_state": "INPUT_OR_PROBE_REFUSED",

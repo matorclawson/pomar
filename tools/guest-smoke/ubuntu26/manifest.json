@@ -3,7 +3,7 @@
   "role": "TEMPLATE_NOT_OWNER_ORIGINAL",
   "sow": "pomar-guest-SOW-01 rev4",
   "stage": "METADATA_PRECHECK_ONLY",
-  "payload_sha256": "07ac1b004bccb6cae8b24ac6096255718e8e0648a4a67be25b4356f947b93d54",
+  "payload_sha256": "abea3cbee3fc77ab66c7135ae1447ed926cbc879c8e59e279f4101146132c8c8",
   "owner_claims_schema": "pomar.ubuntu26-owner-claims/v1",
   "source_head": null,
   "engine_ref": null,
@@ -42,7 +42,8 @@
     "hash_target_bytes": 67108864,
     "version_seconds_per_tool": 2,
     "report_bytes": 262144,
-    "outer_receiver": "Retains whole stdout SHA/start/end/exit, actual original bounds, descendant custody and reset proof. Payload output cannot hash itself or prove reset."
+    "outer_receiver": "Retains whole stdout SHA/start/end/exit, actual original bounds, descendant custody and reset proof. Payload output cannot hash itself or prove reset.",
+    "json_nesting": 32
   },
   "read_only": [
     "no units or cgroup writes",
@@ -59,5 +60,6 @@
     "root_fixed_fixture_custody_admission": "NOT_RUN",
     "fresh_baseline_reset_overlay_identity": "NOT_RUN",
     "owned_stop_drain_reap_cleanup_evidence_survival_base_unchanged": "NOT_RUN"
-  }
+  },
+  "fixture_policy": "Owned non-writable-by-others root descriptor; nonfollowing component/file opens, no fixture symlink traversal. Readlink observations are separate and never authorize target reads."
 }
