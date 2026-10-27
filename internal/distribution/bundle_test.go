@@ -135,7 +135,14 @@ func TestInstallFailsBeforeActivation(t *testing.T) {
 				os.WriteFile(filepath.Join(b, "bin", "pomar"), []byte("replacement"), 0755)
 				WriteManifest(b, "v0.1.0", testCommit)
 			case "prefix-link":
-				link := filepath.Join(t.TempDir(), "linked")
+				// The link's parent must be canonical, or an unresolved
+				// /var alias on the parent alone can make secureDirectory
+				// refuse during its ancestor walk, before it ever reaches
+				// this case's own symlinked final component -- passing for
+				// the wrong reason. The link itself stays unresolved: it
+				// must still name prefix through a symlink, which is
+				// exactly what this case is asserting gets refused.
+				link := filepath.Join(canonicalTempDir(t), "linked")
 				os.Symlink(prefix, link)
 				prefix = link
 			case "existing-current":
