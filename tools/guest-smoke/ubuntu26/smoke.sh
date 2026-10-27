@@ -1,7 +1,7 @@
 #!/bin/sh
 # sow: pomar-guest-SOW-01 rev4
 # Read-only metadata, never a guest launcher or an acceptance/reset test.
-exec /usr/bin/python3 -I -S - "$0" "$@" <<'PY'
+exec /usr/bin/python3 -I -S -B - "$0" "$@" <<'PY'
 import argparse
 import datetime
 import hashlib
@@ -278,7 +278,7 @@ def collect(probe):
                      "pid1_pid_namespace_link": probe.link("/proc/1/ns/pid")},
             "cgroup": cgroup,
             "tools": {"go": tool(probe, "go", "1.27.x", ["version"], r"\bgo1\.27(?:\.|\s)"),
-                      "python": tool(probe, "python3", "3.12.12", ["-I", "-S", "--version"], r"\bPython 3\.12\.12(?:\s|$)"),
+                      "python": tool(probe, "python3", "3.12.12", ["-I", "-S", "-B", "--version"], r"\bPython 3\.12\.12(?:\s|$)"),
                       "make": tool(probe, "make", "4.4.1", ["--version"], r"\bGNU Make 4\.4\.1(?:\s|$)")}}
 
 
