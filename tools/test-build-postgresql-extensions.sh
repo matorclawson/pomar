@@ -313,7 +313,7 @@ class BoundaryTests(unittest.TestCase):
         base = dict.fromkeys('schema platform owner recipe_sha256 runtime_sums output output_parent frozen_recipe archives graphql_commit graphql_toml_sha256 graphql_lock_sha256 closures tools os_identity_sha256 libclang_dir jobs whole_seconds log_bytes disk_bytes bootstrap_role smoke_sql'.split())
         base.update(schema='pomar.postgres-extension-build/v1', platform='darwin/arm64', owner=os.geteuid(),
                     recipe_sha256='a' * 64, graphql_commit=ns['GRAPH_COMMIT'], graphql_toml_sha256='b' * 64,
-                    graphql_lock_sha256='c' * 64, bootstrap_role='fixture', jobs=1, whole_seconds=120,
+                    graphql_lock_sha256='c' * 64, bootstrap_role='fixture', jobs=1, whole_seconds=ns['WHOLE_SECONDS'],
                     log_bytes=1024, disk_bytes=1 << 20, frozen_recipe={'sha256': ns['RECIPE_SHA'], 'bytes': 16126})
         os.environ['POMAR_RECIPE_SOURCE_SHA256'] = 'a' * 64
         for key, bad, expected in [('platform', 'linux/arm64', 'platform/owner/version'),
