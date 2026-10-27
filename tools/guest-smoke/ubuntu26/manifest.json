@@ -1,0 +1,65 @@
+{
+  "schema": "pomar.ubuntu26-input/v1",
+  "role": "TEMPLATE_NOT_OWNER_ORIGINAL",
+  "sow": "pomar-guest-SOW-01 rev4",
+  "stage": "METADATA_PRECHECK_ONLY",
+  "payload_sha256": "abea3cbee3fc77ab66c7135ae1447ed926cbc879c8e59e279f4101146132c8c8",
+  "owner_claims_schema": "pomar.ubuntu26-owner-claims/v1",
+  "source_head": null,
+  "engine_ref": null,
+  "profile_ref": null,
+  "original_job_ref": null,
+  "guest_instance_ref": null,
+  "image_ref_sha256": null,
+  "kernel_ref_sha256": null,
+  "init_ref_sha256": null,
+  "baseline_generation": null,
+  "reset_generation": null,
+  "owned_overlay_ref": null,
+  "toolchain_closure_refs": {
+    "go": null,
+    "python": null,
+    "make": null
+  },
+  "expected_linux_tools": {
+    "go": "1.27.x",
+    "python": "3.12.12",
+    "make": "4.4.1"
+  },
+  "collector_bootstrap": "Existing /usr/bin/python3 stdlib with -I -S -B; not proof of required Python tool closure; never installed by payload.",
+  "invocation": [
+    "smoke.sh [--owner-input OWNER_JSON]",
+    "smoke.sh --fixture-root SYNTHETIC_TREE [--owner-input SYNTHETIC_CLAIMS]"
+  ],
+  "trust": {
+    "owner_references": "Template values are unbound. Per-original input is allowlisted as UNVERIFIED claims. An adopted external owner receiver must authenticate and verify source/payload/manifest and all actual job/profile/image/reset refs. Payload does not verify adoption.",
+    "time": "T0/E are same-original unverified claims with explicit clock origin/units. Collector UTC timestamps are separate. No cross-clock comparisons, budget renewal or cleanup inference.",
+    "scope": "Local namespace observations are not authenticated guest identity or host resource enforcement. Fixture data is synthetic; all acceptance cells NOT_RUN."
+  },
+  "limits": {
+    "json_input_bytes": 65536,
+    "probe_capture_bytes": 16384,
+    "hash_target_bytes": 67108864,
+    "version_seconds_per_tool": 2,
+    "report_bytes": 262144,
+    "outer_receiver": "Retains whole stdout SHA/start/end/exit, actual original bounds, descendant custody and reset proof. Payload output cannot hash itself or prove reset.",
+    "json_nesting": 32
+  },
+  "read_only": [
+    "no units or cgroup writes",
+    "no root fixtures",
+    "no images/tools installed/downloaded",
+    "no environment or private-buffer capture",
+    "fixed version-only tool commands; no owner-supplied executables",
+    "missing/denied/unsupported/refused observations never become success"
+  ],
+  "later_acceptance": {
+    "systemd_pid1_unit_mainpid_settlement": "NOT_RUN",
+    "timeout_term_kill_reap": "NOT_RUN",
+    "proc_identity_so_peercred_pidfd": "NOT_RUN",
+    "root_fixed_fixture_custody_admission": "NOT_RUN",
+    "fresh_baseline_reset_overlay_identity": "NOT_RUN",
+    "owned_stop_drain_reap_cleanup_evidence_survival_base_unchanged": "NOT_RUN"
+  },
+  "fixture_policy": "Owned non-writable-by-others root descriptor; nonfollowing component/file opens, no fixture symlink traversal. Readlink observations are separate and never authorize target reads."
+}
