@@ -11,7 +11,15 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
+// The class fixtures already model CPU/memory. Model a healthy shared disk
+// through the existing production measurement seam, not the host's live disk.
+func healthyFixtureSpace() (venue.Space, error) {
+	return venue.Space{Used: 100 * capacity.GiB, Avail: 100 * capacity.GiB, Shared: true}, nil
+}
 func twoClasses(t *testing.T) (*Manager, JobClass, JobClass) {
+	return twoClassesWithSpace(t, healthyFixtureSpace)
+}
+func twoClassesWithSpace(t *testing.T, space func() (venue.Space, error)) (*Manager, JobClass, JobClass) {
 	t.Helper()
 	v, err := venue.Open(t.TempDir())
 	if err != nil {
@@ -26,7 +34,7 @@ func twoClasses(t *testing.T) (*Manager, JobClass, JobClass) {
 	pyc := JobClass{Class: py, Guest: Guest{ImageDigest: "sha256:py", ImageArm64: "arm-py", PackageSet: "ps-py"}}
 	self, _ := os.Executable()
 	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour,
-		Host: capacity.Host{CPUSlots: 8, MemoryBytes: 16 * capacity.GiB}, Classes: []JobClass{ci, pyc}})
+		Space: space, Host: capacity.Host{CPUSlots: 8, MemoryBytes: 16 * capacity.GiB}, Classes: []JobClass{ci, pyc}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,4 +125,17 @@ func TestJobClassNamesArePatternChecked(t *testing.T) {
 		t.Fatalf("ci-example refused: %v", err)
 	}
 	m.Close()
+}
+
+// The explicit fixture still uses the real shared-disk floor policy. A filled
+// model must refuse before launch; the new seam does not waive admission.
+func TestClassFixtureRetainsSharedDiskFloor(t *testing.T) {
+	m, _, _ := twoClassesWithSpace(t, func() (venue.Space, error) {
+		return venue.Space{Used: 85 * capacity.GiB, Avail: 15 * capacity.GiB, Shared: true}, nil
+	})
+	_, err := m.StartIn("", "floor-refusal", []string{"true"}, nil)
+	var refused *capacity.Refusal
+	if !errors.As(err, &refused) || refused.Reason != capacity.ReasonFloor {
+		t.Fatalf("filled shared fixture: %v, want fill-floor", err)
+	}
 }

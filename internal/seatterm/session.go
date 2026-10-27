@@ -41,6 +41,102 @@ type Command struct {
 	PreservesInstallPath bool
 }
 
+// LookupPin is one owner-selected executable identity. Names are explicit
+// lookup names; Path is the canonical final file, not an inherited PATH hint.
+// These values prove no caller, resource, lease or filesystem authority.
+type LookupPin struct {
+	Name, Path, SHA256 string
+	Bytes              int64
+}
+
+// PreparedExecutable is an opaque, single-use prepared executable. Copying this
+// value shares its consumption state. Only the Darwin preparation function can
+// construct a usable value; JSON cannot construct its private state.
+// The owner freezes its binding/closure after Path and Lookups are available.
+type PreparedExecutable struct{ state *preparedExecutableState }
+
+type preparedExecutableState struct {
+	mu           sync.Mutex
+	id, path     string
+	lookups      []LookupPin
+	used, closed bool
+	cleanupErr   error
+	validate     func(Command) error
+	cleanup      func() error
+}
+
+// Path is the final pinned executable path; starting it never relocates it again.
+func (p *PreparedExecutable) Path() string {
+	if p == nil || p.state == nil {
+		return ""
+	}
+	return p.state.path
+}
+
+// Lookups returns a copy of the frozen policy, including the final program path.
+func (p *PreparedExecutable) Lookups() []LookupPin {
+	if p == nil || p.state == nil {
+		return nil
+	}
+	return append([]LookupPin(nil), p.state.lookups...)
+}
+
+func (p *PreparedExecutable) identity() string {
+	if p == nil || p.state == nil {
+		return "invalid-prepared-executable"
+	}
+	return p.state.id
+}
+
+// Close abandons an unused preparation. Once consumed, the existing session
+// lifetime owns cleanup; Close refuses to unlink a running session's executable.
+// A terminal cleanup failure is retained and returned, never reported as clean.
+func (p *PreparedExecutable) Close() error {
+	if p == nil || p.state == nil {
+		return errors.New("invalid prepared executable")
+	}
+	st := p.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.closed {
+		return st.cleanupErr
+	}
+	if st.used {
+		return errors.New("prepared executable is owned by its session")
+	}
+	st.closed = true
+	st.cleanupErr = st.cleanup()
+	return st.cleanupErr
+}
+
+func (p *PreparedExecutable) consume(c Command) (func() error, error) {
+	if p == nil || p.state == nil {
+		return nil, errors.New("invalid prepared executable")
+	}
+	st := p.state
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.used || st.closed {
+		return nil, errors.New("prepared executable already consumed or closed")
+	}
+	// Even a refused attempt cannot reuse this identity to start another program.
+	st.used = true
+	if err := st.validate(c); err != nil {
+		st.closed = true
+		st.cleanupErr = st.cleanup()
+		return nil, errors.Join(err, st.cleanupErr)
+	}
+	return func() error {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if !st.closed {
+			st.closed = true
+			st.cleanupErr = st.cleanup()
+		}
+		return st.cleanupErr
+	}, nil
+}
+
 // Attach runs the command on a new pseudo-terminal sized cols x rows, and
 // carries the terminal over the stream until either ends. When the stream
 // ends first, it hangs up only the command's own process group (the
