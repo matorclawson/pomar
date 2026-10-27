@@ -276,25 +276,41 @@ class BoundaryTests(unittest.TestCase):
 
     def test_owned_venv_global_site_sentinel_is_disabled_by_no_site(self):
         envroot = self.root / 'inert-test-runtime'
-        venv.EnvBuilder(with_pip=False, symlinks=False).create(envroot)
-        sites = list(envroot.glob('lib/python*/site-packages'))
-        self.assertEqual(len(sites), 1)
+        class FixtureBuilder(venv.EnvBuilder):
+            def post_setup(self, context):
+                self.site_path = Path(context.lib_path)
+        builder = FixtureBuilder(with_pip=False, symlinks=False)
+        builder.create(envroot)
+        site_path = builder.site_path
+        self.assertTrue(site_path.resolve().is_relative_to(envroot))
+        self.assertTrue(site_path.is_dir())
         sentinel = self.root / 'site-started'
-        (sites[0] / 'sitecustomize.py').write_text('from pathlib import Path; Path(' + repr(str(sentinel)) + ').write_text("synthetic")\n')
+        # Homebrew supplies sitecustomize in its base stdlib, ahead of the venv
+        # on module search. Use a standard site-processed .pth hook in the exact
+        # builder-owned site directory, without replacing the provider's module.
+        (site_path / '00-pomar-startup-sentinel.pth').write_text(
+            'import pathlib; pathlib.Path(' + repr(str(sentinel)) + ').write_text("synthetic")\n')
         python = envroot / 'bin/python3'
         # Installed Darwin framework site.py uses this exact launch path to find
         # the owned pyvenv.cfg. A copied framework executable alone is not proof
         # that this fixture became the active virtual environment.
         env = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C', '__PYVENV_LAUNCHER__': str(python)}
-        probe = 'import sys,json; print(json.dumps({"prefix":sys.prefix,"site_loaded":"site" in sys.modules,"no_site":sys.flags.no_site}))'
+        probe = ('import sys,json; s=sys.modules.get("site"); c=sys.modules.get("sitecustomize"); '
+                 'print(json.dumps({"prefix":sys.prefix,"exec_prefix":sys.exec_prefix,'
+                 '"site_loaded":s is not None,"no_site":sys.flags.no_site,'
+                 '"site_paths":s.getsitepackages([sys.prefix]) if s else [],'
+                 '"sys_path":sys.path,"customize_file":getattr(c,"__file__",None)}))')
+        print('site-fixture-config ' + (envroot / 'pyvenv.cfg').read_text(), flush=True)
         # First prove the exact owned fixture actually runs site startup.
         control = subprocess.run([str(python), '-I', '-B', '-c', probe], env=env, check=True, timeout=10,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         control_observation = json.loads(control.stdout)
         print('site-fixture-positive-control ' + json.dumps(control_observation) + ' stderr=' + repr(control.stderr), flush=True)
         self.assertEqual(control_observation['prefix'], str(envroot))
+        self.assertEqual(control_observation['exec_prefix'], str(envroot))
         self.assertEqual(control_observation['no_site'], 0)
         self.assertTrue(control_observation['site_loaded'])
+        self.assertIn(str(site_path), control_observation['site_paths'])
         self.assertTrue(sentinel.exists())
         sentinel.unlink()  # Only this exact newly created synthetic marker.
         isolated = subprocess.run([str(python), '-I', '-S', '-B', '-c', probe],
@@ -302,8 +318,10 @@ class BoundaryTests(unittest.TestCase):
         isolated_observation = json.loads(isolated.stdout)
         print('site-fixture-no-site ' + json.dumps(isolated_observation) + ' stderr=' + repr(isolated.stderr), flush=True)
         self.assertEqual(isolated_observation['prefix'], str(envroot))
+        self.assertEqual(isolated_observation['exec_prefix'], str(envroot))
         self.assertEqual(isolated_observation['no_site'], 1)
         self.assertFalse(isolated_observation['site_loaded'])
+        self.assertIsNone(isolated_observation['customize_file'])
         self.assertFalse(sentinel.exists())
 
     def test_fixed_version_source_pins_are_not_placeholders(self):
