@@ -1,6 +1,6 @@
 package postgres
 
-// sow: pomar-SOW-87 rev27. Opt-in real tool tests; never an installed service.
+// sow: pomar-SOW-87 rev39. Opt-in real tool tests; never an installed service.
 import (
 	"context"
 	"crypto/rand"
@@ -104,4 +104,34 @@ func shortWorkRoot(t *testing.T) string {
 		t.Fatal(e)
 	}
 	return p
+}
+
+func TestRealVaultFixtureEncryptDecryptAndCleanup(t *testing.T) {
+	path, h := os.Getenv("POMAR_POSTGRES_VAULT_TEST_MANIFEST"), os.Getenv("POMAR_POSTGRES_VAULT_TEST_MANIFEST_SHA256")
+	if path == "" || h == "" {
+		t.Skip("explicit genuine Vault prefix and separate admitted native original required")
+	}
+	tools, e := VerifyTools(context.Background(), path, h)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if tools.FixtureProfile != vaultFixtureProfile {
+		t.Fatal("genuine fixed Vault profile required")
+	}
+	work := shortWorkRoot(t)
+	sql := `CREATE SCHEMA extensions; CREATE EXTENSION pgcrypto WITH SCHEMA extensions; SELECT vault.create_secret('synthetic-only', 'fixture'); SELECT decrypted_secret = 'synthetic-only' FROM vault.decrypted_secrets WHERE name='fixture'; SELECT extensions.digest('fixture','sha256') IS NOT NULL, length(extensions.gen_random_uuid()::text)=36; SELECT current_setting('server_version_num')='170011', (SELECT extversion='0.3.1' FROM pg_extension WHERE extname='supabase_vault'), (SELECT extversion='1.3' FROM pg_extension WHERE extname='pgcrypto');`
+	c := Config{WorkRoot: work, GateDir: work, Manifest: path, ManifestSHA256: h, Whole: time.Minute, Startup: 20 * time.Second, Stop: 10 * time.Second, LogBytes: 1 << 20, Extensions: map[string]string{"supabase_vault": "0.3.1"}, Gate: []string{filepath.Join(tools.Prefix, "bin/psql"), "-X", "-v", "ON_ERROR_STOP=1", "-Atc", sql}}
+	r, e := Run(context.Background(), c)
+	if e != nil || !r.CleanupConfirmed || r.GateExit == nil || *r.GateExit != 0 {
+		t.Fatal("real Vault smoke/cleanup failed", r, e)
+	}
+	out, e := os.ReadFile(filepath.Join(r.Root, "gate.stdout"))
+	if e != nil || (!strings.Contains(string(out), "\nt\nt|t\n") || !strings.Contains(string(out), "\nt|t|t\n")) {
+		t.Fatal("real encryption/digest/UUID observations missing", e)
+	}
+	for _, name := range []string{"vault-root-key", "vault-getkey"} {
+		if _, e := os.Lstat(filepath.Join(r.Root, name)); !os.IsNotExist(e) {
+			t.Fatal("fixture secret retained after confirmed shutdown", e)
+		}
+	}
 }

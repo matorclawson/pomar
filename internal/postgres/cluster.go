@@ -2,7 +2,7 @@
 // It is a local gate helper, not a managed service or a privileged executor.
 package postgres
 
-// sow: pomar-SOW-87 rev27 (seven-path grant in revisions22/23).
+// sow: pomar-SOW-87 rev39 (fixed fixture; original seven-path grant22/23).
 import (
 	"bytes"
 	"context"

@@ -1,6 +1,6 @@
 # Disposable PostgreSQL for local gates
 
-sow: pomar-SOW-87 rev27 (seven-path source grant in revisions22/23).
+sow: pomar-SOW-87 rev39 (fixed fixture; original seven-path grant22/23).
 
 This is source for an ordinary-account local helper. It is not installed or
 adopted by this document. It creates a fresh PostgreSQL17 cluster for one gate,
