@@ -115,7 +115,7 @@ def strict_json(raw):
     return json.loads(text,object_pairs_hook=pairs,parse_constant=constant,parse_int=integer,parse_float=floating)
 
 def durable_owner(name,raw):
-    assert name in('entry-owner-receiving.json','entry-native-facts.json') and len(raw)<=256*1024
+    assert name in('entry-owner-receiving.json','entry-native-facts.json','entry-claim-intent.json') and len(raw)<=256*1024
     assert remaining()>0
     tmp=DEST/(name+'.pending');final=DEST/name
     with tmp.open('xb')as f:f.write(raw);f.flush();os.fsync(f.fileno())
@@ -203,6 +203,41 @@ def owner_document(message,who,schema):
             assert type(value.get(name))is type(want) and value[name]==want,'fresh owner window/original mismatch'
     return value
 
+def claim_recovery_locator(intent):
+    # Pure original recovery projection. Neither loss of an ACK nor a process
+    # restart permits generation of a different action ID/nonce/original.
+    assert intent['stage']in('PREPARED_NOT_ATTEMPTED','ATTEMPT_UNKNOWN','SERVER_ID_BOUND')
+    assert intent['recipient']=='zeo-rt-sched' and isinstance(intent['original_tuple'],dict)
+    assert re.fullmatch(r'[0-9a-f]{32}',intent['nonce'])
+    assert intent['action_id']=='w85-entry-'+intent['nonce']
+    assert hashlib.sha256(intent['body_utf8'].encode()).hexdigest()==intent['body_sha256']
+    assert intent['original_tuple']['nonce']==intent['nonce']
+    locator={'action_id':intent['action_id'],'nonce':intent['nonce'],'recipient':intent['recipient'],'body_sha256':intent['body_sha256'],'original_tuple':intent['original_tuple'],'may_have_been_stored':intent['stage']!='PREPARED_NOT_ATTEMPTED'}
+    if intent['stage']=='SERVER_ID_BOUND':
+        assert isinstance(intent.get('message_id'),str) and intent['message_id'].endswith(intent['action_id'])
+        locator['message_id']=intent['message_id']
+    return locator
+
+def inert_claim_crash_boundary_controls():
+    # Uncalled supplied-data regression controls: NO mail/native/filesystem
+    # operations. Exercise only after source-check admission; not a live trial.
+    nonce='0'*32;body='inert stored-but-lost-response fixture'
+    intent={'stage':'PREPARED_NOT_ATTEMPTED','action_id':'w85-entry-'+nonce,'nonce':nonce,'recipient':'zeo-rt-sched','body_utf8':body,'body_sha256':hashlib.sha256(body.encode()).hexdigest(),'original_tuple':{'nonce':nonce,'selection_id':'INERT_ONLY'}}
+    prepared=claim_recovery_locator(intent)
+    assert prepared['may_have_been_stored']is False and 'message_id'not in prepared
+    # Crash before the send, server-stored/lost ACK, malformed/oversized ACK
+    # and crash before canonical-ID persistence share the saved attempt locator.
+    intent['stage']='ATTEMPT_UNKNOWN';attempt=claim_recovery_locator(intent)
+    for boundary in('crash-after-attempt-marker-before-send','stored-response-lost','oversized-response','malformed-response','crash-before-id-persistence'):
+        recovered=claim_recovery_locator(dict(intent))
+        assert recovered==attempt and recovered['may_have_been_stored']is True
+        assert recovered['action_id']==prepared['action_id'] and recovered['original_tuple']==prepared['original_tuple']
+    intent.update(stage='SERVER_ID_BOUND',message_id='msg-dt-animated-comics-maintainer-'+intent['action_id'])
+    acknowledged=claim_recovery_locator(intent)
+    assert acknowledged['action_id']==attempt['action_id'] and acknowledged['may_have_been_stored']is True
+    assert acknowledged['message_id'].endswith(attempt['action_id'])
+    return 'INERT_BOUNDARY_CONTROLS_ONLY_NO_LIVE_EFFECT'
+
 def entry_owner_receiving():
     # Root policy/adoption is real owning message data, not a caller boolean.
     # The Root message is supplied with the actual new selection AFTER static
@@ -219,10 +254,20 @@ def entry_owner_receiving():
     request={'schema':'walking85-entry-owner-request/v1','nonce':nonce,'selection_id':key,'case':selection['case'],'source_head':selection['source_head'],'packet_sha256':selection['packet_sha256'],'code_commit':manifest['codeCommit'],'repository':'zeroemployeeorg/pomar','host':'eng-uk-0006','uid':503,'this_cap_bytes':1024**3,'headroom_bytes':4*1024**3,'outside_original_t0':T0,'scope':'CURRENT canonical named reservations and held no-wait Pomar exclusion for THIS live entry, not a new allocation or a preexisting snapshot'}
     request.update(source_tree='235b139cf97027715e1a68b84adbbcff4764097f',source_base='d115cca68238cef853bb524ba3ae57d3cb1f59a3',seat='dt-animated-comics-maintainer',generation=1,actor_session='01a15758-8bc9-7d22-a419-267f254eb8b1',entry_from_epoch=selection['entry_from_epoch'],entry_until_epoch=selection['entry_until_epoch'],max_end=selection['max_end'])
     body='sow: pomar-SOW-87 rev43 / DTAC01rev3\nActual bounded entry receiving request; reply once with current canonical input, or UNKNOWN/NO_START. No reservation/slot change requested.\n```json\n'+json.dumps(request,sort_keys=True)+'\n```'
-    sent=mail_json(['send','zeo-rt-sched','--id',rid,'--subject','W85 live entry receiving '+nonce,'--body',body,'--json'])
+    argv=['send','zeo-rt-sched','--id',rid,'--subject','W85 live entry receiving '+nonce,'--body',body,'--json']
+    intent={'schema':'walking85-entry-claim-intent/draft','stage':'PREPARED_NOT_ATTEMPTED','action_id':rid,'nonce':nonce,'recipient':'zeo-rt-sched','body_utf8':body,'body_sha256':hashlib.sha256(body.encode()).hexdigest(),'original_tuple':request,'argv':argv,'policy_message':policy_id}
+    # BOTH atomic intent and durable attempt marker precede the first possible
+    # server effect, including any same-ID503 retry inside mail_json.
+    state['entry_request']=claim_recovery_locator(intent)
+    state['entry_intent_pin']=durable_owner('entry-claim-intent.json',(json.dumps(intent,indent=2)+'\n').encode());save()
+    intent['stage']='ATTEMPT_UNKNOWN';state['entry_request']=claim_recovery_locator(intent)
+    state['entry_intent_pin']=durable_owner('entry-claim-intent.json',(json.dumps(intent,indent=2)+'\n').encode());save()
+    sent=mail_json(argv)
     assert sent.get('schema')=='zeomessenger.send/v1' and not sent.get('error')
     request_id=sent.get('message_id');assert isinstance(request_id,str) and request_id.endswith(rid)
-    state['entry_request']={'message_id':request_id,'nonce':nonce,'policy_message':policy_id};save()
+    intent.update(stage='SERVER_ID_BOUND',message_id=request_id)
+    state['entry_intent_pin']=durable_owner('entry-claim-intent.json',(json.dumps(intent,indent=2)+'\n').encode())
+    state['entry_request']=claim_recovery_locator(intent);save()
     # A single bounded same-original receiving exchange. No re-send, job retry,
     # background poller, timer wake or unrelated mail acknowledgement is made.
     until=min(time.monotonic()+45,M_END-80)
@@ -257,7 +302,7 @@ def entry_owner_receiving():
             assert own==1,'this1GiB must occur exactly once, never double counted'
             # Preserve exact body UTF-8 digests and normalized full server
             # envelopes; never call reserialized envelope bytes raw transport.
-            bound={'root_policy':policy,'root_policy_message':policy_id,'scheduler_input':value,'scheduler_message':message['id'],'request_id':request_id,'received_monotonic':time.monotonic(),'required_bytes':total+4*1024**3,'owner_envelopes':{'root':policy_message,'scheduler':message},'body_sha256':{'root':hashlib.sha256(policy_message['body'].encode()).hexdigest(),'scheduler':hashlib.sha256(message['body'].encode()).hexdigest()}}
+            bound={'root_policy':policy,'root_policy_message':policy_id,'scheduler_input':value,'scheduler_message':message['id'],'request_id':request_id,'received_monotonic':time.monotonic(),'required_bytes':total+4*1024**3,'owner_envelopes':{'root':policy_message,'scheduler':message},'body_sha256':{'root':hashlib.sha256(policy_message['body'].encode()).hexdigest(),'scheduler':hashlib.sha256(message['body'].encode()).hexdigest()},'claim_intent':intent,'claim_intent_pin':state['entry_intent_pin']}
             raw=(json.dumps(bound,indent=2)+'\n').encode()
             state['entry_owner_pin']=durable_owner('entry-owner-receiving.json',raw);save()
             return bound
