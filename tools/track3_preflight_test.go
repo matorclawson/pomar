@@ -1167,3 +1167,137 @@ func TestTrack3PreflightRefusesToRunUnderNonBashShell(t *testing.T) {
 		t.Fatalf("expected an explicit bash-requirement refusal under dash, got: %s", out)
 	}
 }
+
+// zeroemployee's review (POMAR158 independent review, 2026-10-29): resolving
+// ".." lexically for the WHOLE scratch path, including through an EXISTING
+// ancestor that is itself a symlink, can mis-anchor the ancestor walk onto a
+// directory that was never really an ancestor at all. Here the lexical
+// parent of the symlink (decoy-parent) is SAFE, but the symlink's REAL
+// target's real parent (unsafe-container) is UNSAFE -- a buggy lexical ".."
+// resolution would silently verify (checking only decoy-parent), masking the
+// actually-unsafe location.
+func TestTrack3PreflightScratchAncestryDotDotThroughExistingSymlinkIsResolvedForReal(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	decoyParent := filepath.Join(root, "decoy-parent")
+	if err := os.Mkdir(decoyParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unsafeContainer := filepath.Join(root, "unsafe-container")
+	if err := os.Mkdir(unsafeContainer, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafeContainer, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	realTarget := filepath.Join(unsafeContainer, "real-target")
+	if err := os.Mkdir(realTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(decoyParent, "ancestor-link")
+	if err := os.Symlink(realTarget, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// decoy-parent/ancestor-link/../future-leaf: lexically this undoes
+	// "ancestor-link" and lands back at decoy-parent (SAFE) -- the bug.
+	// Resolved for real, ancestor-link's target's real parent is
+	// unsafe-container (UNSAFE) -- the correct answer. Built by plain
+	// concatenation, NOT filepath.Join/Clean -- those would collapse the
+	// ".." themselves before the script ever saw it, defeating this test.
+	scratch := link + "/../future-leaf"
+	out, err := runPreflight(t, repo, scratch, "3.11", head)
+	if err == nil {
+		t.Fatalf("a .. through an existing symlinked ancestor landing on an unsafe real parent must fail the overall gate: %s", out)
+	}
+	line := mustLine(t, out, "scratch_ancestry_status:")
+	if !strings.HasPrefix(line, "scratch_ancestry_status: NOT-CONFIGURED") {
+		t.Fatalf("must be refused via the real (not lexical) resolution: %s", out)
+	}
+	if !strings.Contains(line, unsafeContainer) {
+		t.Fatalf("the refusal should name the real unsafe ancestor (unsafe-container), not the lexical decoy: %s", line)
+	}
+}
+
+// zeroemployee's review (POMAR158 independent review, 2026-10-29): every
+// repo-side fact must be read from the EXACT $source_head SHA captured
+// earlier in the script's run, never from a second, later re-resolution of
+// the mutable "HEAD" ref -- or a repository that moves between the capture
+// and these later reads (a concurrent checkout or commit) could make the
+// reported facts belong to a different revision than source_head names.
+//
+// This is exercised with a fake `git` on PATH that delegates to the real
+// git for everything, except that its FIRST "-C <dir> rev-parse HEAD" call
+// also, as a side effect, checks the fixture repo out to a SECOND, already-
+// prepared commit before returning -- faithfully simulating "the repo
+// changed after source_head was captured." The fixed script must still
+// report the FIRST commit's pandoc floor (it read it via the pinned SHA,
+// not the now-moved "HEAD"); the pre-fix script would report the second
+// commit's floor instead.
+func TestTrack3PreflightPandocFactsArePinnedToSourceHeadNotMutableHEAD(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git on PATH to build the mutating fake")
+	}
+
+	root := t.TempDir()
+	runner := filepath.Join(root, "src", "zeo_core", "integrations", "pandoc", "_runner.py")
+	if err := os.MkdirAll(filepath.Dir(runner), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runner, []byte("MIN_PANDOC_VERSION: Final = (2, 15)\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	toolsDir := filepath.Join(root, "tools")
+	if err := os.MkdirAll(toolsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolsDir, "install-pandoc.sh"), []byte("VERSION=\"3.1.3\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("requires-python = \">=3.14\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitFixture(t, root, "init", "-q")
+	gitFixture(t, root, "add", "-A")
+	gitFixture(t, root, "commit", "-q", "-m", "first")
+	firstHead := strings.TrimSpace(gitFixture(t, root, "rev-parse", "HEAD"))
+
+	// A second, later commit with a deliberately different, distinguishable
+	// floor version -- what a buggy re-resolution of "HEAD" would leak.
+	if err := os.WriteFile(runner, []byte("MIN_PANDOC_VERSION: Final = (9, 99)\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitFixture(t, root, "add", "-A")
+	gitFixture(t, root, "commit", "-q", "-m", "second")
+	secondHead := strings.TrimSpace(gitFixture(t, root, "rev-parse", "HEAD"))
+	gitFixture(t, root, "checkout", "-q", firstHead)
+
+	fakeBin := filepath.Join(root, "..", "fakebin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(root, "..", "mutated-once")
+	wrapper := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"-C\" ] && [ \"$3\" = \"rev-parse\" ] && [ \"$4\" = \"HEAD\" ]; then\n" +
+		"  out=$(\"" + realGit + "\" -C \"$2\" rev-parse HEAD)\n" +
+		"  if [ ! -e \"" + sentinel + "\" ]; then\n" +
+		"    : > \"" + sentinel + "\"\n" +
+		"    \"" + realGit + "\" -C \"$2\" checkout -q " + secondHead + "\n" +
+		"  fi\n" +
+		"  echo \"$out\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exec \"" + realGit + "\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "git"), []byte(wrapper), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runPreflightEnv(t, hermeticEnv(t, fakeBin), root, filepath.Join(root, "..", "scratch"), "3.11", firstHead)
+	mustRunOrGateFail(t, out, err)
+	wantLine(t, out, "zeocore source_head:", "zeocore source_head: "+firstHead)
+	if !strings.Contains(mustLine(t, out, "pandoc floor"), "2.15") {
+		t.Fatalf("pandoc floor must be read from the pinned source_head (%s, floor 2.15), not the mutable HEAD that moved to %s (floor 9.99) between calls: %s", firstHead, secondHead, out)
+	}
+}

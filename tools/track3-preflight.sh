@@ -379,22 +379,26 @@ preflight() {
   floor_path="src/zeo_core/integrations/pandoc/_runner.py"
   pin_path="tools/install-pandoc.sh"
   pyproject_path="pyproject.toml"
-  if [ "$repo_root_status" = VERIFIED ]; then
-    run_bounded 5 git -C "$repo_root" show "HEAD:$floor_path"
+  # Pinned to the exact $source_head SHA captured above, never the literal
+  # "HEAD" -- the mutable ref can move between that capture and these reads
+  # (a concurrent checkout or commit on $repo_root), which would otherwise
+  # let these facts come from a different revision than the one reported.
+  if [ "$repo_root_status" = VERIFIED ] && [ "$source_head" != NOT-INSPECTED ]; then
+    run_bounded 5 git -C "$repo_root" show "$source_head:$floor_path"
     if [ "$BOUNDED_STATUS" = OK ]; then
       floor_version=$(printf '%s' "$BOUNDED_OUTPUT" | sed -n 's/.*MIN_PANDOC_VERSION[^(]*(\([0-9][0-9]*\)[^0-9]*\([0-9][0-9]*\)).*/\1.\2/p' | head -n 1)
       [ -n "$floor_version" ] || floor_version=DOES-NOT-EXIST
     else
       floor_version=DOES-NOT-EXIST
     fi
-    run_bounded 5 git -C "$repo_root" show "HEAD:$pin_path"
+    run_bounded 5 git -C "$repo_root" show "$source_head:$pin_path"
     if [ "$BOUNDED_STATUS" = OK ]; then
       ci_pin_version=$(printf '%s' "$BOUNDED_OUTPUT" | awk -F'"' '/^VERSION=/{print $2; exit}')
       [ -n "$ci_pin_version" ] || ci_pin_version=DOES-NOT-EXIST
     else
       ci_pin_version=DOES-NOT-EXIST
     fi
-    run_bounded 5 git -C "$repo_root" show "HEAD:$pyproject_path"
+    run_bounded 5 git -C "$repo_root" show "$source_head:$pyproject_path"
     if [ "$BOUNDED_STATUS" = OK ]; then
       required_python=$(printf '%s' "$BOUNDED_OUTPUT" | awk -F'"' '/^requires-python/{print $2; exit}')
       [ -n "$required_python" ] || required_python=DOES-NOT-EXIST
@@ -491,10 +495,12 @@ preflight() {
       # TREE's pyproject.toml/uv.lock, not the HEAD this script reports --
       # an uncommitted edit could make this pass or fail for a revision
       # that isn't the one named in source_head/same_revision_status above.
-      # `git archive HEAD` extracts exactly HEAD's own tree into a throwaway
-      # directory, so the lock check genuinely validates the inspected
-      # revision regardless of working-tree state.
-      run_bounded 10 sh -c "git -C \"\$1\" archive HEAD | tar -x -C \"\$2\"" sh "$repo_root" "$head_snapshot"
+      # `git archive "$source_head"` (the exact SHA captured above, never
+      # the mutable "HEAD" string) extracts exactly that tree into a
+      # throwaway directory, so the lock check genuinely validates the
+      # inspected revision regardless of working-tree state or of HEAD
+      # moving later in this script's own run.
+      run_bounded 10 sh -c "git -C \"\$1\" archive \"\$3\" | tar -x -C \"\$2\"" sh "$repo_root" "$head_snapshot" "$source_head"
       if [ "$BOUNDED_STATUS" != OK ]; then
         lock_consistency=UNKNOWN
         lock_reason=" (could not extract a HEAD snapshot: $BOUNDED_STATUS)"
@@ -568,6 +574,15 @@ preflight() {
   # (e.g. .../future/../leaf) must not be walked literally, which could
   # mis-locate the "nearest existing ancestor" relative to the path's real,
   # lexically-resolved meaning.
+  # zeroemployee's review: resolving ".." purely lexically, for the WHOLE
+  # path, mishandles a ".." that follows an EXISTING ancestor which is
+  # itself a symlink -- e.g. /a/linkdir/../x where linkdir is a real
+  # symlink to /elsewhere must become /elsewhere/../x = /x on the real
+  # filesystem, not the lexical /a/x. So any ".." within the path's real,
+  # already-existing prefix is resolved through the real filesystem
+  # (`cd -P`, following symlinks), and only a ".." within the path's
+  # nonexistent leaf suffix -- the case Council's original instruction
+  # covers -- is handled lexically, since nothing there can be a symlink.
   lexically_canonical() {
     p=$1
     case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
@@ -576,12 +591,35 @@ preflight() {
     set -- $p
     IFS=$oldIFS
     result=""
+    missing=0
     for part in "$@"; do
       case "$part" in
-        '' | '.') ;;
-        '..') result=$(dirname "$result") ; [ "$result" = "." ] && result="" ;;
-        *) result="$result/$part" ;;
+        '' | '.') continue ;;
       esac
+      if [ "$missing" = 0 ]; then
+        if [ "$part" = ".." ]; then
+          if [ -n "$result" ]; then
+            parent=$(cd -P "$result/.." 2>/dev/null && pwd -P) || parent=""
+          else
+            parent="/"
+          fi
+          result=$parent
+          [ "$result" = "/" ] && result=""
+          continue
+        fi
+        candidate="$result/$part"
+        if [ -e "$candidate" ]; then
+          result=$candidate
+        else
+          result=$candidate
+          missing=1
+        fi
+      else
+        case "$part" in
+          '..') result=$(dirname "$result") ; [ "$result" = "." ] && result="" ;;
+          *) result="$result/$part" ;;
+        esac
+      fi
     done
     [ -n "$result" ] || result="/"
     printf '%s' "$result"
