@@ -583,6 +583,16 @@ preflight() {
   # (`cd -P`, following symlinks), and only a ".." within the path's
   # nonexistent leaf suffix -- the case Council's original instruction
   # covers -- is handled lexically, since nothing there can be a symlink.
+  # zeoreviewer's review of this fix (P158-1 remainder): a lexical ".."
+  # inside the nonexistent-suffix fallback can cancel the very component
+  # that made the suffix nonexistent in the first place (e.g.
+  # safe/missing/../link/../future, where "missing" never exists but its
+  # own ".." pops it right back off) -- landing back on a path that DOES
+  # exist again. Staying in lexical mode past that point let a later real,
+  # existing symlinked component (here "link") be walked lexically instead
+  # of through the real filesystem, reintroducing the exact masking this
+  # function exists to prevent. Fixed by re-checking existence after each
+  # lexical ".." pop and resuming real resolution the moment it does.
   lexically_canonical() {
     p=$1
     case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
@@ -599,7 +609,11 @@ preflight() {
       if [ "$missing" = 0 ]; then
         if [ "$part" = ".." ]; then
           if [ -n "$result" ]; then
-            parent=$(cd -P "$result/.." 2>/dev/null && pwd -P) || parent=""
+            parent=$(cd -P "$result/.." 2>/dev/null && pwd -P)
+            if [ -z "$parent" ]; then
+              echo "track3-preflight: lexically_canonical: cd -P failed resolving an ancestor of $p; refusing to fall back to / rather than silently misjudge safety" >&2
+              return 1
+            fi
           else
             parent="/"
           fi
@@ -616,7 +630,13 @@ preflight() {
         fi
       else
         case "$part" in
-          '..') result=$(dirname "$result") ; [ "$result" = "." ] && result="" ;;
+          '..')
+            result=$(dirname "$result")
+            [ "$result" = "." ] && result=""
+            if [ -z "$result" ] || [ -e "$result" ]; then
+              missing=0
+            fi
+            ;;
           *) result="$result/$part" ;;
         esac
       fi

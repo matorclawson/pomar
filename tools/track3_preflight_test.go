@@ -424,6 +424,52 @@ func TestTrack3PreflightScratchAncestry(t *testing.T) {
 			t.Fatalf("a .. in a nonexistent leaf suffix must be canonicalized, reaching the real safe ancestor: %s", out)
 		}
 	})
+
+	// zeoreviewer's review (P158-1 remainder): safe/missing/../link/../future,
+	// where "missing" never exists -- its own ".." pops it right back off,
+	// landing on "safe" again, which DOES exist. The existing real symlinked
+	// component "link" (-> unsafe/child) that follows must then be resolved
+	// through the real filesystem, not lexically: a buggy implementation
+	// that stays in "nonexistent suffix" mode past that point would walk
+	// "link" as a plain lexical name and land back on safe/future, silently
+	// verifying through the WRONG, safe ancestor instead of the real one
+	// (unsafe, reached by actually following the symlink and its "..").
+	t.Run("a .. cancelling a nonexistent component resumes real resolution for what follows", func(t *testing.T) {
+		root := t.TempDir()
+		safeDir := filepath.Join(root, "safe")
+		if err := os.Mkdir(safeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		unsafeDir := filepath.Join(root, "unsafe")
+		if err := os.Mkdir(unsafeDir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(unsafeDir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		child := filepath.Join(unsafeDir, "child")
+		if err := os.Mkdir(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(safeDir, "link")
+		if err := os.Symlink(child, link); err != nil {
+			t.Fatal(err)
+		}
+		// Built by concatenation, not filepath.Join/Clean, which would
+		// collapse the ".." itself before the script ever saw it.
+		scratch := safeDir + "/missing/../link/../future"
+		out, err := runPreflight(t, repo, scratch, "3.11", head)
+		if err == nil {
+			t.Fatalf("a .. cancelling a nonexistent component, followed by a real symlink whose own real parent is unsafe, must fail the overall gate: %s", out)
+		}
+		line := mustLine(t, out, "scratch_ancestry_status:")
+		if !strings.HasPrefix(line, "scratch_ancestry_status: NOT-CONFIGURED") {
+			t.Fatalf("must be refused via the real (not lexical) resolution once past the cancelled component: %s", out)
+		}
+		if !strings.Contains(line, unsafeDir) {
+			t.Fatalf("the refusal should name the real unsafe ancestor (unsafe), not the lexical decoy (safe): %s", line)
+		}
+	})
 }
 
 // pomar's review of pr#142: when stat itself is unavailable, the permission
