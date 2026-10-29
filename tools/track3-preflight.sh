@@ -644,55 +644,70 @@ preflight() {
     [ -n "$result" ] || result="/"
     printf '%s' "$result"
   }
-  scratch_lexical=$(lexically_canonical "$scratch")
-
-  nearest="$scratch_lexical"
-  while [ ! -d "$nearest" ] && [ "$nearest" != "/" ] && [ -n "$nearest" ]; do
-    nearest=$(dirname "$nearest")
-  done
-  # Canonicalize the nearest existing ancestor (cd -P/pwd -P is the portable
-  # idiom) so a symlinked ancestor, e.g. /tmp -> /private/tmp, is walked by
-  # its real path, reaching /private's own permissions too, not just /tmp's.
-  walk=$(cd -P "$nearest" 2>/dev/null && pwd -P) || walk="$nearest"
-
+  # zeoreviewer's review: bash does not apply this script's own `set -e` to
+  # a failing assignment made inside a NESTED command substitution (this
+  # whole block already runs inside `report=$(preflight)`, and
+  # lexically_canonical's own failure return was only reachable through a
+  # second, inner `scratch_lexical=$(lexically_canonical ...)` substitution)
+  # -- confirmed directly: a plain `x=$(f)` with a failing `f` does halt the
+  # script under `set -e`, but the identical failure one substitution deeper
+  # does not, leaving scratch_lexical empty and silently skipping the entire
+  # ancestry walk, which left scratch_status at its initialized VERIFIED.
+  # Checking the assignment's own exit status explicitly, rather than
+  # relying on errexit to propagate through the nesting, closes this.
   scratch_status=VERIFIED
   scratch_reason=""
-  while [ -n "$walk" ]; do
-    run_bounded 5 stat -L -f '%Sp' "$walk"
-    if [ "$BOUNDED_STATUS" = OK ]; then
-      perm=$BOUNDED_OUTPUT
-    else
-      run_bounded 5 stat -L -c '%A' "$walk"
-      if [ "$BOUNDED_STATUS" = OK ]; then perm=$BOUNDED_OUTPUT; else perm=""; fi
-    fi
-    # pomar's re-review of pr#142 round 2: length alone is not parse
-    # validation -- match the real ls-style grammar before trusting any
-    # character position. A stat that cannot run, or whose output doesn't
-    # match this grammar, is UNKNOWN (we genuinely don't know), which is
-    # distinct from NOT-CONFIGURED (we DO know, and it's unsafe) -- both
-    # fail the ancestor closed (neither is VERIFIED), but the label now says
-    # which one actually happened.
-    case "$perm" in
-      [-dlpscbD][-r][-w][-xsS][-r][-w][-xsS][-r][-w][-xtT]) ;;
-      *)
-        scratch_status=UNKNOWN
-        scratch_reason="$walk: could not read permission metadata (stat unavailable or unparseable: '$perm')"
+  if ! scratch_lexical=$(lexically_canonical "$scratch"); then
+    scratch_status=NOT-CONFIGURED
+    scratch_reason="lexical canonicalization failed resolving an existing ancestor of $scratch"
+  else
+    nearest="$scratch_lexical"
+    while [ ! -d "$nearest" ] && [ "$nearest" != "/" ] && [ -n "$nearest" ]; do
+      nearest=$(dirname "$nearest")
+    done
+    # Canonicalize the nearest existing ancestor (cd -P/pwd -P is the
+    # portable idiom) so a symlinked ancestor, e.g. /tmp -> /private/tmp, is
+    # walked by its real path, reaching /private's own permissions too, not
+    # just /tmp's.
+    walk=$(cd -P "$nearest" 2>/dev/null && pwd -P) || walk="$nearest"
+
+    while [ -n "$walk" ]; do
+      run_bounded 5 stat -L -f '%Sp' "$walk"
+      if [ "$BOUNDED_STATUS" = OK ]; then
+        perm=$BOUNDED_OUTPUT
+      else
+        run_bounded 5 stat -L -c '%A' "$walk"
+        if [ "$BOUNDED_STATUS" = OK ]; then perm=$BOUNDED_OUTPUT; else perm=""; fi
+      fi
+      # pomar's re-review of pr#142 round 2: length alone is not parse
+      # validation -- match the real ls-style grammar before trusting any
+      # character position. A stat that cannot run, or whose output doesn't
+      # match this grammar, is UNKNOWN (we genuinely don't know), which is
+      # distinct from NOT-CONFIGURED (we DO know, and it's unsafe) -- both
+      # fail the ancestor closed (neither is VERIFIED), but the label now
+      # says which one actually happened.
+      case "$perm" in
+        [-dlpscbD][-r][-w][-xsS][-r][-w][-xsS][-r][-w][-xtT]) ;;
+        *)
+          scratch_status=UNKNOWN
+          scratch_reason="$walk: could not read permission metadata (stat unavailable or unparseable: '$perm')"
+          break
+          ;;
+      esac
+      group_write=$(printf '%s' "$perm" | cut -c6)
+      other_write=$(printf '%s' "$perm" | cut -c9)
+      other_exec=$(printf '%s' "$perm" | cut -c10)
+      sticky=false
+      case "$other_exec" in t | T) sticky=true ;; esac
+      if { [ "$group_write" = w ] || [ "$other_write" = w ]; } && [ "$sticky" = false ]; then
+        scratch_status=NOT-CONFIGURED
+        scratch_reason="$walk is group- or others-writable without the sticky bit ($perm)"
         break
-        ;;
-    esac
-    group_write=$(printf '%s' "$perm" | cut -c6)
-    other_write=$(printf '%s' "$perm" | cut -c9)
-    other_exec=$(printf '%s' "$perm" | cut -c10)
-    sticky=false
-    case "$other_exec" in t | T) sticky=true ;; esac
-    if { [ "$group_write" = w ] || [ "$other_write" = w ]; } && [ "$sticky" = false ]; then
-      scratch_status=NOT-CONFIGURED
-      scratch_reason="$walk is group- or others-writable without the sticky bit ($perm)"
-      break
-    fi
-    [ "$walk" = "/" ] && break
-    walk=$(dirname "$walk")
-  done
+      fi
+      [ "$walk" = "/" ] && break
+      walk=$(dirname "$walk")
+    done
+  fi
   echo "scratch_path: $scratch (leaf exists: $leaf_exists)"
   echo "scratch_ancestry_status: $scratch_status${scratch_reason:+ ($scratch_reason)}"
   [ "$scratch_status" = VERIFIED ] || note_not_verified

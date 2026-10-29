@@ -470,6 +470,38 @@ func TestTrack3PreflightScratchAncestry(t *testing.T) {
 			t.Fatalf("the refusal should name the real unsafe ancestor (unsafe), not the lexical decoy (safe): %s", line)
 		}
 	})
+
+	// zeoreviewer's review of the above fix: this script's own `set -e` does
+	// not propagate through a FAILING assignment made inside a nested
+	// command substitution -- lexically_canonical's explicit `return 1` (on
+	// a failed cd -P, e.g. ".." through an existing REGULAR FILE, which is
+	// not a traversable directory) is only reachable via
+	// `scratch_lexical=$(lexically_canonical ...)`, itself already inside
+	// `report=$(preflight)`. Confirmed directly: that nesting silently
+	// swallows the failure, leaving scratch_lexical empty, which then
+	// empties the ancestor walk entirely and leaves scratch_ancestry_status
+	// at its initialized VERIFIED -- never actually walking anything. The
+	// caller must check the assignment's own exit status explicitly.
+	t.Run("a failed lexical resolution (.. through an existing regular file) never leaves scratch ancestry VERIFIED", func(t *testing.T) {
+		root := t.TempDir()
+		existingFile := filepath.Join(root, "existing-file")
+		if err := os.WriteFile(existingFile, []byte("not a directory"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// Built by concatenation, not filepath.Join/Clean, which would
+		// collapse the ".." itself before the script ever saw it.
+		// existing-file/.. cannot be traversed for real: existing-file is a
+		// regular file, not a directory, so cd -P into it must fail.
+		scratch := existingFile + "/../future"
+		out, err := runPreflight(t, repo, scratch, "3.11", head)
+		if err == nil {
+			t.Fatalf("a failed lexical resolution must fail the overall gate, never silently verify: %s", out)
+		}
+		line := mustLine(t, out, "scratch_ancestry_status:")
+		if strings.HasPrefix(line, "scratch_ancestry_status: VERIFIED") {
+			t.Fatalf("a failed lexical resolution must never report scratch_ancestry_status: VERIFIED: %s", out)
+		}
+	})
 }
 
 // pomar's review of pr#142: when stat itself is unavailable, the permission
