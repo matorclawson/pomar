@@ -567,6 +567,27 @@ func TestTrack3PreflightScratchAncestry(t *testing.T) {
 			t.Fatalf("the refusal should name the real unsafe ancestor (unsafe), not the CWD-matched decoy (safe/pattern1): %s", line)
 		}
 	})
+
+	// pomar's own follow-up: the prior case proves the UNSAFE literal name
+	// is never silently masked, but not that a SAFE literal glob-named
+	// ancestor is still correctly recognized as itself and verified --
+	// `set -f` must not change which real filesystem object the literal
+	// component names, only stop that name from being reinterpreted as a
+	// pattern.
+	t.Run("a safe ancestor literally named with glob metacharacters still verifies correctly", func(t *testing.T) {
+		root := t.TempDir()
+		safeGlobNamed := filepath.Join(root, "safe[1]")
+		if err := os.Mkdir(safeGlobNamed, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Built by concatenation, not filepath.Join/Clean.
+		scratch := safeGlobNamed + "/future-leaf"
+		out, err := runPreflight(t, repo, scratch, "3.11", head)
+		mustRunOrGateFail(t, out, err)
+		if !strings.HasPrefix(mustLine(t, out, "scratch_ancestry_status:"), "scratch_ancestry_status: VERIFIED") {
+			t.Fatalf("a safe ancestor literally named with glob metacharacters must still verify: %s", out)
+		}
+	})
 }
 
 // pomar's review of pr#142: when stat itself is unavailable, the permission
