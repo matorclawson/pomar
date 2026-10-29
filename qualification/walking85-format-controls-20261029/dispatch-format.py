@@ -347,9 +347,11 @@ used_text=probe(['/usr/bin/du','-sk',str(parent)],4096).strip()
 size,path=used_text.split('\\t',1);assert size.isdigit() and path==str(parent)
 seat_bytes=int(size)*1024
 assert seat_bytes+256*1024**2<=policy['seat_ceiling_bytes']
-# Canonical held exclusion covers other seats' Pomar views; local facts also
-# reject any unexpectedly live declared gate or undeclared compiler process.
-# A process census is only an additional refusal check, never exclusion proof.
+# Actual canonical exclusion must cover other principals' repository views;
+# its owning implementation is still absent. This census implements ONLY a
+# conservative same-UID compiler executable-name refusal, even for accounted
+# peer compilers. It does not identify Python gate scripts or prove gate/view
+# absence. Never inspect arbitrary peer argv or signal a peer process.
 for claim in account['named_reservations']:
  gate=claim.get('gate_directory')
  if claim['id']!=account['selection_id'] and claim['repository']=='zeroemployeeorg/pomar':raise RuntimeError('NO_START: another Pomar claim')
@@ -359,11 +361,11 @@ conflicts=[]
 for line in processes.splitlines():
  fields=line.strip().split(None,4);assert len(fields)==5 and all(x.isdigit()for x in fields[:4])
  uid,pid,ppid,pgid=map(int,fields[:4]);name=Path(fields[4]).name
- if uid==503 and pgid!=os.getpgrp() and name in('go','gofmt','compile','link','gate-bounded.py','gate-watchdog.py'):
+ if uid==503 and pgid!=os.getpgrp() and name in('go','gofmt','compile','link'):
   conflicts.append({'pid':pid,'ppid':ppid,'pgid':pgid,'name':name})
-assert not conflicts,'NO_START: unaccounted compiler/gate process'
+assert not conflicts,'NO_START: conservative same-UID compiler-name refusal (accounted peers may also refuse)'
 sample_end=time.monotonic();assert sample_end-sample_start<=8 and sample_end<M_END-35
-facts={'schema':'walking85-entry-native-facts/draft','sample_start':sample_start,'sample_end':sample_end,'uid':os.getuid(),'hostname':socket.gethostname(),'page_size':page_size,'free_inactive_bytes':reclaimable,'physical_bytes':physical,'required_bytes':required,'load1':load,'filesystem_free_bytes':free_bytes,'seat_bytes':seat_bytes,'seat_ceiling_bytes':policy['seat_ceiling_bytes'],'unaccounted_compiler_gate_processes':conflicts,'scheduler_message':OWNER['scheduler_message'],'root_policy_message':OWNER['root_policy_message'],'request_id':OWNER['request_id'],'source_head':account['source_head'],'packet_sha256':account['packet_sha256'],'code_commit':account['code_commit'],'selection_id':account['selection_id'],'repository_exclusion':account['repository_exclusion'],'ledger_generation':account['ledger_generation']}
+facts={'schema':'walking85-entry-native-facts/draft','sample_start':sample_start,'sample_end':sample_end,'uid':os.getuid(),'hostname':socket.gethostname(),'page_size':page_size,'free_inactive_bytes':reclaimable,'physical_bytes':physical,'required_bytes':required,'load1':load,'filesystem_free_bytes':free_bytes,'seat_bytes':seat_bytes,'seat_ceiling_bytes':policy['seat_ceiling_bytes'],'same_uid_compiler_name_conflicts':conflicts,'process_check_scope':'conservative compiler-name refusal only; no gate/private-view exclusion proof','scheduler_message':OWNER['scheduler_message'],'root_policy_message':OWNER['root_policy_message'],'request_id':OWNER['request_id'],'source_head':account['source_head'],'packet_sha256':account['packet_sha256'],'code_commit':account['code_commit'],'selection_id':account['selection_id'],'repository_exclusion':account['repository_exclusion'],'ledger_generation':account['ledger_generation']}
 assert time.monotonic()<M_END-35
 p.mkdir(mode=0o700)
 lease={'mono_origin':M_ORIGIN,'mono_end':M_END,'duration_seconds':DURATION,'clock':'time.monotonic','transport_margin_seconds':10.0,'outside_return_reserve_seconds':20.0}
