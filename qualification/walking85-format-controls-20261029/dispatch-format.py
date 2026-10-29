@@ -2,11 +2,12 @@
 Candidate formatting stays on ENG UID503 under unchanged standard83a9/b899.
 """
 import os,sys,time,threading,signal
-T0=float(sys.argv[2]);E=T0+300
-if time.time()>=E:os._exit(124)
+M0=time.monotonic();T0=time.time();M_END=M0+300;E=T0+300
+TRANSPORT_MARGIN=10.0;RETURN_RESERVE=20.0
+def remaining():return M_END-time.monotonic()
 if os.getpgrp()!=os.getpid():os.setpgid(0,0)
 assert os.getpgrp()==os.getpid()
-expiry=threading.Timer(E-time.time(),lambda:os.killpg(os.getpid(),signal.SIGKILL));expiry.daemon=True;expiry.start()
+expiry=threading.Timer(remaining(),lambda:os.killpg(os.getpid(),signal.SIGKILL));expiry.daemon=True;expiry.start()
 import json,hashlib,subprocess,shlex,re,base64,tarfile
 from pathlib import Path
 HERE=Path(__file__).parent
@@ -23,62 +24,83 @@ manifest=json.loads(manifestRaw)
 assert manifest['head']==selection['source_head']
 G='/Users/rodbot/zeo/seat-gates/dt-animated-comics-maintainer/'+key
 DEST=HERE/'format-originals'/key;DEST.parent.mkdir(exist_ok=True);DEST.mkdir(mode=0o700)
-state={'selection':selection,'T0':T0,'E':E,'G':G,'state':'UNKNOWN_NOT_STARTED','head':selection['source_head'],'nativeExecuted':False}
+state={'selection':selection,'T0':T0,'E_display_only':E,'monotonic_origin':M0,'monotonic_end':M_END,'G':G,'state':'UNKNOWN_NOT_STARTED','head':selection['source_head'],'nativeExecuted':False}
 def save():
-    assert time.time()<E
+    assert remaining()>0
     p=DEST/'dispatch-receipt.json';raw=(json.dumps(state,indent=2)+'\n').encode()
     with (DEST/'dispatch.pending').open('wb')as f:f.write(raw);f.flush();os.fsync(f.fileno())
-    assert time.time()<E;os.replace(DEST/'dispatch.pending',p)
+    assert remaining()>0;os.replace(DEST/'dispatch.pending',p)
     directory=os.open(DEST,os.O_RDONLY)
     try:os.fsync(directory)
     finally:os.close(directory)
-    assert p.read_bytes()==raw and time.time()<E
+    assert p.read_bytes()==raw and remaining()>0
 def run(argv,label,cap=60,allow=False):
-    assert time.time()<E
+    assert remaining()>0
     with (DEST/(label+'.out')).open('xb')as out,(DEST/(label+'.err')).open('xb')as err:
-        p=subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=out,stderr=err,timeout=max(.1,min(cap,E-time.time())))
+        p=subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=out,stderr=err,timeout=max(.1,min(cap,remaining())))
     state[label+'_exit']=p.returncode;save()
     if p.returncode and not allow:raise RuntimeError(label+' exit '+str(p.returncode))
     return p
 SSH=['ssh','-oBatchMode=yes','-oConnectTimeout=10','-oServerAliveInterval=5','-oServerAliveCountMax=2','-oForwardAgent=no','-oForwardX11=no','-oClearAllForwardings=yes','-oRequestTTY=no','rodbot@100.125.183.112']
 SCP=['scp','-q','-oBatchMode=yes','-oConnectTimeout=10','-oServerAliveInterval=5','-oServerAliveCountMax=2','-oForwardAgent=no','-oClearAllForwardings=yes']
-def remote(code,label,cap=30):
-    fixed='import os,time,threading\nE='+repr(E)+'\nif time.time()>=E:os._exit(124)\nt=threading.Timer(E-time.time(),lambda:os._exit(124));t.daemon=True;t.start()\nimport base64;exec(base64.b64decode('+repr(base64.b64encode(code.encode()).decode())+'))'
+def remote(code,label,cap=30,bootstrap_duration=None):
+    # Only durations cross hosts. After the first acknowledged lease, every
+    # remote helper consumes the SAME persisted ENG monotonic end, never a
+    # newly calculated wall-derived duration.
+    if bootstrap_duration is not None:
+        budget='M_ORIGIN=time.monotonic();M_END=M_ORIGIN+'+repr(bootstrap_duration)+'\n'
+    else:
+        budget='import json\nfrom pathlib import Path\nlease=json.loads(Path('+repr(G+'/native-budget.json')+').read_text());M_ORIGIN=lease["mono_origin"];M_END=lease["mono_end"]\nassert time.monotonic()>=M_ORIGIN\n'
+    fixed='import os,time,threading,signal\n'+budget+'if time.monotonic()>=M_END:os._exit(124)\nif os.getpgrp()!=os.getpid():os.setpgid(0,0)\nt=threading.Timer(M_END-time.monotonic(),lambda:os.killpg(os.getpgrp(),signal.SIGKILL));t.daemon=True;t.start()\nimport base64;exec(base64.b64decode('+repr(base64.b64encode(code.encode()).decode())+'))'
     return run(SSH+[shlex.join(['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/sbin:/sbin','/usr/bin/python3','-I','-S','-c',fixed])],label,cap)
 def digest(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 save()
 try:
     for name,pin in manifest['files'].items():
         p=HERE/pin['local_name'];assert p.stat().st_size==pin['bytes'] and digest(p)==pin['sha256']
-    code='G='+repr(G)+'\n'+'''import os,hashlib
+    # First lease starts on ENG before its acknowledgement. Accept it only
+    # when the complete handshake RTT is <= the deducted transport margin.
+    # Therefore startENG <= sendOutside+margin and endENG <= outsideEnd-20.
+    sent_mono=time.monotonic();duration=remaining()-TRANSPORT_MARGIN-RETURN_RESERVE
+    assert duration>60
+    code='G='+repr(G)+'\nDURATION='+repr(duration)+'\n'+'''import os,hashlib,json
 from pathlib import Path
 p=Path(G);parent=p.parent
 assert os.getuid()==503 and parent==parent.resolve() and parent.stat().st_uid==503
 assert not p.exists() and not p.is_symlink()
 assert os.getloadavg()[0]<12 and os.statvfs(parent).f_bavail*os.statvfs(parent).f_frsize>=20*1024**3
 assert hashlib.sha256(Path('/usr/bin/python3').read_bytes()).hexdigest()=='34129c71a01a74f7f3b2443521519b2e5447553fa187f5fcafaaf8c42cc192e2'
-assert time.time()<E-30
+assert time.monotonic()<M_END-35
 p.mkdir(mode=0o700)
-print('FRESH_PRIVATE_SOURCE_INPUT_DIRECTORY')
+lease={'mono_origin':M_ORIGIN,'mono_end':M_END,'duration_seconds':DURATION,'clock':'time.monotonic','transport_margin_seconds':10.0,'outside_return_reserve_seconds':20.0}
+assert time.get_clock_info('monotonic').monotonic and not time.get_clock_info('monotonic').adjustable
+(p/'native-budget.json').write_text(json.dumps(lease,indent=2)+'\\n')
+print(json.dumps(lease),flush=True)
 '''
-    remote(code,'fresh-source-guard')
-    packet={'selection':selection,'T0':T0,'E':E,'files':{name:{'bytes':r['bytes'],'sha256':r['sha256']}for name,r in manifest['files'].items()}}
+    remote(code,'fresh-source-guard',TRANSPORT_MARGIN,bootstrap_duration=duration)
+    handshake_rtt=time.monotonic()-sent_mono
+    assert handshake_rtt<=TRANSPORT_MARGIN, 'uncertain transport; no candidate admission'
+    lease=json.loads((DEST/'fresh-source-guard.out').read_text())
+    assert lease['duration_seconds']==duration and abs(lease['mono_end']-lease['mono_origin']-duration)<.001
+    state['native_budget']=lease;state['lease_handshake_rtt']=handshake_rtt;state['deducted_transport_margin']=TRANSPORT_MARGIN;save()
+    packet={'selection':selection,'outside_t0':T0,'native_budget':lease,'files':{name:{'bytes':r['bytes'],'sha256':r['sha256']}for name,r in manifest['files'].items()}}
     packetRaw=(json.dumps(packet,indent=2)+'\n').encode();(DEST/'packet.json').write_bytes(packetRaw)
     for name,pin in manifest['files'].items():run(SCP+[str(HERE/pin['local_name']),'rodbot@100.125.183.112:'+G+'/'+name],'ingress-'+name,60)
     run(SCP+[str(DEST/'packet.json'),'rodbot@100.125.183.112:'+G+'/packet.json'],'ingress-packet',30)
     rows=packet['files'];rows['packet.json']={'bytes':len(packetRaw),'sha256':hashlib.sha256(packetRaw).hexdigest()}
     code='G='+repr(G)+'\nROWS='+repr(rows)+'\n'+'''import os,hashlib,stat
 from pathlib import Path
-assert os.getuid()==503 and time.time()<E-30
+assert os.getuid()==503 and time.monotonic()<M_END-35
 for name,pin in ROWS.items():
  p=Path(G)/name;s=p.lstat();assert stat.S_ISREG(s.st_mode) and s.st_uid==503 and s.st_nlink==1
  b=p.read_bytes();assert len(b)==pin['bytes'] and hashlib.sha256(b).hexdigest()==pin['sha256'];p.chmod(0o600)
 print('ALL_EXACT_SOURCE_AND_PHASE_BYTES_RECEIVED')
 '''
     remote(code,'sealed-input-readback')
+    assert remaining()>RETURN_RESERVE+5
     state['state']='STANDARD_SOURCE_FORMAT_ATTEMPT';save();print(json.dumps(state),flush=True)
     argv=['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/sbin:/sbin','/usr/bin/nice','-n','10','/usr/bin/python3','-I',G+'/invoke-format.py',G,str(T0)]
-    original=run(SSH+[shlex.join(argv)],'standard-format',max(.1,E-time.time()),True)
+    original=run(SSH+[shlex.join(argv)],'standard-format',max(.1,remaining()-RETURN_RESERVE),True)
     # Fixed return artifact is constructed by the source caller after pair drain.
     code='G='+repr(G)+'\n'+'''import hashlib,json
 from pathlib import Path
@@ -89,15 +111,16 @@ print(json.dumps({'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}))
     returned=json.loads((DEST/'return-original-pin.out').read_text())
     run(SCP+['rodbot@100.125.183.112:'+G+'/format-return.tar',str(DEST/'format-return.tar')],'return-source-evidence',30)
     archive=DEST/'format-return.tar';assert archive.stat().st_size==returned['bytes'] and digest(archive)==returned['sha256']
-    allowed={'return-manifest.json','original.json','controller-binding.json','format-result.json','launcher-receipt.json','launcher.done','watchdog.ready','watchdog.out','launcher-control.out','gate.log','evidence.tgz'}
+    allowed={'return-manifest.json','original.json','native-budget.json','controller-binding.json','work-identity.json','format-result.json','launcher-receipt.json','launcher.done','watchdog.ready','watchdog.out','launcher-control.out','gate.log','evidence.tgz'}
     with tarfile.open(archive,'r')as t:
         members=t.getmembers();assert len(members)<=len(allowed) and len({m.name for m in members})==len(members)
         assert sum(m.size for m in members)<=8*1024**2
         for m in members:
-            assert m.isfile() and m.name in allowed and time.time()<E
+            assert m.isfile() and m.name in allowed and remaining()>0
             (DEST/m.name).write_bytes(t.extractfile(m).read())
     receipt=json.loads((DEST/'return-manifest.json').read_text())
-    assert receipt['T0']==T0 and receipt['E']==E
+    assert receipt['outside_t0']==T0 and receipt['native_budget']==lease
+    assert receipt['finishedMonotonic']<lease['mono_end']-5
     for row in receipt['files']:
         p=DEST/row['name'];assert row['name'] in allowed and p.stat().st_size==row['bytes'] and digest(p)==row['sha256']
     success=original.returncode==0 and receipt['success'] and (DEST/'launcher.done').read_text().strip()=='0'
@@ -105,9 +128,9 @@ print(json.dumps({'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}))
         result=json.loads((DEST/'format-result.json').read_text());assert result['head']==state['head'] and len(result['files'])==2
         for row in result['files']:
             b=row['full_utf8'].encode();assert len(b)==row['bytes'] and hashlib.sha256(b).hexdigest()==row['sha256']
-    state.update(state='SOURCE_FORMAT_RETURNED_VERIFIED'if success else'SOURCE_FORMAT_FAILED_OR_UNKNOWN_RETAIN_ORIGINAL',success=success,returned=returned,finished=time.time())
-    save();print(json.dumps(state),flush=True);os._exit(0 if success and time.time()<E else 1)
+    state.update(state='SOURCE_FORMAT_RETURNED_VERIFIED'if success else'SOURCE_FORMAT_FAILED_OR_UNKNOWN_RETAIN_ORIGINAL',success=success,returned=returned,finished=time.time(),finishedMonotonic=time.monotonic())
+    save();print(json.dumps(state),flush=True);os._exit(0 if success and remaining()>0 else 1)
 except BaseException as error:
-    state.update(state='FAILED_OR_UNKNOWN_RETAIN_ORIGINAL_NO_RETRY',reason=repr(error),finished=time.time())
-    if time.time()<E:save();print(json.dumps(state),flush=True)
+    state.update(state='FAILED_OR_UNKNOWN_RETAIN_ORIGINAL_NO_RETRY',reason=repr(error),finished=time.time(),finishedMonotonic=time.monotonic())
+    if remaining()>0:save();print(json.dumps(state),flush=True)
     raise

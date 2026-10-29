@@ -2,7 +2,7 @@
 import os, sys, time, json, hashlib, subprocess, difflib
 from pathlib import Path
 
-D = Path(sys.argv[1]); E = float(sys.argv[2]); STOP = E - 30
+D = Path(sys.argv[1]); M_END = float(sys.argv[2]); PAIR_E = float(sys.argv[3]); STOP = M_END - 30
 assert D == D.resolve() and os.getuid() == 503
 raw = (D / 'gate.log').open('xb'); os.dup2(raw.fileno(), 1); os.dup2(raw.fileno(), 2)
 HEAD = 'fd20fb2f18ea4d04ea035c2a16641b8ff1838d8e'
@@ -13,16 +13,19 @@ PINS = [(23592, '76ff7a9175c62111f66ae21de042c9aab92c5995e9084a53088d1a70774a82a
 GIT = '/usr/bin/git'; FMT = '/opt/homebrew/Cellar/go/1.27.0/libexec/bin/gofmt'
 def sha(b): return hashlib.sha256(b).hexdigest()
 def live():
-    assert time.time() < STOP, 'original work deadline'
+    assert time.monotonic() < STOP, 'original remote monotonic work deadline'
     ready = (D / 'watchdog.ready').read_text().split()
-    assert abs(float(ready[1])-E) < .001
+    assert abs(float(ready[1])-PAIR_E) < .001
     os.kill(int(ready[0]), 0)
     launcher = int((D / 'launcher.pid').read_text())
-    assert os.getppid() == launcher, 'not child of selected launcher'
+    guard = json.loads((D/'work-identity.json').read_text())
+    assert os.getppid() == guard['pid'] and os.getpgrp() == guard['pgid']
+    assert guard['ppid'] == launcher and guard['mono_end'] == M_END
+    os.kill(guard['pid'], 0)
     os.kill(launcher, 0)
 def run(argv, cwd=None, cap=30):
     live()
-    p = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=max(.1,min(cap,STOP-time.time())))
+    p = subprocess.run(argv, cwd=cwd, capture_output=True, timeout=max(.1,min(cap,STOP-time.monotonic())))
     assert p.returncode == 0, (argv, p.returncode, p.stderr.decode(errors='replace'))
     return p.stdout
 code = 1
@@ -64,7 +67,7 @@ try:
         target=out/Path(name).name;target.write_bytes(value)
         delta=''.join(difflib.unified_diff(original.decode().splitlines(True),value.decode().splitlines(True),fromfile=name+' (original)',tofile=name+' (formatted)'))
         result['files'].append({'path':name,'beforeBytes':len(original),'beforeSHA256':sha(original),'bytes':len(value),'sha256':sha(value),'full_utf8':value.decode(),'diff':delta})
-    result['finishedEpoch']=time.time(); live()
+    result['finishedEpoch']=time.time(); result['finishedMonotonic']=time.monotonic(); live()
     (D/'format-result.json').write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps({'formatExit':0,'postimages':[{k:r[k]for k in ('path','bytes','sha256')}for r in result['files']]}),flush=True)
     code=0
