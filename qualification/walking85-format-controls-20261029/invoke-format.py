@@ -80,7 +80,7 @@ try:
     assert time.monotonic()<M_END-5
     receipt=json.loads((D/'launcher-receipt.json').read_text())
     success=rc==0 and wr==0 and receipt['final_exit']==0 and receipt['drain']=='clean' and receipt['cleanup']=='tmp removed' and receipt['archive']=='written' and not receipt['past_deadline'] and(D/'launcher.done').read_text().strip()=='0' and not(D/'watchdog.fired').exists()
-    names=['original.json','native-budget.json','controller-binding.json','work-identity.json','format-result.json','launcher-receipt.json','launcher.done','watchdog.ready','watchdog.out','launcher-control.out','gate.log','evidence.tgz']
+    names=['original.json','native-budget.json','entry-owner-receiving.json','entry-native-facts.json','controller-binding.json','work-identity.json','format-result.json','launcher-receipt.json','launcher.done','watchdog.ready','watchdog.out','launcher-control.out','gate.log','evidence.tgz']
     rows=[]
     for name in names:
         if(D/name).is_file():

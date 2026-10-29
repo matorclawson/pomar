@@ -10,7 +10,7 @@ def remaining():return M_END-time.monotonic()
 if os.getpgrp()!=os.getpid():os.setpgid(0,0)
 assert os.getpgrp()==os.getpid()
 expiry=threading.Timer(remaining(),lambda:os.killpg(os.getpid(),signal.SIGKILL));expiry.daemon=True;expiry.start()
-import json,hashlib,subprocess,shlex,re,base64,tarfile
+import json,hashlib,subprocess,shlex,re,base64,tarfile,selectors
 from pathlib import Path
 HERE=Path(__file__).parent
 selection=json.loads(Path(sys.argv[1]).read_text())
@@ -44,6 +44,7 @@ def run(argv,label,cap=60,allow=False,input_path=None):
         try:p=subprocess.run(argv,stdin=stream,stdout=out,stderr=err,timeout=max(.1,min(cap,remaining())))
         finally:
             if input_path is not None:stream.close()
+        out.flush();os.fsync(out.fileno());err.flush();os.fsync(err.fileno())
     state[label+'_exit']=p.returncode;save()
     if p.returncode and not allow:raise RuntimeError(label+' exit '+str(p.returncode))
     return p
@@ -61,7 +62,7 @@ def remote(code,label,cap=30,bootstrap_duration=None,input_path=None):
 def receive_file(name,local,pin):
     # Fixed data-only stdin receiver. No SFTP/SSHD file writer is treated as
     # being covered by our lease: this actual receiver owns a monotonic fence.
-    assert name in {'invoke-format.py','format-phase.py','sealed-source-data.json','source.bundle','packet.json'}
+    assert name in {'invoke-format.py','format-phase.py','sealed-source-data.json','source.bundle','packet.json','entry-owner-receiving.json'}
     code='G='+repr(G)+'\nNAME='+repr(name)+'\nPIN='+repr(pin)+'\n'+'''import os,sys,hashlib,stat
 from pathlib import Path
 assert os.getuid()==503 and time.monotonic()<M_END-35
@@ -79,6 +80,24 @@ print('EXACT_FIXED_INPUT_RECEIVED',flush=True)
     remote(code,'ingress-'+name,60,input_path=local)
 
 def strict_json(raw):
+    # Limit nesting, structural items and bytes BEFORE the recursive decoder
+    # allocates containers. JSON validity and duplicate keys are checked below.
+    assert isinstance(raw,(str,bytes)) and len(raw)<=2*1024**2
+    text=raw.decode('utf-8','strict')if isinstance(raw,bytes)else raw
+    depth=0;items=0;quoted=False;escaped=False
+    for ch in text:
+        if quoted:
+            if escaped:escaped=False
+            elif ch=='\\':escaped=True
+            elif ch=='"':quoted=False
+        elif ch=='"':quoted=True
+        elif ch in '[{':
+            depth+=1;items+=1;assert depth<=24 and items<=32768
+        elif ch in ']}':
+            depth-=1;assert depth>=0
+        elif ch in ',:':
+            items+=1;assert items<=32768
+    assert depth==0 and not quoted and not escaped
     def pairs(items):
         result={}
         for k,v in items:
@@ -86,7 +105,60 @@ def strict_json(raw):
             result[k]=v
         return result
     def constant(value):raise ValueError('nonfinite owner data')
-    return json.loads(raw,object_pairs_hook=pairs,parse_constant=constant)
+    def integer(token):
+        assert len(token)<=20,'oversized integer token'
+        return int(token)
+    def floating(token):
+        assert len(token)<=64,'oversized float token'
+        value=float(token);assert -1.7976931348623157e308<=value<=1.7976931348623157e308,'nonfinite float'
+        return value
+    return json.loads(text,object_pairs_hook=pairs,parse_constant=constant,parse_int=integer,parse_float=floating)
+
+def durable_owner(name,raw):
+    assert name in('entry-owner-receiving.json','entry-native-facts.json') and len(raw)<=256*1024
+    assert remaining()>0
+    tmp=DEST/(name+'.pending');final=DEST/name
+    with tmp.open('xb')as f:f.write(raw);f.flush();os.fsync(f.fileno())
+    os.replace(tmp,final)
+    directory=os.open(DEST,os.O_RDONLY)
+    try:os.fsync(directory)
+    finally:os.close(directory)
+    assert final.read_bytes()==raw and remaining()>0
+    return {'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
+
+def bounded_child(argv,env,out_cap,err_cap,stop):
+    # Child stays in this already-fenced owned group. On any uncertainty the
+    # original's exception path kills that SAME group, including descendants.
+    assert time.monotonic()<stop<M_END
+    child=subprocess.Popen(argv,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    buffers=[bytearray(),bytearray()];caps=[out_cap,err_cap];total=0
+    try:
+        with selectors.DefaultSelector()as poll:
+            for index,pipe in enumerate((child.stdout,child.stderr)):
+                os.set_blocking(pipe.fileno(),False);poll.register(pipe,selectors.EVENT_READ,index)
+            while poll.get_map():
+                left=stop-time.monotonic()
+                if left<=0:raise TimeoutError('bounded child/pipe drain expired')
+                for event,_ in poll.select(min(.1,left)):
+                    index=event.data;room=caps[index]-len(buffers[index])
+                    try:chunk=os.read(event.fd,min(65536,room+1))
+                    except BlockingIOError:continue
+                    if not chunk:poll.unregister(event.fileobj);event.fileobj.close();continue
+                    if len(chunk)>room or total+len(chunk)>out_cap+err_cap:raise ValueError('output overflow; no truncated document accepted')
+                    buffers[index].extend(chunk);total+=len(chunk)
+        rc=child.wait(timeout=max(.001,stop-time.monotonic()))
+        assert time.monotonic()<stop
+        return rc,bytes(buffers[0]),bytes(buffers[1])
+    except BaseException:
+        # Retain direct-child reap result; descendants are NOT declared drained
+        # from this PID alone. The original exception path terminates its group.
+        if child.poll()is None:child.kill()
+        try:child.wait(timeout=max(.001,min(1,stop-time.monotonic())))
+        except subprocess.TimeoutExpired:pass
+        raise
+    finally:
+        for pipe in(child.stdout,child.stderr):
+            if not pipe.closed:pipe.close()
 
 def mail_json(args):
     # Existing operator-side Messenger, NOT an ENG service or candidate API.
@@ -104,10 +176,12 @@ def mail_json(args):
     argv=['/Users/rodbot/.local/bin/zmsg',*args]
     for attempt in range(2):
         assert remaining()>35,'insufficient original budget for owner receiving'
-        r=subprocess.run(argv,env=env,stdin=subprocess.DEVNULL,capture_output=True,timeout=min(15,remaining()-20))
-        assert len(r.stdout)<=2*1024**2 and len(r.stderr)<=65536,'owner response bound'
-        if r.returncode==0:return strict_json(r.stdout)
-        if attempt==0 and b'503' in r.stderr:
+        rc,out,err=bounded_child(argv,env,2*1024**2,65536,min(time.monotonic()+60,M_END-20))
+        if rc==0:return strict_json(out)
+        # Match the pinned client's curl -f HTTP status diagnostic, not a
+        # substring in an arbitrary error or owner body. Unknown shape refuses.
+        http503=rc in(5,22) and not out and re.fullmatch(rb'curl: \(22\) The requested URL returned error: 503\r?\n?',err)is not None
+        if attempt==0 and http503:
             delay=10+int.from_bytes(os.urandom(2),'big')%31
             assert remaining()>delay+40,'503 cannot consume return reserve'
             time.sleep(delay)
@@ -122,8 +196,11 @@ def owner_document(message,who,schema):
     blocks=re.findall(r'```json\n(.*?)\n```',body,re.S)
     assert len(blocks)==1,'one actual owner JSON document required'
     value=strict_json(blocks[0]);assert isinstance(value,dict) and value.get('schema')==schema
-    for name,want in [('source_head',selection['source_head']),('source_tree','235b139cf97027715e1a68b84adbbcff4764097f'),('source_base','d115cca68238cef853bb524ba3ae57d3cb1f59a3'),('packet_sha256',selection['packet_sha256']),('code_commit',manifest['codeCommit']),('repository','zeroemployeeorg/pomar'),('host','eng-uk-0006'),('uid',503),('seat','dt-animated-comics-maintainer'),('generation',1)]:
-        assert value.get(name)==want,'owner document original/source/principal mismatch'
+    for name,want in [('source_head',selection['source_head']),('source_tree','235b139cf97027715e1a68b84adbbcff4764097f'),('source_base','d115cca68238cef853bb524ba3ae57d3cb1f59a3'),('packet_sha256',selection['packet_sha256']),('code_commit',manifest['codeCommit']),('repository','zeroemployeeorg/pomar'),('host','eng-uk-0006'),('uid',503),('seat','dt-animated-comics-maintainer'),('generation',1),('case',selection['case']),('actor_session','01a15758-8bc9-7d22-a419-267f254eb8b1')]:
+        assert type(value.get(name))is type(want) and value[name]==want,'owner document original/source/principal mismatch'
+    if who=='zeo-rt-sched':
+        for name,want in [('selection_id',key),('outside_original_t0',T0),('entry_from_epoch',selection['entry_from_epoch']),('entry_until_epoch',selection['entry_until_epoch']),('max_end',selection['max_end'])]:
+            assert type(value.get(name))is type(want) and value[name]==want,'fresh owner window/original mismatch'
     return value
 
 def entry_owner_receiving():
@@ -135,7 +212,7 @@ def entry_owner_receiving():
     policy_message=mail_json(['show',policy_id,'--json'])
     policy=owner_document(policy_message,'zeo-rt','walking85-entry-native-policy/v1')
     assert policy.get('adoption')=='ADOPTED_FOR_ONE_OFF_SOURCE_FORMAT'
-    assert policy.get('memory_recipe')=='vm_stat.free+inactive' and policy.get('headroom_bytes')==4*1024**3
+    assert policy.get('memory_recipe')=='vm_stat.free+inactive' and type(policy.get('headroom_bytes'))is int and policy['headroom_bytes']==4*1024**3
     assert policy.get('seat_root')==str(Path(G).parent) and policy.get('native_hostname')=='ENG-UK-0006'
     assert type(policy.get('seat_ceiling_bytes'))is int and 256*1024**2<=policy['seat_ceiling_bytes']<=2**50
     nonce=os.urandom(16).hex();rid='w85-entry-'+nonce
@@ -178,8 +255,11 @@ def entry_owner_receiving():
                 assert gate is None or isinstance(gate,str) and re.fullmatch(r'/Users/(rodbot|zeobuild)/[A-Za-z0-9_./-]{1,600}',gate) and '/..' not in gate
                 total+=cap
             assert own==1,'this1GiB must occur exactly once, never double counted'
-            bound={'root_policy':policy,'root_policy_message':policy_id,'scheduler_input':value,'scheduler_message':message['id'],'request_id':request_id,'received_monotonic':time.monotonic(),'required_bytes':total+4*1024**3}
-            (DEST/'entry-owner-receiving.json').write_text(json.dumps(bound,indent=2)+'\n')
+            # Preserve exact body UTF-8 digests and normalized full server
+            # envelopes; never call reserialized envelope bytes raw transport.
+            bound={'root_policy':policy,'root_policy_message':policy_id,'scheduler_input':value,'scheduler_message':message['id'],'request_id':request_id,'received_monotonic':time.monotonic(),'required_bytes':total+4*1024**3,'owner_envelopes':{'root':policy_message,'scheduler':message},'body_sha256':{'root':hashlib.sha256(policy_message['body'].encode()).hexdigest(),'scheduler':hashlib.sha256(message['body'].encode()).hexdigest()}}
+            raw=(json.dumps(bound,indent=2)+'\n').encode()
+            state['entry_owner_pin']=durable_owner('entry-owner-receiving.json',raw);save()
             return bound
         time.sleep(min(2,max(.01,until-time.monotonic())))
     raise RuntimeError('NO_START: bounded canonical owner receiving unavailable')
@@ -202,7 +282,7 @@ try:
     sent_mono=time.monotonic();duration=remaining()-TRANSPORT_MARGIN-RETURN_RESERVE
     assert duration>60
     assert time.monotonic()-owner['received_monotonic']<10,'NO_START: owner input aged before native sampling'
-    code='G='+repr(G)+'\nDURATION='+repr(duration)+'\nOWNER='+repr(owner)+'\n'+'''import os,hashlib,json,re,subprocess,socket
+    code='G='+repr(G)+'\nDURATION='+repr(duration)+'\nOWNER='+repr(owner)+'\n'+'''import os,hashlib,json,re,subprocess,socket,selectors
 from pathlib import Path
 p=Path(G);parent=p.parent
 assert os.getuid()==503 and parent==parent.resolve() and parent.stat().st_uid==503
@@ -220,9 +300,35 @@ pins={'/usr/bin/vm_stat':'1947d48441639dc229b56ccc26792105a54a34a66c984e921d42c9
 for tool,want in pins.items():assert hashlib.sha256(Path(tool).read_bytes()).hexdigest()==want
 def probe(argv,limit):
  assert argv[0]in pins and time.monotonic()<M_END-40
- r=subprocess.run(argv,stdin=subprocess.DEVNULL,capture_output=True,timeout=min(3,M_END-time.monotonic()-35))
- assert r.returncode==0 and len(r.stdout)<=limit and len(r.stderr)<=4096
- return r.stdout.decode('utf-8','strict')
+ stop=min(time.monotonic()+3,M_END-35)
+ child=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ data=[bytearray(),bytearray()];caps=[limit,4096];total=0
+ try:
+  with selectors.DefaultSelector()as poll:
+   for index,pipe in enumerate((child.stdout,child.stderr)):
+    os.set_blocking(pipe.fileno(),False);poll.register(pipe,selectors.EVENT_READ,index)
+   while poll.get_map():
+    left=stop-time.monotonic()
+    if left<=0:raise TimeoutError('native probe or pipe drain expired')
+    for event,_ in poll.select(min(.1,left)):
+     index=event.data;room=caps[index]-len(data[index])
+     try:chunk=os.read(event.fd,min(65536,room+1))
+     except BlockingIOError:continue
+     if not chunk:poll.unregister(event.fileobj);event.fileobj.close();continue
+     if len(chunk)>room or total+len(chunk)>limit+4096:raise ValueError('native output overflow')
+     data[index].extend(chunk);total+=len(chunk)
+  assert child.wait(timeout=max(.001,stop-time.monotonic()))==0 and time.monotonic()<stop
+  return bytes(data[0]).decode('utf-8','strict')
+ except BaseException:
+  # This helper's already-owned group includes the probe and descendants.
+  # Never leave them behind while an exception destroys the daemon timer.
+  if child.poll()is None:child.kill()
+  try:child.wait(timeout=max(.001,min(1,M_END-time.monotonic())))
+  finally:os.killpg(os.getpgrp(),signal.SIGKILL)
+  raise
+ finally:
+  for pipe in(child.stdout,child.stderr):
+   if not pipe.closed:pipe.close()
 sample_start=time.monotonic()
 vm=probe(['/usr/bin/vm_stat'],65536)
 page=re.search(r'page size of ([0-9]+) bytes',vm);assert page
@@ -262,9 +368,14 @@ assert time.monotonic()<M_END-35
 p.mkdir(mode=0o700)
 lease={'mono_origin':M_ORIGIN,'mono_end':M_END,'duration_seconds':DURATION,'clock':'time.monotonic','transport_margin_seconds':10.0,'outside_return_reserve_seconds':20.0}
 assert time.get_clock_info('monotonic').monotonic and not time.get_clock_info('monotonic').adjustable
-(p/'native-budget.json').write_text(json.dumps(lease,indent=2)+'\\n')
-(p/'entry-native-facts.json').write_text(json.dumps(facts,indent=2)+'\\n')
-print(json.dumps({'lease':lease,'entry_native_facts':facts}),flush=True)
+facts_raw=(json.dumps(facts,indent=2)+'\\n').encode()
+for name,raw in [('native-budget.json',(json.dumps(lease,indent=2)+'\\n').encode()),('entry-native-facts.json',facts_raw)]:
+ with(p/(name+'.pending')).open('xb')as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
+ os.replace(p/(name+'.pending'),p/name)
+directory=os.open(p,os.O_RDONLY)
+try:os.fsync(directory)
+finally:os.close(directory)
+print(json.dumps({'lease':lease,'entry_native_facts':facts,'entry_native_facts_pin':{'bytes':len(facts_raw),'sha256':hashlib.sha256(facts_raw).hexdigest()}}),flush=True)
 '''
     remote(code,'fresh-source-guard',TRANSPORT_MARGIN,bootstrap_duration=duration)
     handshake_rtt=time.monotonic()-sent_mono
@@ -273,12 +384,18 @@ print(json.dumps({'lease':lease,'entry_native_facts':facts}),flush=True)
     facts=receiving['entry_native_facts']
     assert facts['request_id']==owner['request_id'] and facts['selection_id']==key
     assert facts['source_head']==selection['source_head'] and facts['packet_sha256']==selection['packet_sha256']
+    facts_raw=(json.dumps(facts,indent=2)+'\n').encode()
+    assert durable_owner('entry-native-facts.json',facts_raw)==receiving['entry_native_facts_pin']
+    state['entry_native_facts_pin']=receiving['entry_native_facts_pin']
     state['entry_native_facts']=facts;save()
     assert lease['duration_seconds']==duration and abs(lease['mono_end']-lease['mono_origin']-duration)<.001
     state['native_budget']=lease;state['lease_handshake_rtt']=handshake_rtt;state['deducted_transport_margin']=TRANSPORT_MARGIN;save()
     packet={'selection':selection,'outside_t0':T0,'native_budget':lease,'files':{name:{'bytes':r['bytes'],'sha256':r['sha256']}for name,r in manifest['files'].items()}}
+    packet['files']['entry-owner-receiving.json']=state['entry_owner_pin']
+    packet['files']['entry-native-facts.json']=state['entry_native_facts_pin']
     packetRaw=(json.dumps(packet,indent=2)+'\n').encode();(DEST/'packet.json').write_bytes(packetRaw)
     for name,pin in manifest['files'].items():receive_file(name,HERE/pin['local_name'],{'bytes':pin['bytes'],'sha256':pin['sha256']})
+    receive_file('entry-owner-receiving.json',DEST/'entry-owner-receiving.json',state['entry_owner_pin'])
     receive_file('packet.json',DEST/'packet.json',{'bytes':len(packetRaw),'sha256':hashlib.sha256(packetRaw).hexdigest()})
     rows=packet['files'];rows['packet.json']={'bytes':len(packetRaw),'sha256':hashlib.sha256(packetRaw).hexdigest()}
     code='G='+repr(G)+'\nROWS='+repr(rows)+'\n'+'''import os,hashlib,stat
@@ -291,6 +408,11 @@ print('ALL_EXACT_SOURCE_AND_PHASE_BYTES_RECEIVED')
 '''
     remote(code,'sealed-input-readback')
     assert remaining()>RETURN_RESERVE+5
+    # Staging can stale the earlier sample. Keep this explicit second refusal
+    # until actual Scheduler generation/held-view/charge and fresh native facts
+    # are rejoined HERE immediately before candidate admission. A new snapshot
+    # or a candidate held bool cannot supply the missing owning operation.
+    raise RuntimeError('NO_START: actual admission freshness/owner terminal receiving not implemented; preserve same original and charge')
     state['state']='STANDARD_SOURCE_FORMAT_ATTEMPT';save();print(json.dumps(state),flush=True)
     argv=['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/sbin:/sbin','/usr/bin/nice','-n','10','/usr/bin/python3','-I',G+'/invoke-format.py',G,str(T0),str(lease['mono_end'])]
     original=run(SSH+[shlex.join(argv)],'standard-format',max(.1,remaining()-RETURN_RESERVE),True)
@@ -310,14 +432,20 @@ sys.stdout.buffer.write(b);sys.stdout.buffer.flush()
 '''
     remote(code,'return-source-evidence',30)
     archive=DEST/'return-source-evidence.out';assert archive.stat().st_size==returned['bytes'] and digest(archive)==returned['sha256']
-    allowed={'return-manifest.json','original.json','native-budget.json','controller-binding.json','work-identity.json','format-result.json','launcher-receipt.json','launcher.done','watchdog.ready','watchdog.out','launcher-control.out','gate.log','evidence.tgz'}
+    allowed={'return-manifest.json','original.json','native-budget.json','entry-owner-receiving.json','entry-native-facts.json','controller-binding.json','work-identity.json','format-result.json','launcher-receipt.json','launcher.done','watchdog.ready','watchdog.out','launcher-control.out','gate.log','evidence.tgz'}
     with tarfile.open(archive,'r')as t:
         members=t.getmembers();assert len(members)<=len(allowed) and len({m.name for m in members})==len(members)
         assert sum(m.size for m in members)<=8*1024**2
         for m in members:
             assert m.isfile() and m.name in allowed and remaining()>0
-            (DEST/m.name).write_bytes(t.extractfile(m).read())
+            raw=t.extractfile(m).read()
+            if m.name in('entry-owner-receiving.json','entry-native-facts.json'):
+                assert raw==(DEST/m.name).read_bytes(),'returned owning chain differs from durable original'
+            else:(DEST/m.name).write_bytes(raw)
     receipt=json.loads((DEST/'return-manifest.json').read_text())
+    returned_pins={row['name']:{'bytes':row['bytes'],'sha256':row['sha256']}for row in receipt['files']}
+    assert returned_pins['entry-owner-receiving.json']==state['entry_owner_pin']
+    assert returned_pins['entry-native-facts.json']==state['entry_native_facts_pin']
     assert receipt['outside_t0']==T0 and receipt['native_budget']==lease
     assert receipt['finishedMonotonic']<lease['mono_end']-5
     for row in receipt['files']:
@@ -331,5 +459,9 @@ sys.stdout.buffer.write(b);sys.stdout.buffer.flush()
     save();print(json.dumps(state),flush=True);os._exit(0 if success and remaining()>0 else 1)
 except BaseException as error:
     state.update(state='FAILED_OR_UNKNOWN_RETAIN_ORIGINAL_NO_RETRY',reason=repr(error),finished=time.time(),finishedMonotonic=time.monotonic())
-    if remaining()>0:save();print(json.dumps(state),flush=True)
-    raise
+    if 'entry_request'in state:state['owner_terminal_receiving']='UNIMPLEMENTED_UNKNOWN_RETAIN_SAME_HOLDER_CHARGE_NO_SELF_RELEASE'
+    # No uncertain mail/probe/SSH child may outlive the original's disappearing
+    # daemon timer. Save the typed uncertainty, then terminate only this group.
+    try:
+        if remaining()>0:save();print(json.dumps(state),flush=True)
+    finally:os.killpg(os.getpgrp(),signal.SIGKILL)
