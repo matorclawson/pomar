@@ -238,6 +238,67 @@ def inert_claim_crash_boundary_controls():
     assert acknowledged['message_id'].endswith(attempt['action_id'])
     return 'INERT_BOUNDARY_CONTROLS_ONLY_NO_LIVE_EFFECT'
 
+def canonical_queue_projection(queue):
+    # Actual Scheduler live-queue/v1 field mapping from owning fec4e8d.
+    # This is data projection ONLY: no generation counter, performed hold,
+    # all-peer inventory or current-FIT authority is manufactured from it.
+    assert isinstance(queue,dict) and queue.get('schema')=='zeo.scheduler.live-queue/v1'
+    assert queue.get('owner')=='zeo-rt-sched'
+    admissions={};unknown=[]
+    for collection in('running','granted_pending_start','unresolved_running_claims'):
+        rows=queue.get(collection);assert isinstance(rows,list) and len(rows)<=256
+        for row in rows:
+            assert isinstance(row,dict)
+            job=row.get('job_id');assert isinstance(job,str) and 0<len(job)<=512
+            admission=row.get('admission_id')
+            charge=row.get('current_capacity_charge')
+            if collection=='unresolved_running_claims' or charge is None:
+                unknown.append({'job_id':job,'admission_id':admission,'state':row.get('state'),'source_collection':collection,'charge_bytes':None,'unknown_not_zero':True})
+                continue
+            assert isinstance(admission,str) and 0<len(admission)<=512
+            assert isinstance(charge,dict) and isinstance(charge.get('state'),str) and charge['state']
+            rss=charge.get('RSS_GiB');assert type(rss)in(int,float) and rss>0
+            numerator,denominator=(rss,1)if type(rss)is int else rss.as_integer_ratio()
+            scaled=numerator*1073741824
+            assert scaled%denominator==0,'RSS_GiB must denote exact whole bytes'
+            cap=scaled//denominator;assert 0<cap<=2**40
+            # queue_state is the maintained current view. Detailed state is
+            # historical annotation; do not invent an uppercase state enum.
+            assert row.get('queue_state')in('ready','running','blocked','awaiting receiving')
+            identity={name:row.get(name)for name in('job_id','seat','repository','host')}
+            assert isinstance(identity['seat'],str) and identity['seat']
+            identity.update(admission_id=admission,cap_bytes=cap)
+            if admission in admissions:
+                assert admissions[admission]['identity']==identity,'conflicting projections of one original'
+                admissions[admission]['projections'].append(collection)
+            else:admissions[admission]={'identity':identity,'projections':[collection]}
+    # queued is intake, completions is history: neither is added as a current
+    # reservation or silently considered released. Unknown custody above stays.
+    return {'known_admissions':admissions,'known_cap_bytes':sum(v['identity']['cap_bytes']for v in admissions.values()),'unknown_custody':unknown,'scope':'ACCOUNTING_PROJECTION_ONLY_NOT_CURRENT_FIT_OR_ENFORCED_EXCLUSION'}
+
+def inert_queue_projection_controls():
+    # Supplied-data controls only, uncalled until admitted source validation.
+    row={'job_id':'INERT_ONLY','admission_id':'inert-one','seat':'inert','repository':'inert','host':'eng-uk-0006','queue_state':'ready','state':'historical annotation','current_capacity_charge':{'RSS_GiB':1,'state':'SELECTED_PENDING_ACTUAL_START'}}
+    queue={'schema':'zeo.scheduler.live-queue/v1','owner':'zeo-rt-sched','running':[row],'granted_pending_start':[dict(row)],'unresolved_running_claims':[],'queued':[{'requested_RSS_GiB':64}],'completions':[{'historical_RSS_GiB':32}]}
+    projected=canonical_queue_projection(queue)
+    assert len(projected['known_admissions'])==1 and projected['known_cap_bytes']==1073741824
+    assert projected['unknown_custody']==[]
+    queue['unresolved_running_claims']=[{'job_id':'inert-unknown','state':'UNKNOWN','current_capacity_charge':None}]
+    unknown=canonical_queue_projection(queue)['unknown_custody']
+    assert len(unknown)==1 and unknown[0]['charge_bytes']is None and unknown[0]['unknown_not_zero']is True
+    queue['unresolved_running_claims']=[]
+    conflicting=dict(row);conflicting['current_capacity_charge']={'RSS_GiB':2,'state':'SELECTED_PENDING_ACTUAL_START'}
+    queue['granted_pending_start']=[conflicting]
+    try:canonical_queue_projection(queue)
+    except AssertionError:pass
+    else:raise AssertionError('conflicting duplicate charge accepted')
+    invalid=dict(row);invalid['current_capacity_charge']={'RSS_GiB':True,'state':'SELECTED_PENDING_ACTUAL_START'}
+    queue['running']=[];queue['granted_pending_start']=[invalid]
+    try:canonical_queue_projection(queue)
+    except AssertionError:pass
+    else:raise AssertionError('bool RSS_GiB accepted')
+    return 'INERT_ACCOUNTING_DATA_ONLY_NOT_OWNER_HOLD_OR_RUNTIME_PROOF'
+
 def entry_owner_receiving():
     # Root policy/adoption is real owning message data, not a caller boolean.
     # The Root message is supplied with the actual new selection AFTER static
@@ -282,27 +343,28 @@ def entry_owner_receiving():
             value=owner_document(message,'zeo-rt-sched','walking85-entry-accounting/v1')
             assert value.get('nonce')==nonce and value.get('selection_id')==key and value.get('status')=='CURRENT_ENTRY_INPUT'
             assert value.get('current_named_reservations_complete')is True and value.get('entry_accounting_held_until_receiving')is True
-            generation=value.get('ledger_generation');assert isinstance(generation,str) and 0<len(generation)<=200
             assert isinstance(value.get('owning_ledger_ref'),str) and value['owning_ledger_ref']
             exclusion=value.get('repository_exclusion',{})
             assert exclusion.get('repository')=='zeroemployeeorg/pomar' and exclusion.get('holder_id')==key and exclusion.get('state')=='HELD' and exclusion.get('held_until_terminal')is True
-            claims=value.get('named_reservations');assert isinstance(claims,list) and 1<=len(claims)<=256
-            ids=set();own=0;total=0
-            for row in claims:
-                assert isinstance(row,dict) and isinstance(row.get('id'),str) and row['id'] not in ids
-                ids.add(row['id']);assert row.get('host')=='eng-uk-0006' and row.get('state')in('PENDING','HELD','RUNNING')
-                cap=row.get('cap_bytes');assert type(cap)is int and 0<cap<=2**40
-                assert isinstance(row.get('repository'),str) and row['repository']
-                if row['id']==key:
-                    own+=1;assert cap==1024**3 and row['repository']=='zeroemployeeorg/pomar'
-                elif row['repository']=='zeroemployeeorg/pomar':raise RuntimeError('NO_START: another canonical Pomar holder')
-                gate=row.get('gate_directory')
-                assert gate is None or isinstance(gate,str) and re.fullmatch(r'/Users/(rodbot|zeobuild)/[A-Za-z0-9_./-]{1,600}',gate) and '/..' not in gate
-                total+=cap
-            assert own==1,'this1GiB must occur exactly once, never double counted'
+            # Carrier field below is still PROPOSED one-off input, not an
+            # installed reply API. Its contained queue fields are actual.
+            queue=value.get('canonical_queue_projection')
+            accounting=canonical_queue_projection(queue)
+            assert not accounting['unknown_custody'],'NO_START: unresolved custody charge is UNKNOWN, never zero'
+            claims=accounting['known_admissions'];assert key in claims
+            own=claims[key]['identity']
+            assert own['cap_bytes']==1024**3 and own['seat']=='dt-animated-comics-maintainer'
+            assert own['repository']=='zeroemployeeorg/pomar' and own['host']=='eng-uk-0006'
+            for admission,entry in claims.items():
+                row=entry['identity']
+                assert row['host']=='eng-uk-0006' and isinstance(row['repository'],str) and row['repository'],'NO_START: canonical principal/repository mapping missing'
+                if admission!=key and row['repository']in('pomar','zeroemployeeorg/pomar'):raise RuntimeError('NO_START: another Pomar charged original')
+            total=accounting['known_cap_bytes']
+            projection_raw=json.dumps(queue,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
+            projection_pin={'bytes':len(projection_raw),'sha256':hashlib.sha256(projection_raw).hexdigest(),'scope':'NORMALIZED_PROJECTION_IDENTITY_ONLY_NOT_GENERATION_OR_CURRENT_HOLD'}
             # Preserve exact body UTF-8 digests and normalized full server
             # envelopes; never call reserialized envelope bytes raw transport.
-            bound={'root_policy':policy,'root_policy_message':policy_id,'scheduler_input':value,'scheduler_message':message['id'],'request_id':request_id,'received_monotonic':time.monotonic(),'required_bytes':total+4*1024**3,'owner_envelopes':{'root':policy_message,'scheduler':message},'body_sha256':{'root':hashlib.sha256(policy_message['body'].encode()).hexdigest(),'scheduler':hashlib.sha256(message['body'].encode()).hexdigest()},'claim_intent':intent,'claim_intent_pin':state['entry_intent_pin']}
+            bound={'root_policy':policy,'root_policy_message':policy_id,'scheduler_input':value,'scheduler_message':message['id'],'request_id':request_id,'received_monotonic':time.monotonic(),'required_bytes':total+4*1024**3,'accounting_projection':accounting,'accounting_projection_pin':projection_pin,'owner_envelopes':{'root':policy_message,'scheduler':message},'body_sha256':{'root':hashlib.sha256(policy_message['body'].encode()).hexdigest(),'scheduler':hashlib.sha256(message['body'].encode()).hexdigest()},'claim_intent':intent,'claim_intent_pin':state['entry_intent_pin']}
             raw=(json.dumps(bound,indent=2)+'\n').encode()
             state['entry_owner_pin']=durable_owner('entry-owner-receiving.json',raw);save()
             return bound
@@ -397,10 +459,8 @@ assert seat_bytes+256*1024**2<=policy['seat_ceiling_bytes']
 # conservative same-UID compiler executable-name refusal, even for accounted
 # peer compilers. It does not identify Python gate scripts or prove gate/view
 # absence. Never inspect arbitrary peer argv or signal a peer process.
-for claim in account['named_reservations']:
- gate=claim.get('gate_directory')
- if claim['id']!=account['selection_id'] and claim['repository']=='zeroemployeeorg/pomar':raise RuntimeError('NO_START: another Pomar claim')
- if gate==G:assert not Path(gate).exists() and not Path(gate).is_symlink()
+assert not OWNER['accounting_projection']['unknown_custody']
+assert not p.exists() and not p.is_symlink()
 processes=probe(['/bin/ps','-axo','uid=,pid=,ppid=,pgid=,comm='],1024**2)
 conflicts=[]
 for line in processes.splitlines():
@@ -410,7 +470,7 @@ for line in processes.splitlines():
   conflicts.append({'pid':pid,'ppid':ppid,'pgid':pgid,'name':name})
 assert not conflicts,'NO_START: conservative same-UID compiler-name refusal (accounted peers may also refuse)'
 sample_end=time.monotonic();assert sample_end-sample_start<=8 and sample_end<M_END-35
-facts={'schema':'walking85-entry-native-facts/draft','sample_start':sample_start,'sample_end':sample_end,'uid':os.getuid(),'hostname':socket.gethostname(),'page_size':page_size,'free_inactive_bytes':reclaimable,'physical_bytes':physical,'required_bytes':required,'load1':load,'filesystem_free_bytes':free_bytes,'seat_bytes':seat_bytes,'seat_ceiling_bytes':policy['seat_ceiling_bytes'],'same_uid_compiler_name_conflicts':conflicts,'process_check_scope':'conservative compiler-name refusal only; no gate/private-view exclusion proof','scheduler_message':OWNER['scheduler_message'],'root_policy_message':OWNER['root_policy_message'],'request_id':OWNER['request_id'],'source_head':account['source_head'],'packet_sha256':account['packet_sha256'],'code_commit':account['code_commit'],'selection_id':account['selection_id'],'repository_exclusion':account['repository_exclusion'],'ledger_generation':account['ledger_generation']}
+facts={'schema':'walking85-entry-native-facts/draft','sample_start':sample_start,'sample_end':sample_end,'uid':os.getuid(),'hostname':socket.gethostname(),'page_size':page_size,'free_inactive_bytes':reclaimable,'physical_bytes':physical,'required_bytes':required,'load1':load,'filesystem_free_bytes':free_bytes,'seat_bytes':seat_bytes,'seat_ceiling_bytes':policy['seat_ceiling_bytes'],'same_uid_compiler_name_conflicts':conflicts,'process_check_scope':'conservative compiler-name refusal only; no gate/private-view exclusion proof','scheduler_message':OWNER['scheduler_message'],'root_policy_message':OWNER['root_policy_message'],'request_id':OWNER['request_id'],'source_head':account['source_head'],'packet_sha256':account['packet_sha256'],'code_commit':account['code_commit'],'selection_id':account['selection_id'],'repository_exclusion':account['repository_exclusion'],'accounting_projection_pin':OWNER['accounting_projection_pin']}
 assert time.monotonic()<M_END-35
 p.mkdir(mode=0o700)
 lease={'mono_origin':M_ORIGIN,'mono_end':M_END,'duration_seconds':DURATION,'clock':'time.monotonic','transport_margin_seconds':10.0,'outside_return_reserve_seconds':20.0}
