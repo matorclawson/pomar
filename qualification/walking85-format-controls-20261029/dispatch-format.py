@@ -1,5 +1,7 @@
 """Fixed source-only operator ingress/return, following App dispatch-original.
 Candidate formatting stays on ENG UID503 under unchanged standard83a9/b899.
+Entry receiving below is a SOURCE DRAFT, not an adopted owner protocol.
+The explicit draft refusal is retained pending exact-head owner review.
 """
 import os,sys,time,threading,signal
 M0=time.monotonic();T0=time.time();M_END=M0+300;E=T0+300
@@ -75,17 +77,123 @@ assert time.monotonic()<M_END-35
 print('EXACT_FIXED_INPUT_RECEIVED',flush=True)
 '''
     remote(code,'ingress-'+name,60,input_path=local)
+
+def strict_json(raw):
+    def pairs(items):
+        result={}
+        for k,v in items:
+            if k in result:raise ValueError('duplicate owner-data key')
+            result[k]=v
+        return result
+    def constant(value):raise ValueError('nonfinite owner data')
+    return json.loads(raw,object_pairs_hook=pairs,parse_constant=constant)
+
+def mail_json(args):
+    # Existing operator-side Messenger, NOT an ENG service or candidate API.
+    # No inbox/other-seat bodies are archived or sent to ENG. Only the actual
+    # bound owning reply is retained as this original's accounting input.
+    pins={
+        '/Users/rodbot/.local/bin/zmsg':'7f67a5b51b68032ab8d009d033ea85e0fa64d9ff2f143ae6ab261f4c4c98e782',
+        '/Users/rodbot/.local/libexec/zeo-cutover/6b88b35d605787c7f98f268cabc25a85eb3d85458f2dbeb4f39580f948a6f7f6/zmsg-remote':'6b88b35d605787c7f98f268cabc25a85eb3d85458f2dbeb4f39580f948a6f7f6',
+        '/bin/bash':'16303dedab719ddb63efd9dd68092a0da37b397bfd4fcb856d5f1c86c5ee414b',
+        '/usr/bin/curl':'b636262803922ee1dd0fbf614818473ffa53c811e44fd3278c2270d3af4759d3',
+        '/usr/bin/jq':'b16bc93b2f3c69ce3134f20b796bb72aa3410b10166566ac2ca1bee5e4153ed5',
+    }
+    for name,want in pins.items():assert digest(name)==want,'operator Messenger tool changed'
+    env={'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','HOME':'/Users/rodbot','USER':'rodbot','LOGNAME':'rodbot','ZMAIL_INSTANCE':'dt-animated-comics-maintainer'}
+    argv=['/Users/rodbot/.local/bin/zmsg',*args]
+    for attempt in range(2):
+        assert remaining()>35,'insufficient original budget for owner receiving'
+        r=subprocess.run(argv,env=env,stdin=subprocess.DEVNULL,capture_output=True,timeout=min(15,remaining()-20))
+        assert len(r.stdout)<=2*1024**2 and len(r.stderr)<=65536,'owner response bound'
+        if r.returncode==0:return strict_json(r.stdout)
+        if attempt==0 and b'503' in r.stderr:
+            delay=10+int.from_bytes(os.urandom(2),'big')%31
+            assert remaining()>delay+40,'503 cannot consume return reserve'
+            time.sleep(delay)
+            continue
+        raise RuntimeError('NO_START: owner receiving command failed; no alternate identity/port')
+
+def owner_document(message,who,schema):
+    # These draft body fields are proposed for this case only. The server
+    # envelope above is maintained; this body is NOT an existing owner DTO.
+    assert message.get('schema')=='zeomessenger.message/v1' and message.get('from')==who,'not canonical owner receiving'
+    body=message.get('body','');assert isinstance(body,str) and len(body.encode())<=65536
+    blocks=re.findall(r'```json\n(.*?)\n```',body,re.S)
+    assert len(blocks)==1,'one actual owner JSON document required'
+    value=strict_json(blocks[0]);assert isinstance(value,dict) and value.get('schema')==schema
+    for name,want in [('source_head',selection['source_head']),('source_tree','235b139cf97027715e1a68b84adbbcff4764097f'),('source_base','d115cca68238cef853bb524ba3ae57d3cb1f59a3'),('packet_sha256',selection['packet_sha256']),('code_commit',manifest['codeCommit']),('repository','zeroemployeeorg/pomar'),('host','eng-uk-0006'),('uid',503),('seat','dt-animated-comics-maintainer'),('generation',1)]:
+        assert value.get(name)==want,'owner document original/source/principal mismatch'
+    return value
+
+def entry_owner_receiving():
+    # Root policy/adoption is real owning message data, not a caller boolean.
+    # The Root message is supplied with the actual new selection AFTER static
+    # review; absence is NO_START, not a request for a generic profile family.
+    policy_id=selection.get('root_entry_policy_message_id')
+    assert isinstance(policy_id,str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,240}',policy_id),'NO_START: Root operating policy absent'
+    policy_message=mail_json(['show',policy_id,'--json'])
+    policy=owner_document(policy_message,'zeo-rt','walking85-entry-native-policy/v1')
+    assert policy.get('adoption')=='ADOPTED_FOR_ONE_OFF_SOURCE_FORMAT'
+    assert policy.get('memory_recipe')=='vm_stat.free+inactive' and policy.get('headroom_bytes')==4*1024**3
+    assert policy.get('seat_root')==str(Path(G).parent) and policy.get('native_hostname')=='ENG-UK-0006'
+    assert type(policy.get('seat_ceiling_bytes'))is int and 256*1024**2<=policy['seat_ceiling_bytes']<=2**50
+    nonce=os.urandom(16).hex();rid='w85-entry-'+nonce
+    request={'schema':'walking85-entry-owner-request/v1','nonce':nonce,'selection_id':key,'case':selection['case'],'source_head':selection['source_head'],'packet_sha256':selection['packet_sha256'],'code_commit':manifest['codeCommit'],'repository':'zeroemployeeorg/pomar','host':'eng-uk-0006','uid':503,'this_cap_bytes':1024**3,'headroom_bytes':4*1024**3,'outside_original_t0':T0,'scope':'CURRENT canonical named reservations and held no-wait Pomar exclusion for THIS live entry, not a new allocation or a preexisting snapshot'}
+    request.update(source_tree='235b139cf97027715e1a68b84adbbcff4764097f',source_base='d115cca68238cef853bb524ba3ae57d3cb1f59a3',seat='dt-animated-comics-maintainer',generation=1,actor_session='01a15758-8bc9-7d22-a419-267f254eb8b1',entry_from_epoch=selection['entry_from_epoch'],entry_until_epoch=selection['entry_until_epoch'],max_end=selection['max_end'])
+    body='sow: pomar-SOW-87 rev43 / DTAC01rev3\nActual bounded entry receiving request; reply once with current canonical input, or UNKNOWN/NO_START. No reservation/slot change requested.\n```json\n'+json.dumps(request,sort_keys=True)+'\n```'
+    sent=mail_json(['send','zeo-rt-sched','--id',rid,'--subject','W85 live entry receiving '+nonce,'--body',body,'--json'])
+    assert sent.get('schema')=='zeomessenger.send/v1' and not sent.get('error')
+    request_id=sent.get('message_id');assert isinstance(request_id,str) and request_id.endswith(rid)
+    state['entry_request']={'message_id':request_id,'nonce':nonce,'policy_message':policy_id};save()
+    # A single bounded same-original receiving exchange. No re-send, job retry,
+    # background poller, timer wake or unrelated mail acknowledgement is made.
+    until=min(time.monotonic()+45,M_END-80)
+    while time.monotonic()<until:
+        box=mail_json(['inbox','--all','--limit','200','--json'])
+        assert box.get('schema')=='zeomessenger.inbox/v1' and box.get('seat')=='dt-animated-comics-maintainer'
+        matches=[m for m in box.get('messages',[])if m.get('from')=='zeo-rt-sched' and m.get('in_reply_to')==request_id]
+        assert len(matches)<=1,'ambiguous canonical reply'
+        if matches:
+            message=mail_json(['show',matches[0]['id'],'--json'])
+            assert message.get('in_reply_to')==request_id
+            value=owner_document(message,'zeo-rt-sched','walking85-entry-accounting/v1')
+            assert value.get('nonce')==nonce and value.get('selection_id')==key and value.get('status')=='CURRENT_ENTRY_INPUT'
+            assert value.get('current_named_reservations_complete')is True and value.get('entry_accounting_held_until_receiving')is True
+            generation=value.get('ledger_generation');assert isinstance(generation,str) and 0<len(generation)<=200
+            assert isinstance(value.get('owning_ledger_ref'),str) and value['owning_ledger_ref']
+            exclusion=value.get('repository_exclusion',{})
+            assert exclusion.get('repository')=='zeroemployeeorg/pomar' and exclusion.get('holder_id')==key and exclusion.get('state')=='HELD' and exclusion.get('held_until_terminal')is True
+            claims=value.get('named_reservations');assert isinstance(claims,list) and 1<=len(claims)<=256
+            ids=set();own=0;total=0
+            for row in claims:
+                assert isinstance(row,dict) and isinstance(row.get('id'),str) and row['id'] not in ids
+                ids.add(row['id']);assert row.get('host')=='eng-uk-0006' and row.get('state')in('PENDING','HELD','RUNNING')
+                cap=row.get('cap_bytes');assert type(cap)is int and 0<cap<=2**40
+                assert isinstance(row.get('repository'),str) and row['repository']
+                if row['id']==key:
+                    own+=1;assert cap==1024**3 and row['repository']=='zeroemployeeorg/pomar'
+                elif row['repository']=='zeroemployeeorg/pomar':raise RuntimeError('NO_START: another canonical Pomar holder')
+                gate=row.get('gate_directory')
+                assert gate is None or isinstance(gate,str) and re.fullmatch(r'/Users/(rodbot|zeobuild)/[A-Za-z0-9_./-]{1,600}',gate) and '/..' not in gate
+                total+=cap
+            assert own==1,'this1GiB must occur exactly once, never double counted'
+            bound={'root_policy':policy,'root_policy_message':policy_id,'scheduler_input':value,'scheduler_message':message['id'],'request_id':request_id,'received_monotonic':time.monotonic(),'required_bytes':total+4*1024**3}
+            (DEST/'entry-owner-receiving.json').write_text(json.dumps(bound,indent=2)+'\n')
+            return bound
+        time.sleep(min(2,max(.01,until-time.monotonic())))
+    raise RuntimeError('NO_START: bounded canonical owner receiving unavailable')
+
 def digest(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 save()
 try:
-    state['entry_fit']='UNAVAILABLE_MAINTAINED_OPERATION_NOT_SUPPLIED'
-    state['state']='NO_START_ENTRY_FIT_BINDING_MISSING';save()
-    print(json.dumps(state),flush=True)
-    os._exit(119)
-    # Entry-FIT remains OPEN. The following exact fixed receiver/workflow is
-    # not reachable until its maintained resource/exclusion operation is
-    # actually supplied, implemented and independently reviewed. No bool/ref
-    # in a selection can bypass this missing-input fence.
+    # Never exercise this proposed exchange merely to qualify its own source.
+    # Removing this refusal requires exact-source Root/Scheduler receiving and
+    # independent review, followed by a new current selection; no CLI override.
+    state.update(state='NO_START_ENTRY_RECEIVING_DRAFT_NOT_ADOPTED',reason='source-only receiving/native-fit implementation awaits owning compatibility and independent review');save()
+    print(json.dumps(state),flush=True);os._exit(119)
+    owner=entry_owner_receiving()
+    assert digest(__file__)==manifest['outside']['sha256'] and Path(__file__).stat().st_size==manifest['outside']['bytes']
     for name,pin in manifest['files'].items():
         p=HERE/pin['local_name'];assert p.stat().st_size==pin['bytes'] and digest(p)==pin['sha256']
     # First lease starts on ENG before its acknowledgement. Accept it only
@@ -93,24 +201,79 @@ try:
     # Therefore startENG <= sendOutside+margin and endENG <= outsideEnd-20.
     sent_mono=time.monotonic();duration=remaining()-TRANSPORT_MARGIN-RETURN_RESERVE
     assert duration>60
-    code='G='+repr(G)+'\nDURATION='+repr(duration)+'\n'+'''import os,hashlib,json
+    assert time.monotonic()-owner['received_monotonic']<10,'NO_START: owner input aged before native sampling'
+    code='G='+repr(G)+'\nDURATION='+repr(duration)+'\nOWNER='+repr(owner)+'\n'+'''import os,hashlib,json,re,subprocess,socket
 from pathlib import Path
 p=Path(G);parent=p.parent
 assert os.getuid()==503 and parent==parent.resolve() and parent.stat().st_uid==503
 assert not p.exists() and not p.is_symlink()
-assert os.getloadavg()[0]<12 and os.statvfs(parent).f_bavail*os.statvfs(parent).f_frsize>=20*1024**3
+policy=OWNER['root_policy'];account=OWNER['scheduler_input']
+assert socket.gethostname()==policy['native_hostname']
 assert hashlib.sha256(Path('/usr/bin/python3').read_bytes()).hexdigest()=='34129c71a01a74f7f3b2443521519b2e5447553fa187f5fcafaaf8c42cc192e2'
+# Native read-only probes run inside the already armed original ENG guard.
+# No candidate command, owner-supplied argv, raw process arguments or files
+# from another seat are read. Probe output is bounded before interpretation.
+pins={'/usr/bin/vm_stat':'1947d48441639dc229b56ccc26792105a54a34a66c984e921d42c9a37b85b520',
+      '/usr/sbin/sysctl':'6622f616b0c573eeede54165af8642df5d755d7e1423543de3ee648203725a3a',
+      '/bin/ps':'a06fe087161557f1f8c030672eaedcd90bc6a8e92b8f2d44e07cffedc3349205',
+      '/usr/bin/du':'8032033d0795ec38b575b7a9069e495f2584c444fb5e2bc22b6777088456036f'}
+for tool,want in pins.items():assert hashlib.sha256(Path(tool).read_bytes()).hexdigest()==want
+def probe(argv,limit):
+ assert argv[0]in pins and time.monotonic()<M_END-40
+ r=subprocess.run(argv,stdin=subprocess.DEVNULL,capture_output=True,timeout=min(3,M_END-time.monotonic()-35))
+ assert r.returncode==0 and len(r.stdout)<=limit and len(r.stderr)<=4096
+ return r.stdout.decode('utf-8','strict')
+sample_start=time.monotonic()
+vm=probe(['/usr/bin/vm_stat'],65536)
+page=re.search(r'page size of ([0-9]+) bytes',vm);assert page
+page_size=int(page.group(1));assert page_size in(4096,16384)
+def pages(name):
+ rows=re.findall(r'^'+re.escape(name)+r':\\s+([0-9]+)\\.\\s*$',vm,re.M);assert len(rows)==1
+ return int(rows[0])
+reclaimable=(pages('Pages free')+pages('Pages inactive'))*page_size
+physical_text=probe(['/usr/sbin/sysctl','-n','hw.memsize'],128).strip();assert physical_text.isdigit()
+physical=int(physical_text);assert 0<reclaimable<=physical
+required=OWNER['required_bytes'];assert type(required)is int and reclaimable>=required
+load=os.getloadavg()[0];assert load<12
+fs=os.statvfs(parent);free_bytes=fs.f_bavail*fs.f_frsize;assert free_bytes>=20*1024**3
+# Only this seat's existing gate root is measured. No whole-volume walk.
+used_text=probe(['/usr/bin/du','-sk',str(parent)],4096).strip()
+size,path=used_text.split('\\t',1);assert size.isdigit() and path==str(parent)
+seat_bytes=int(size)*1024
+assert seat_bytes+256*1024**2<=policy['seat_ceiling_bytes']
+# Canonical held exclusion covers other seats' Pomar views; local facts also
+# reject any unexpectedly live declared gate or undeclared compiler process.
+# A process census is only an additional refusal check, never exclusion proof.
+for claim in account['named_reservations']:
+ gate=claim.get('gate_directory')
+ if claim['id']!=account['selection_id'] and claim['repository']=='zeroemployeeorg/pomar':raise RuntimeError('NO_START: another Pomar claim')
+ if gate==G:assert not Path(gate).exists() and not Path(gate).is_symlink()
+processes=probe(['/bin/ps','-axo','uid=,pid=,ppid=,pgid=,comm='],1024**2)
+conflicts=[]
+for line in processes.splitlines():
+ fields=line.strip().split(None,4);assert len(fields)==5 and all(x.isdigit()for x in fields[:4])
+ uid,pid,ppid,pgid=map(int,fields[:4]);name=Path(fields[4]).name
+ if uid==503 and pgid!=os.getpgrp() and name in('go','gofmt','compile','link','gate-bounded.py','gate-watchdog.py'):
+  conflicts.append({'pid':pid,'ppid':ppid,'pgid':pgid,'name':name})
+assert not conflicts,'NO_START: unaccounted compiler/gate process'
+sample_end=time.monotonic();assert sample_end-sample_start<=8 and sample_end<M_END-35
+facts={'schema':'walking85-entry-native-facts/draft','sample_start':sample_start,'sample_end':sample_end,'uid':os.getuid(),'hostname':socket.gethostname(),'page_size':page_size,'free_inactive_bytes':reclaimable,'physical_bytes':physical,'required_bytes':required,'load1':load,'filesystem_free_bytes':free_bytes,'seat_bytes':seat_bytes,'seat_ceiling_bytes':policy['seat_ceiling_bytes'],'unaccounted_compiler_gate_processes':conflicts,'scheduler_message':OWNER['scheduler_message'],'root_policy_message':OWNER['root_policy_message'],'request_id':OWNER['request_id'],'source_head':account['source_head'],'packet_sha256':account['packet_sha256'],'code_commit':account['code_commit'],'selection_id':account['selection_id'],'repository_exclusion':account['repository_exclusion'],'ledger_generation':account['ledger_generation']}
 assert time.monotonic()<M_END-35
 p.mkdir(mode=0o700)
 lease={'mono_origin':M_ORIGIN,'mono_end':M_END,'duration_seconds':DURATION,'clock':'time.monotonic','transport_margin_seconds':10.0,'outside_return_reserve_seconds':20.0}
 assert time.get_clock_info('monotonic').monotonic and not time.get_clock_info('monotonic').adjustable
 (p/'native-budget.json').write_text(json.dumps(lease,indent=2)+'\\n')
-print(json.dumps(lease),flush=True)
+(p/'entry-native-facts.json').write_text(json.dumps(facts,indent=2)+'\\n')
+print(json.dumps({'lease':lease,'entry_native_facts':facts}),flush=True)
 '''
     remote(code,'fresh-source-guard',TRANSPORT_MARGIN,bootstrap_duration=duration)
     handshake_rtt=time.monotonic()-sent_mono
     assert handshake_rtt<=TRANSPORT_MARGIN, 'uncertain transport; no candidate admission'
-    lease=json.loads((DEST/'fresh-source-guard.out').read_text())
+    receiving=strict_json((DEST/'fresh-source-guard.out').read_text());lease=receiving['lease']
+    facts=receiving['entry_native_facts']
+    assert facts['request_id']==owner['request_id'] and facts['selection_id']==key
+    assert facts['source_head']==selection['source_head'] and facts['packet_sha256']==selection['packet_sha256']
+    state['entry_native_facts']=facts;save()
     assert lease['duration_seconds']==duration and abs(lease['mono_end']-lease['mono_origin']-duration)<.001
     state['native_budget']=lease;state['lease_handshake_rtt']=handshake_rtt;state['deducted_transport_margin']=TRANSPORT_MARGIN;save()
     packet={'selection':selection,'outside_t0':T0,'native_budget':lease,'files':{name:{'bytes':r['bytes'],'sha256':r['sha256']}for name,r in manifest['files'].items()}}
