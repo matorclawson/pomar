@@ -178,12 +178,24 @@ func zeocoreFixture(t *testing.T, ciPin string) (root, head string) {
 // on), and the script itself now refuses to run under anything else.
 func runPreflightEnv(t *testing.T, env []string, args ...string) (string, error) {
 	t.Helper()
+	return runPreflightEnvDir(t, env, "", args...)
+}
+
+// runPreflightEnvDir is runPreflightEnv with an explicit process CWD --
+// used only by the test that needs the script's own $PWD to sit inside a
+// fixture directory (pomar's review: a path component containing glob
+// metacharacters is pathname-expanded against the SCRIPT'S CWD, not
+// against any path-relative context, so reproducing that bug needs
+// control over the real subprocess working directory, not just its args).
+func runPreflightEnvDir(t *testing.T, env []string, dir string, args ...string) (string, error) {
+	t.Helper()
 	script, err := filepath.Abs("track3-preflight.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("bash", append([]string{script}, args...)...)
 	cmd.Env = env
+	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
@@ -500,6 +512,59 @@ func TestTrack3PreflightScratchAncestry(t *testing.T) {
 		line := mustLine(t, out, "scratch_ancestry_status:")
 		if strings.HasPrefix(line, "scratch_ancestry_status: VERIFIED") {
 			t.Fatalf("a failed lexical resolution must never report scratch_ancestry_status: VERIFIED: %s", out)
+		}
+	})
+
+	// pomar's review (P158-PATH-COMPONENT-GLOB-1): `set -- $p` with $p
+	// unquoted also pathname-expands each split component, since the
+	// literal path's own ".." components are themselves part of the SAME
+	// unquoted word list -- a component containing glob metacharacters
+	// (here "pattern[12]", a perfectly valid POSIX filename) can be
+	// silently rewritten to whatever matches that glob in the SCRIPT'S OWN
+	// CWD, unrelated to the real path. Reproduced with the script's CWD set
+	// to safeDir itself (where an ordinary "pattern1" directory exists):
+	// the literal symlink "pattern[12]" (-> unsafe/child, UNSAFE) must
+	// still be walked as itself, not rewritten to the harmless "pattern1".
+	t.Run("a path component containing glob metacharacters is never pathname-expanded against the caller's CWD", func(t *testing.T) {
+		root := t.TempDir()
+		safeDir := filepath.Join(root, "safe")
+		if err := os.Mkdir(safeDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// An ordinary, harmless directory whose name happens to match the
+		// glob pattern below -- the decoy the bug would substitute in.
+		if err := os.Mkdir(filepath.Join(safeDir, "pattern1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		unsafeDir := filepath.Join(root, "unsafe")
+		if err := os.Mkdir(unsafeDir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(unsafeDir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		child := filepath.Join(unsafeDir, "child")
+		if err := os.Mkdir(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The literal filename is "pattern[12]", containing real glob
+		// metacharacters -- a symlink to the unsafe child.
+		globLink := filepath.Join(safeDir, "pattern[12]")
+		if err := os.Symlink(child, globLink); err != nil {
+			t.Fatal(err)
+		}
+		// Built by concatenation, not filepath.Join/Clean.
+		scratch := globLink + "/../future"
+		out, err := runPreflightEnvDir(t, hermeticEnv(t, ""), safeDir, repo, scratch, "3.11", head)
+		if err == nil {
+			t.Fatalf("the literal glob-named symlink's real unsafe target must fail the overall gate, not be rewritten to the harmless decoy: %s", out)
+		}
+		line := mustLine(t, out, "scratch_ancestry_status:")
+		if !strings.HasPrefix(line, "scratch_ancestry_status: NOT-CONFIGURED") {
+			t.Fatalf("must be refused via the literal component, not a CWD-glob-rewritten one: %s", out)
+		}
+		if !strings.Contains(line, unsafeDir) {
+			t.Fatalf("the refusal should name the real unsafe ancestor (unsafe), not the CWD-matched decoy (safe/pattern1): %s", line)
 		}
 	})
 }

@@ -593,13 +593,27 @@ preflight() {
   # of through the real filesystem, reintroducing the exact masking this
   # function exists to prevent. Fixed by re-checking existence after each
   # lexical ".." pop and resuming real resolution the moment it does.
+  # pomar's review (P158-PATH-COMPONENT-GLOB-1): splitting $p with IFS
+  # unquoted (`set -- $p`) also pathname-expands each resulting word, since
+  # it's unquoted -- a literal component containing glob metacharacters
+  # (e.g. "pattern[12]", a perfectly valid POSIX filename) can be silently
+  # rewritten to whatever happens to match that glob in the SCRIPT'S CWD,
+  # unrelated to the actual path being canonicalized. Confirmed directly:
+  # with CWD containing a file "pattern1", splitting
+  # ".../pattern[12]/../future" yields the component "pattern1", not the
+  # literal "pattern[12]". Disabling globbing (`set -f`) for exactly this
+  # split, and restoring whatever the prior noglob state was afterward,
+  # makes the split purely a field-split on "/", with no pathname expansion.
   lexically_canonical() {
     p=$1
     case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
     oldIFS=$IFS
+    case $- in *f*) old_noglob=1 ;; *) old_noglob=0 ;; esac
+    set -f
     IFS='/'
     set -- $p
     IFS=$oldIFS
+    [ "$old_noglob" = 1 ] || set +f
     result=""
     missing=0
     for part in "$@"; do
