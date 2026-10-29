@@ -21,6 +21,7 @@ assert selection['repository']=='zeroemployeeorg/pomar' and selection['repositor
 manifestRaw=(HERE/'format-packet.json').read_bytes()
 assert hashlib.sha256(manifestRaw).hexdigest()==selection['packet_sha256']
 manifest=json.loads(manifestRaw)
+assert set(manifest['files'])=={'invoke-format.py','format-phase.py','sealed-source-data.json','source.bundle'}
 assert manifest['head']==selection['source_head']
 G='/Users/rodbot/zeo/seat-gates/dt-animated-comics-maintainer/'+key
 DEST=HERE/'format-originals'/key;DEST.parent.mkdir(exist_ok=True);DEST.mkdir(mode=0o700)
@@ -34,28 +35,57 @@ def save():
     try:os.fsync(directory)
     finally:os.close(directory)
     assert p.read_bytes()==raw and remaining()>0
-def run(argv,label,cap=60,allow=False):
+def run(argv,label,cap=60,allow=False,input_path=None):
     assert remaining()>0
     with (DEST/(label+'.out')).open('xb')as out,(DEST/(label+'.err')).open('xb')as err:
-        p=subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=out,stderr=err,timeout=max(.1,min(cap,remaining())))
+        stream=Path(input_path).open('rb') if input_path is not None else subprocess.DEVNULL
+        try:p=subprocess.run(argv,stdin=stream,stdout=out,stderr=err,timeout=max(.1,min(cap,remaining())))
+        finally:
+            if input_path is not None:stream.close()
     state[label+'_exit']=p.returncode;save()
     if p.returncode and not allow:raise RuntimeError(label+' exit '+str(p.returncode))
     return p
 SSH=['ssh','-oBatchMode=yes','-oConnectTimeout=10','-oServerAliveInterval=5','-oServerAliveCountMax=2','-oForwardAgent=no','-oForwardX11=no','-oClearAllForwardings=yes','-oRequestTTY=no','rodbot@100.125.183.112']
-SCP=['scp','-q','-oBatchMode=yes','-oConnectTimeout=10','-oServerAliveInterval=5','-oServerAliveCountMax=2','-oForwardAgent=no','-oClearAllForwardings=yes']
-def remote(code,label,cap=30,bootstrap_duration=None):
+def remote(code,label,cap=30,bootstrap_duration=None,input_path=None):
     # Only durations cross hosts. After the first acknowledged lease, every
     # remote helper consumes the SAME persisted ENG monotonic end, never a
     # newly calculated wall-derived duration.
     if bootstrap_duration is not None:
         budget='M_ORIGIN=time.monotonic();M_END=M_ORIGIN+'+repr(bootstrap_duration)+'\n'
     else:
-        budget='import json\nfrom pathlib import Path\nlease=json.loads(Path('+repr(G+'/native-budget.json')+').read_text());M_ORIGIN=lease["mono_origin"];M_END=lease["mono_end"]\nassert time.monotonic()>=M_ORIGIN\n'
+        budget='M_ORIGIN='+repr(lease['mono_origin'])+';M_END='+repr(lease['mono_end'])+'\nassert time.monotonic()>=M_ORIGIN\n'
     fixed='import os,time,threading,signal\n'+budget+'if time.monotonic()>=M_END:os._exit(124)\nif os.getpgrp()!=os.getpid():os.setpgid(0,0)\nt=threading.Timer(M_END-time.monotonic(),lambda:os.killpg(os.getpgrp(),signal.SIGKILL));t.daemon=True;t.start()\nimport base64;exec(base64.b64decode('+repr(base64.b64encode(code.encode()).decode())+'))'
-    return run(SSH+[shlex.join(['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/sbin:/sbin','/usr/bin/python3','-I','-S','-c',fixed])],label,cap)
+    return run(SSH+[shlex.join(['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/sbin:/sbin','/usr/bin/python3','-I','-S','-c',fixed])],label,cap,input_path=input_path)
+def receive_file(name,local,pin):
+    # Fixed data-only stdin receiver. No SFTP/SSHD file writer is treated as
+    # being covered by our lease: this actual receiver owns a monotonic fence.
+    assert name in {'invoke-format.py','format-phase.py','sealed-source-data.json','source.bundle','packet.json'}
+    code='G='+repr(G)+'\nNAME='+repr(name)+'\nPIN='+repr(pin)+'\n'+'''import os,sys,hashlib,stat
+from pathlib import Path
+assert os.getuid()==503 and time.monotonic()<M_END-35
+p=Path(G)/NAME;assert not p.exists() and not p.is_symlink()
+assert 0<PIN['bytes']<=2*1024**2
+raw=sys.stdin.buffer.read(PIN['bytes']+1)
+assert len(raw)==PIN['bytes'] and hashlib.sha256(raw).hexdigest()==PIN['sha256']
+with p.open('xb')as stream:
+ stream.write(raw);stream.flush();os.fsync(stream.fileno())
+p.chmod(0o600);st=p.lstat()
+assert stat.S_ISREG(st.st_mode) and st.st_uid==503 and st.st_nlink==1
+assert time.monotonic()<M_END-35
+print('EXACT_FIXED_INPUT_RECEIVED',flush=True)
+'''
+    remote(code,'ingress-'+name,60,input_path=local)
 def digest(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 save()
 try:
+    state['entry_fit']='UNAVAILABLE_MAINTAINED_OPERATION_NOT_SUPPLIED'
+    state['state']='NO_START_ENTRY_FIT_BINDING_MISSING';save()
+    print(json.dumps(state),flush=True)
+    os._exit(119)
+    # Entry-FIT remains OPEN. The following exact fixed receiver/workflow is
+    # not reachable until its maintained resource/exclusion operation is
+    # actually supplied, implemented and independently reviewed. No bool/ref
+    # in a selection can bypass this missing-input fence.
     for name,pin in manifest['files'].items():
         p=HERE/pin['local_name'];assert p.stat().st_size==pin['bytes'] and digest(p)==pin['sha256']
     # First lease starts on ENG before its acknowledgement. Accept it only
@@ -85,8 +115,8 @@ print(json.dumps(lease),flush=True)
     state['native_budget']=lease;state['lease_handshake_rtt']=handshake_rtt;state['deducted_transport_margin']=TRANSPORT_MARGIN;save()
     packet={'selection':selection,'outside_t0':T0,'native_budget':lease,'files':{name:{'bytes':r['bytes'],'sha256':r['sha256']}for name,r in manifest['files'].items()}}
     packetRaw=(json.dumps(packet,indent=2)+'\n').encode();(DEST/'packet.json').write_bytes(packetRaw)
-    for name,pin in manifest['files'].items():run(SCP+[str(HERE/pin['local_name']),'rodbot@100.125.183.112:'+G+'/'+name],'ingress-'+name,60)
-    run(SCP+[str(DEST/'packet.json'),'rodbot@100.125.183.112:'+G+'/packet.json'],'ingress-packet',30)
+    for name,pin in manifest['files'].items():receive_file(name,HERE/pin['local_name'],{'bytes':pin['bytes'],'sha256':pin['sha256']})
+    receive_file('packet.json',DEST/'packet.json',{'bytes':len(packetRaw),'sha256':hashlib.sha256(packetRaw).hexdigest()})
     rows=packet['files'];rows['packet.json']={'bytes':len(packetRaw),'sha256':hashlib.sha256(packetRaw).hexdigest()}
     code='G='+repr(G)+'\nROWS='+repr(rows)+'\n'+'''import os,hashlib,stat
 from pathlib import Path
@@ -99,7 +129,7 @@ print('ALL_EXACT_SOURCE_AND_PHASE_BYTES_RECEIVED')
     remote(code,'sealed-input-readback')
     assert remaining()>RETURN_RESERVE+5
     state['state']='STANDARD_SOURCE_FORMAT_ATTEMPT';save();print(json.dumps(state),flush=True)
-    argv=['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/sbin:/sbin','/usr/bin/nice','-n','10','/usr/bin/python3','-I',G+'/invoke-format.py',G,str(T0)]
+    argv=['/usr/bin/env','-i','PATH=/usr/bin:/bin:/usr/sbin:/sbin','/usr/bin/nice','-n','10','/usr/bin/python3','-I',G+'/invoke-format.py',G,str(T0),str(lease['mono_end'])]
     original=run(SSH+[shlex.join(argv)],'standard-format',max(.1,remaining()-RETURN_RESERVE),True)
     # Fixed return artifact is constructed by the source caller after pair drain.
     code='G='+repr(G)+'\n'+'''import hashlib,json
@@ -109,8 +139,14 @@ print(json.dumps({'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()}))
 '''
     remote(code,'return-original-pin',20)
     returned=json.loads((DEST/'return-original-pin.out').read_text())
-    run(SCP+['rodbot@100.125.183.112:'+G+'/format-return.tar',str(DEST/'format-return.tar')],'return-source-evidence',30)
-    archive=DEST/'format-return.tar';assert archive.stat().st_size==returned['bytes'] and digest(archive)==returned['sha256']
+    code='G='+repr(G)+'\n'+'''import sys
+from pathlib import Path
+b=(Path(G)/'format-return.tar').read_bytes();assert len(b)<=8*1024**2
+assert time.monotonic()<M_END
+sys.stdout.buffer.write(b);sys.stdout.buffer.flush()
+'''
+    remote(code,'return-source-evidence',30)
+    archive=DEST/'return-source-evidence.out';assert archive.stat().st_size==returned['bytes'] and digest(archive)==returned['sha256']
     allowed={'return-manifest.json','original.json','native-budget.json','controller-binding.json','work-identity.json','format-result.json','launcher-receipt.json','launcher.done','watchdog.ready','watchdog.out','launcher-control.out','gate.log','evidence.tgz'}
     with tarfile.open(archive,'r')as t:
         members=t.getmembers();assert len(members)<=len(allowed) and len({m.name for m in members})==len(members)

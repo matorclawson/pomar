@@ -1,5 +1,19 @@
 """One-off monotonic-budget caller; standard 83a9/b899 remain unchanged."""
-import os, sys, time, json, hashlib, subprocess, signal, threading, tarfile
+# Minimal timer/runtime prerequisites only. argv[3] is the existing
+# ENG monotonic lease end in BOTH modes, never a Mat clock or fresh duration.
+import os, sys, time, signal, threading
+M_END = float(sys.argv[3])
+_WORK = sys.argv[1] == '--work'
+_EARLY_STOP = M_END - (30 if _WORK else 5)
+if time.monotonic() >= _EARLY_STOP: os._exit(124)
+if os.getpgrp() != os.getpid(): os.setpgid(0, 0)
+assert os.getpgrp() == os.getpid()
+def _expire_owned_group(): os.killpg(os.getpgrp(), signal.SIGKILL)
+_early = threading.Timer(_EARLY_STOP-time.monotonic(), _expire_owned_group)
+_early.daemon = True; _early.start()
+# Extra imports, argument paths, lease/manifest reads and every child start are
+# AFTER the monotonic fence. A blocked json/Path/bootstrap cannot lose it.
+import json, hashlib, subprocess, tarfile
 from pathlib import Path
 
 # The launcher gives this fixed work guard its own group. Keep the guard alive
@@ -9,7 +23,6 @@ if sys.argv[1] == '--work':
     STOP=M_END-30
     assert os.getuid()==503 and os.getpgrp()==os.getpid() and time.monotonic()<STOP
     def stop_work(): os.killpg(os.getpgrp(),signal.SIGKILL)
-    timer=threading.Timer(STOP-time.monotonic(),stop_work);timer.daemon=True;timer.start()
     try:
         launcher=int((D/'launcher.pid').read_text())
         assert os.getppid()==launcher
@@ -34,9 +47,8 @@ assert os.getuid()==503 and D==D.resolve()
 # The standard launcher separately owns the work guard's group.
 if os.getpgrp()!=os.getpid():os.setpgid(0,0)
 assert os.getpgrp()==os.getpid()
-lease=json.loads((D/'native-budget.json').read_text());M_END=float(lease['mono_end'])
+lease=json.loads((D/'native-budget.json').read_text());assert float(lease['mono_end'])==M_END
 assert time.monotonic()<M_END-35
-hard=threading.Timer(M_END-5-time.monotonic(),lambda:os.killpg(os.getpgrp(),signal.SIGKILL));hard.daemon=True;hard.start()
 # This epoch exists only inside ENG for legacy pair compatibility. It is not
 # the caller's epoch and is never used to compute/rearm our elapsed budget.
 PAIR_E=time.time()+max(0,M_END-time.monotonic())
