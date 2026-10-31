@@ -87,7 +87,11 @@ func seatAttach(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		}()
 		fmt.Fprintf(stderr, "Attached to %s. Detach with Ctrl-b d; the seat keeps running.\r\n", *env)
 	}
-	if err := seatterm.Pump(stream, stdin, stdout, cols, rows, resizes); err != nil {
+	input := io.Reader(stdin)
+	if onTerminal(stdin) {
+		input = &seatterm.DetachReader{Input: stdin}
+	}
+	if err := seatterm.Pump(stream, input, stdout, cols, rows, resizes); err != nil {
 		fmt.Fprintln(stderr, "\r\npomar seat attach:", err)
 		return 1
 	}

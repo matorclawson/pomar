@@ -1,3 +1,10 @@
+# Unreleased tmux preparation slice
+
+Read-only explicit-socket inventory, digest-bound offline migration planning and
+local interactive detach are integrated as source. Native-history importer,
+Runtime cutover, source gates and real actor migration remain NOT_IMPLEMENTED
+or NOT_RUN. The external snapshot is not installed as a service.
+
 # Unreleased actor-switch integration slice
 
 sow: pomar-SOW-87

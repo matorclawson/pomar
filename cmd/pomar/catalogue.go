@@ -4,6 +4,8 @@ package main
 // Naming them is not authorization to provision, admit or alter a service.
 func ownerCatalogue() []command {
 	return []command{
+		{Name: "migrate inventory", Summary: "Read-only explicit tmux inventory, no actor state export", Usage: "pomar migrate inventory -tmux-bin ABS -socket ABS", Output: "json"},
+		{Name: "migrate plan", Summary: "Compute explicit digest-bound seat mapping and active budgets; no cutover", Usage: "pomar migrate plan -inventory FILE -manifest FILE", Output: "json"},
 		{"install", "Install a verified release in your user prefix", "pomar install -bundle DIR [-prefix DIR]", "text", []string{"no sudo or service activation"}},
 		{"upgrade stage", "Verify and retain a controlled upgrade payload", "pomar upgrade stage -bundle DIR -manifest-sha256 SHA256", "JSON", []string{"administrator only; frozen signed CLI and owner-approved manifest required"}},
 		{"upgrade check", "Check the installed baseline and controlled payload", "pomar upgrade check -bundle ROOT_STAGE -manifest-sha256 SHA256 [-archive ORIGINAL_ARCHIVE]", "JSON", []string{"administrator only; readbacks do not perform apply"}},
@@ -47,6 +49,8 @@ type catalogueFlag struct {
 
 func catalogueFlags() map[string][]catalogueFlag {
 	return map[string][]catalogueFlag{
+		"migrate inventory": {{"tmux-bin", "path", "Explicit existing tmux executable"}, {"socket", "path", "Explicit existing tmux server socket"}},
+		"migrate plan":      {{"inventory", "path", "Digest-bound inventory JSON"}, {"manifest", "path", "Explicit seat mapping and capacity JSON"}},
 		"actor-switch":      {{"root", "path", "Owner host data root"}, {"environment", "string", "Retained environment ID"}, {"session", "string", "Stable seat session ID"}, {"incarnation", "string", "Original actor incarnation"}, {"id", "string", "Durable original replacement operation ID"}, {"profile", "string", "Owner-configured target harness profile"}, {"status", "bool", "Inspect original operation without dispatch"}},
 		"manager_selection": {{"socket", "path", "Explicit approved manager socket; POMAR_SOCKET is the environment fallback"}, {"root", "path", "Explicit local owner's root; not another seat's data"}},
 		"doctor":            {{"json", "bool", "Emit the diagnostic array instead of text"}},

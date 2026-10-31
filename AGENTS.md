@@ -151,3 +151,11 @@ predecessor fencing, preserving the seat/session and retained disk. Inspect with
 `-status` and the ORIGINAL identities after response loss. No new ID bypass or
 cross-provider native transcript conversion. See [harness switching](docs/harness-switching.md).
 Integration source gates and live provider round-trip qualification remain NOT_RUN.
+
+## Existing tmux seats (unreleased preparation)
+
+`pomar migrate inventory -tmux-bin ABS -socket ABS` reads one explicitly named
+server; `migrate plan -inventory FILE -manifest FILE` validates digest-bound
+mappings and capacity arithmetic. Neither imports history, fences or moves an
+actor. Plans always say can_cut_over:false. See [tmux adoption](docs/tmux-adoption.md).
+Interactive seat attachment handles Ctrl-b d locally and Ctrl-b Ctrl-b literally.

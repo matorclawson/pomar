@@ -42,6 +42,9 @@ var sourceCommit = "unknown"
 
 const usage = `usage:
   pomar version
+  pomar migrate inventory -tmux-bin ABS -socket ABS
+  pomar migrate plan -inventory FILE -manifest FILE
+                                    read-only discovery/planning; never imports, stops or moves an actor
   pomar actor-switch -root DIR -environment ID -session ID -incarnation ID -id OP -profile TARGET [-status]
                                     replace a retained seat harness after fencing; inspect original with -status
   pomar seats [-root DIR] [-json] [-menu]  list the declared seats; -menu offers a numbered pick
@@ -130,6 +133,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch {
 	case len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h":
 		return helpCmd(args, stdout, stderr)
+	case args[0] == "migrate":
+		return migrateCmd(args[1:], stdout, stderr)
 	case args[0] == "actor-switch":
 		return actorSwitchCmd(args[1:], stdout, stderr)
 	case args[0] == "doctor":
