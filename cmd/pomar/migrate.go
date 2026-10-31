@@ -34,7 +34,11 @@ func migrationRead(path string, out any) error {
 	if e != nil || !info.Mode().IsRegular() || info.Size() > seatmigration.MaxInventory {
 		return errors.New("migration JSON requires a bounded regular file")
 	}
-	d := json.NewDecoder(io.LimitReader(f, seatmigration.MaxInventory+1))
+	raw, e := io.ReadAll(io.LimitReader(f, seatmigration.MaxInventory+1))
+	if e != nil || len(raw) > seatmigration.MaxInventory {
+		return errors.New("migration JSON exceeds byte bound or is unreadable")
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if e = d.Decode(out); e != nil {
 		return e
