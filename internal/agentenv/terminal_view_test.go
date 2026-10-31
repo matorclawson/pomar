@@ -60,7 +60,7 @@ func newViewFixture(t *testing.T) *viewFixture {
 	}
 	now := time.Now()
 	iat := now.Unix()
-	return &viewFixture{p: p, priv: priv, now: now, b: TerminalViewBinding{Environment: "env1", Seat: "seat1", Session: "session1", Incarnation: "inc1", Host: "host1", Profile: "terminal1", HostNamespace: "namespace1", AuthorityEpoch: 1, BindingRev: 1, FreshUntil: now.Add(60 * time.Second)}, r: &viewReplayFake{used: make(map[string]bool)}, claims: map[string]any{"iss": "connect", "aud": "host1", "sub": "person1", "hiss": "session-issuer", "org": "org1", "app": "app1", "gid": "grant1", "seat": "seat1", "inc": "inc1", "mode": "read", "iat": iat, "nbf": iat, "exp": iat + 120, "jti": "opening1"}}
+	return &viewFixture{p: p, priv: priv, now: now, b: TerminalViewBinding{Environment: "env1", Seat: "seat1", Session: "session1", Incarnation: "inc1", Host: "host1", Profile: "terminal1", HostNamespace: "namespace1", AuthorityEpoch: 1, BindingRev: 1, FreshUntil: now.Add(60 * time.Second)}, r: &viewReplayFake{used: make(map[string]bool)}, claims: map[string]any{"iss": "connect", "aud": "host1", "sub": "person1", "hiss": "session-issuer", "org": "org1", "app": "app1", "gid": "grant1", "seat": "seat1", "env": "env1", "mode": "read", "iat": iat, "nbf": iat, "exp": iat + 120, "jti": "opening1"}}
 }
 func (f *viewFixture) signRaw(header, payload string) string {
 	a := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload))
@@ -72,7 +72,7 @@ func (f *viewFixture) token() string {
 }
 func (f *viewFixture) open(t *testing.T) *TerminalViewLease {
 	t.Helper()
-	l, e := f.p.Open(context.Background(), f.token(), f.now, f.b, f.r)
+	l, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, f.r)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -107,7 +107,7 @@ func TestTerminalViewRejectsInvalidClaimsBeforeReplay(t *testing.T) {
 		{"wrong issuer", func(c map[string]any) { c["iss"] = "foreign" }}, {"wrong audience", func(c map[string]any) { c["aud"] = "host2" }},
 		{"audience list", func(c map[string]any) { c["aud"] = []string{"host1"} }}, {"wrong org", func(c map[string]any) { c["org"] = "other" }},
 		{"wrong app", func(c map[string]any) { c["app"] = "other" }}, {"control mode", func(c map[string]any) { c["mode"] = "control" }},
-		{"wrong seat", func(c map[string]any) { c["seat"] = "seat2" }}, {"wrong incarnation", func(c map[string]any) { c["inc"] = "inc2" }},
+		{"wrong seat", func(c map[string]any) { c["seat"] = "seat2" }}, {"wrong environment", func(c map[string]any) { c["env"] = "env2" }},
 		{"missing", func(c map[string]any) { delete(c, "hiss") }}, {"unknown", func(c map[string]any) { c["socket"] = "/unsafe" }},
 		{"null subject", func(c map[string]any) { c["sub"] = nil }}, {"control character", func(c map[string]any) { c["sub"] = "person\n1" }},
 		{"expired despite skew", func(c map[string]any) { c["exp"] = time.Now().Unix() }},
@@ -124,7 +124,7 @@ func TestTerminalViewRejectsInvalidClaimsBeforeReplay(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := newViewFixture(t)
 			test.change(f.claims)
-			_, e := f.p.Open(context.Background(), f.token(), f.now, f.b, f.r)
+			_, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, f.r)
 			if e != ErrTerminalViewRefused || f.r.calls != 0 {
 				t.Fatalf("error=%v replaycalls=%d", e, f.r.calls)
 			}
@@ -163,7 +163,7 @@ func TestTerminalViewRejectsDuplicateHeaderClaimAndKeySubstitution(t *testing.T)
 			if mode == "padding" {
 				token += "="
 			}
-			if _, e := f.p.Open(context.Background(), token, f.now, f.b, f.r); e != ErrTerminalViewRefused || f.r.calls != 0 {
+			if _, e := f.p.Open(context.Background(), token, f.b.Environment, f.now, f.b, f.r); e != ErrTerminalViewRefused || f.r.calls != 0 {
 				t.Fatal(mode, e, f.r.calls)
 			}
 		})
@@ -191,7 +191,7 @@ func TestTerminalViewRejectsUntrustedBindings(t *testing.T) {
 			case "expired":
 				f.b.FreshUntil = f.now
 			}
-			if _, e := f.p.Open(context.Background(), f.token(), f.now, f.b, f.r); e != ErrTerminalViewRefused || f.r.calls != 0 {
+			if _, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, f.r); e != ErrTerminalViewRefused || f.r.calls != 0 {
 				t.Fatal(mode, e)
 			}
 		})
@@ -207,7 +207,7 @@ func TestTerminalViewOpeningIsSingleUseAndUnknownRefuses(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, e := f.p.Open(context.Background(), token, f.now, f.b, f.r); e == nil {
+			if _, e := f.p.Open(context.Background(), token, f.b.Environment, f.now, f.b, f.r); e == nil {
 				mu.Lock()
 				success++
 				mu.Unlock()
@@ -220,15 +220,15 @@ func TestTerminalViewOpeningIsSingleUseAndUnknownRefuses(t *testing.T) {
 	}
 	// A fresh policy object cannot bypass the SAME required replay-store custody.
 	again, _ := NewTerminalViewPolicy(f.p.config)
-	if _, e := again.Open(context.Background(), token, f.now, f.b, f.r); e != ErrTerminalViewRefused {
+	if _, e := again.Open(context.Background(), token, f.b.Environment, f.now, f.b, f.r); e != ErrTerminalViewRefused {
 		t.Fatal("replay accepted", e)
 	}
 	f = newViewFixture(t)
 	f.r.fail = true
-	if _, e := f.p.Open(context.Background(), f.token(), f.now, f.b, f.r); e != ErrTerminalViewRefused {
+	if _, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, f.r); e != ErrTerminalViewRefused {
 		t.Fatal(e)
 	}
-	if _, e := f.p.Open(context.Background(), f.token(), f.now, f.b, nil); e != ErrTerminalViewRefused {
+	if _, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, nil); e != ErrTerminalViewRefused {
 		t.Fatal(e)
 	}
 }
@@ -236,7 +236,7 @@ func TestTerminalViewLateAdmissionCannotStartExpiredLease(t *testing.T) {
 	f := newViewFixture(t)
 	f.b.FreshUntil = f.now.Add(time.Millisecond)
 	f.r.delay = 5 * time.Millisecond
-	if _, e := f.p.Open(context.Background(), f.token(), f.now, f.b, f.r); e != ErrTerminalViewRefused {
+	if _, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, f.r); e != ErrTerminalViewRefused {
 		t.Fatal("late store completion admitted", e)
 	}
 }
@@ -334,7 +334,34 @@ func TestTerminalViewConfigurationKeysAreSnapshotCopied(t *testing.T) {
 	}
 	config.Keys["key1"][0] ^= 0xff
 	delete(config.Keys, "key1")
-	if _, e := p.Open(context.Background(), f.token(), f.now, f.b, f.r); e != nil {
+	if _, e := p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, f.r); e != nil {
 		t.Fatal("caller mutated policy keys", e)
+	}
+}
+
+func TestTerminalViewV3RouteAndGrantEnvironmentAreBound(t *testing.T) {
+	f := newViewFixture(t)
+	if _, e := f.p.Open(context.Background(), f.token(), "foreign-route", f.now, f.b, f.r); e != ErrTerminalViewRefused || f.r.calls != 0 {
+		t.Fatal("foreign route admitted", e)
+	}
+	// A v2 signed-inc grant is not accepted as an optional v3 alternative.
+	delete(f.claims, "env")
+	f.claims["inc"] = "inc1"
+	if _, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, f.r); e != ErrTerminalViewRefused || f.r.calls != 0 {
+		t.Fatal("legacy grant accepted", e)
+	}
+}
+func TestTerminalViewV3PinsResolvedIncarnationWithoutGrantInc(t *testing.T) {
+	f := newViewFixture(t)
+	f.b.Incarnation = "actual-current-incarnation"
+	l := f.open(t)
+	changed := f.b
+	changed.Incarnation = "next-incarnation"
+	if l.Observe(f.now.Add(time.Millisecond), changed) {
+		t.Fatal("view retargeted across incarnation")
+	}
+	// The original single-use grant cannot silently open the new actor either.
+	if _, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, changed, f.r); e != ErrTerminalViewRefused {
+		t.Fatal("consumed grant retargeted", e)
 	}
 }

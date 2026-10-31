@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Source-only policy for CONTRACT-v2-DRAFT c24e8428. No route, key bootstrap,
+// Source-only policy for CONTRACT-v3-DRAFT eddf8300. No route, key bootstrap,
 // resolver, replay journal, credential, renewal client or terminal is installed.
 var ErrTerminalViewRefused = errors.New("terminal view refused")
 
@@ -61,8 +61,8 @@ type TerminalViewReplay interface {
 }
 
 type viewGrant struct {
-	issuer, audience, subject, hiss, org, app, gid, seat, inc, jti string
-	expires                                                        time.Time
+	issuer, audience, subject, hiss, org, app, gid, seat, environment, jti string
+	expires                                                                time.Time
 }
 
 // TerminalViewLease is concurrency-safe policy state, not a running timer or
@@ -77,14 +77,16 @@ type TerminalViewLease struct {
 }
 
 // Open consumes an opening exactly once; response loss cannot authorize a retry.
+// environment is the untrusted route target and must equal the signed env and
+// the owner binding. No session/incarnation comes from the grant or browser.
 // now must be an owner time.Now sample (with its monotonic component), not input
 // from a grant/client. Delayed replay-store completion cannot move the deadline.
-func (p *TerminalViewPolicy) Open(ctx context.Context, token string, now time.Time, b TerminalViewBinding, replay TerminalViewReplay) (*TerminalViewLease, error) {
-	if p == nil || replay == nil || ctx.Err() != nil || !p.validBinding(b, now) {
+func (p *TerminalViewPolicy) Open(ctx context.Context, token string, environment string, now time.Time, b TerminalViewBinding, replay TerminalViewReplay) (*TerminalViewLease, error) {
+	if p == nil || replay == nil || ctx.Err() != nil || !p.validBinding(b, now) || environment != b.Environment {
 		return nil, ErrTerminalViewRefused
 	}
 	g, err := p.verify(token, now)
-	if err != nil || g.seat != b.Seat || g.inc != b.Incarnation {
+	if err != nil || g.seat != b.Seat || g.environment != environment {
 		return nil, ErrTerminalViewRefused
 	}
 	deadline := viewDeadline(now, g.expires, b.FreshUntil)
@@ -204,12 +206,12 @@ func (p *TerminalViewPolicy) verify(token string, now time.Time) (viewGrant, err
 	if e != nil {
 		return bad()
 	}
-	c, e := strictViewObject(payload, "iss aud sub hiss org app gid seat inc mode iat nbf exp jti")
+	c, e := strictViewObject(payload, "iss aud sub hiss org app gid seat env mode iat nbf exp jti")
 	if e != nil {
 		return bad()
 	}
-	g := viewGrant{issuer: viewString(c, "iss"), audience: viewString(c, "aud"), subject: viewString(c, "sub"), hiss: viewString(c, "hiss"), org: viewString(c, "org"), app: viewString(c, "app"), gid: viewString(c, "gid"), seat: viewString(c, "seat"), inc: viewString(c, "inc"), jti: viewString(c, "jti")}
-	for _, s := range []string{g.issuer, g.audience, g.subject, g.hiss, g.org, g.app, g.gid, g.seat, g.inc, g.jti} {
+	g := viewGrant{issuer: viewString(c, "iss"), audience: viewString(c, "aud"), subject: viewString(c, "sub"), hiss: viewString(c, "hiss"), org: viewString(c, "org"), app: viewString(c, "app"), gid: viewString(c, "gid"), seat: viewString(c, "seat"), environment: viewString(c, "env"), jti: viewString(c, "jti")}
+	for _, s := range []string{g.issuer, g.audience, g.subject, g.hiss, g.org, g.app, g.gid, g.seat, g.environment, g.jti} {
 		if s == "" {
 			return bad()
 		}
