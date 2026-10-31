@@ -102,28 +102,32 @@ func TestTerminalViewValidGrantAndHardLeaseCaps(t *testing.T) {
 func TestTerminalViewRejectsInvalidClaimsBeforeReplay(t *testing.T) {
 	cases := []struct {
 		name   string
-		change func(map[string]any)
+		change func(map[string]any, time.Time)
 	}{
-		{"wrong issuer", func(c map[string]any) { c["iss"] = "foreign" }}, {"wrong audience", func(c map[string]any) { c["aud"] = "host2" }},
-		{"audience list", func(c map[string]any) { c["aud"] = []string{"host1"} }}, {"wrong org", func(c map[string]any) { c["org"] = "other" }},
-		{"wrong app", func(c map[string]any) { c["app"] = "other" }}, {"control mode", func(c map[string]any) { c["mode"] = "control" }},
-		{"wrong seat", func(c map[string]any) { c["seat"] = "seat2" }}, {"wrong environment", func(c map[string]any) { c["env"] = "env2" }},
-		{"missing", func(c map[string]any) { delete(c, "hiss") }}, {"unknown", func(c map[string]any) { c["socket"] = "/unsafe" }},
-		{"null subject", func(c map[string]any) { c["sub"] = nil }}, {"control character", func(c map[string]any) { c["sub"] = "person\n1" }},
-		{"expired despite skew", func(c map[string]any) { c["exp"] = time.Now().Unix() }},
-		{"overlong lifetime", func(c map[string]any) { c["exp"] = c["iat"].(int64) + 121 }},
-		{"different nbf", func(c map[string]any) { c["nbf"] = c["iat"].(int64) - 1 }},
-		{"future", func(c map[string]any) {
-			c["iat"] = time.Now().Unix() + 31
+		{"wrong issuer", func(c map[string]any, now time.Time) { c["iss"] = "foreign" }}, {"wrong audience", func(c map[string]any, now time.Time) { c["aud"] = "host2" }},
+		{"audience list", func(c map[string]any, now time.Time) { c["aud"] = []string{"host1"} }}, {"wrong org", func(c map[string]any, now time.Time) { c["org"] = "other" }},
+		{"wrong app", func(c map[string]any, now time.Time) { c["app"] = "other" }}, {"control mode", func(c map[string]any, now time.Time) { c["mode"] = "control" }},
+		{"wrong seat", func(c map[string]any, now time.Time) { c["seat"] = "seat2" }}, {"wrong environment", func(c map[string]any, now time.Time) { c["env"] = "env2" }},
+		{"missing", func(c map[string]any, now time.Time) { delete(c, "hiss") }}, {"unknown", func(c map[string]any, now time.Time) { c["socket"] = "/unsafe" }},
+		{"null subject", func(c map[string]any, now time.Time) { c["sub"] = nil }}, {"control character", func(c map[string]any, now time.Time) { c["sub"] = "person\n1" }},
+		{"expired despite skew", func(c map[string]any, now time.Time) {
+			c["exp"] = now.Unix()
+			c["iat"] = now.Unix() - 10
+			c["nbf"] = now.Unix() - 10
+		}},
+		{"overlong lifetime", func(c map[string]any, now time.Time) { c["exp"] = c["iat"].(int64) + 121 }},
+		{"different nbf", func(c map[string]any, now time.Time) { c["nbf"] = c["iat"].(int64) - 1 }},
+		{"future", func(c map[string]any, now time.Time) {
+			c["iat"] = now.Unix() + 31
 			c["nbf"] = c["iat"]
 			c["exp"] = c["iat"].(int64) + 30
 		}},
-		{"float", func(c map[string]any) { c["exp"] = 1.5 }}, {"oversize", func(c map[string]any) { c["sub"] = strings.Repeat("x", 2049) }},
+		{"float", func(c map[string]any, now time.Time) { c["exp"] = 1.5 }}, {"oversize", func(c map[string]any, now time.Time) { c["sub"] = strings.Repeat("x", 2049) }},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			f := newViewFixture(t)
-			test.change(f.claims)
+			test.change(f.claims, f.now)
 			_, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, f.b, f.r)
 			if e != ErrTerminalViewRefused || f.r.calls != 0 {
 				t.Fatalf("error=%v replaycalls=%d", e, f.r.calls)
@@ -363,5 +367,42 @@ func TestTerminalViewV3PinsResolvedIncarnationWithoutGrantInc(t *testing.T) {
 	// The original single-use grant cannot silently open the new actor either.
 	if _, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now, changed, f.r); e != ErrTerminalViewRefused {
 		t.Fatal("consumed grant retargeted", e)
+	}
+}
+
+func TestTerminalViewGrantCapSurvivesBackwardWallClockStep(t *testing.T) {
+	f := newViewFixture(t)
+	f.claims["exp"] = f.now.Unix() + 40
+	l := f.open(t)
+	anchored := l.grantDeadline
+	// Round(0) strips monotonic data. The anchored cap must retain it.
+	if anchored == anchored.Round(0) {
+		t.Fatal("opening cap lost its monotonic reading")
+	}
+	tick := f.now.Add(20 * time.Second)
+	wall := f.now.Add(20*time.Second - time.Hour).Round(0)
+	fresh := f.b
+	fresh.BindingRev++
+	fresh.FreshUntil = f.now.Add(2 * time.Minute).Round(0)
+	yes := true
+	if !l.renewAt(tick, wall, fresh, &yes) {
+		t.Fatal("unexpected refusal")
+	}
+	if !l.Deadline().Equal(anchored) || l.grantDeadline != anchored {
+		t.Fatal("wall step extended original grant cap", l.Deadline(), anchored)
+	}
+	if l.renewAt(anchored, wall, fresh, &yes) {
+		t.Fatal("late renewal resurrected expired monotonic lease")
+	}
+}
+
+func TestTerminalViewRefusesWallOnlyOwnerClock(t *testing.T) {
+	f := newViewFixture(t)
+	if _, e := f.p.Open(context.Background(), f.token(), f.b.Environment, f.now.Round(0), f.b, f.r); e != ErrTerminalViewRefused || f.r.calls != 0 {
+		t.Fatal("wall-only owner sample admitted", e)
+	}
+	l := f.open(t)
+	if l.Observe(f.now.Add(time.Second).Round(0), f.b) {
+		t.Fatal("wall-only lease observation accepted")
 	}
 }

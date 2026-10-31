@@ -69,11 +69,12 @@ type viewGrant struct {
 // transport. Its owning route must enforce Deadline/Observe at the output
 // boundary, interrupt stalled I/O at expiry, and never forward client commands.
 type TerminalViewLease struct {
-	mu       sync.Mutex
-	grant    viewGrant
-	binding  TerminalViewBinding
-	deadline time.Time
-	closed   bool
+	mu            sync.Mutex
+	grant         viewGrant
+	binding       TerminalViewBinding
+	deadline      time.Time
+	grantDeadline time.Time
+	closed        bool
 }
 
 // Open consumes an opening exactly once; response loss cannot authorize a retry.
@@ -82,19 +83,23 @@ type TerminalViewLease struct {
 // now must be an owner time.Now sample (with its monotonic component), not input
 // from a grant/client. Delayed replay-store completion cannot move the deadline.
 func (p *TerminalViewPolicy) Open(ctx context.Context, token string, environment string, now time.Time, b TerminalViewBinding, replay TerminalViewReplay) (*TerminalViewLease, error) {
-	if p == nil || replay == nil || ctx.Err() != nil || !p.validBinding(b, now) || environment != b.Environment {
+	if p == nil || replay == nil || ctx.Err() != nil || now == now.Round(0) || !p.validBinding(b, now) || environment != b.Environment {
 		return nil, ErrTerminalViewRefused
 	}
 	g, err := p.verify(token, now)
 	if err != nil || g.seat != b.Seat || g.environment != environment {
 		return nil, ErrTerminalViewRefused
 	}
-	deadline := viewDeadline(now, g.expires, b.FreshUntil)
+	grantDeadline := now.Add(g.expires.Sub(now))
+	deadline := viewDeadline(now, grantDeadline, b.FreshUntil)
+	if !deadline.After(now) {
+		return nil, ErrTerminalViewRefused
+	}
 	ok, err := replay.Consume(ctx, g.issuer, g.audience, g.jti, g.expires)
 	if err != nil || !ok || ctx.Err() != nil || !time.Now().Before(deadline) {
 		return nil, ErrTerminalViewRefused
 	}
-	return &TerminalViewLease{grant: g, binding: b, deadline: deadline}, nil
+	return &TerminalViewLease{grant: g, binding: b, deadline: deadline, grantDeadline: grantDeadline}, nil
 }
 
 func (p *TerminalViewPolicy) validBinding(b TerminalViewBinding, now time.Time) bool {
@@ -232,6 +237,11 @@ func (p *TerminalViewPolicy) verify(token string, now time.Time) (viewGrant, err
 	return g, nil
 }
 func viewDeadline(now, grantExpiry, freshExpiry time.Time) time.Time {
+	// Both owner clock and fixed grant cap must retain monotonic readings.
+	// Refuse a wall-only cap rather than silently reintroduce renewal leeway.
+	if now == now.Round(0) || grantExpiry == grantExpiry.Round(0) {
+		return time.Time{}
+	}
 	remaining := 30 * time.Second
 	for _, expiry := range []time.Time{grantExpiry, freshExpiry} {
 		if d := expiry.Sub(now); d < remaining {
@@ -242,7 +252,7 @@ func viewDeadline(now, grantExpiry, freshExpiry time.Time) time.Time {
 }
 func (l *TerminalViewLease) observeLocked(now time.Time, b TerminalViewBinding) bool {
 	old := l.binding
-	if l.closed || !now.Before(l.deadline) || !b.FreshUntil.After(now) || b.Environment != old.Environment || b.Seat != old.Seat || b.Session != old.Session || b.Incarnation != old.Incarnation || b.Host != old.Host || b.Profile != old.Profile || b.HostNamespace != old.HostNamespace || b.AuthorityEpoch != old.AuthorityEpoch || b.BindingRev < old.BindingRev {
+	if l.closed || now == now.Round(0) || !now.Before(l.deadline) || !b.FreshUntil.After(now) || b.Environment != old.Environment || b.Seat != old.Seat || b.Session != old.Session || b.Incarnation != old.Incarnation || b.Host != old.Host || b.Profile != old.Profile || b.HostNamespace != old.HostNamespace || b.AuthorityEpoch != old.AuthorityEpoch || b.BindingRev < old.BindingRev {
 		l.closed = true
 		return false
 	}
@@ -265,6 +275,14 @@ func (l *TerminalViewLease) Deadline() time.Time { l.mu.Lock(); defer l.mu.Unloc
 // view's exact pending request may supply true. false closes immediately. The
 // route owns request-id reuse and a single <=2s check; this policy issues no HTTP.
 func (l *TerminalViewLease) Renew(now time.Time, b TerminalViewBinding, decision *bool) bool {
+	return l.renewAt(now, now, b, decision)
+}
+
+// The owner time.Now sample carries both clocks. Keeping wall time separate
+// internally allows a clock-step test without changing the host clock or using
+// unsafe time representations. Only fresh Runtime wall deadlines need conversion;
+// the ORIGINAL grant cap was already anchored once at Open, with monotonic time.
+func (l *TerminalViewLease) renewAt(now, wallNow time.Time, b TerminalViewBinding, decision *bool) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.observeLocked(now, b) {
@@ -277,7 +295,8 @@ func (l *TerminalViewLease) Renew(now time.Time, b TerminalViewBinding, decision
 		l.closed = true
 		return false
 	}
-	next := viewDeadline(now, l.grant.expires, b.FreshUntil)
+	freshDeadline := now.Add(b.FreshUntil.Sub(wallNow))
+	next := viewDeadline(now, l.grantDeadline, freshDeadline)
 	if !next.After(now) {
 		l.closed = true
 		return false
