@@ -194,6 +194,9 @@ func TestLegacyReleaseRemainsVerifiableAfterToolExpansion(t *testing.T) {
 		if err := os.WriteFile(path, []byte("legacy"), mode); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
 		f, err := HashFile(path)
 		if err != nil {
 			t.Fatal(err)
