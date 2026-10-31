@@ -9,6 +9,7 @@ type DetachReader struct {
 	Input        io.Reader
 	prefix, done bool
 	pending      []byte
+	endError     error
 }
 
 func (r *DetachReader) Read(p []byte) (int, error) {
@@ -21,6 +22,9 @@ func (r *DetachReader) Read(p []byte) (int, error) {
 		return n, nil
 	}
 	if r.done {
+		if r.endError != nil {
+			return 0, r.endError
+		}
 		return 0, io.EOF
 	}
 	buf := make([]byte, min(len(p), 4096))
@@ -42,7 +46,8 @@ func (r *DetachReader) Read(p []byte) (int, error) {
 		}
 		r.pending = append(r.pending, b)
 	}
-	if e != nil {
+	if e != nil && !r.done {
+		r.endError = e
 		if r.prefix {
 			r.pending = append(r.pending, 2)
 			r.prefix = false
@@ -55,6 +60,9 @@ func (r *DetachReader) Read(p []byte) (int, error) {
 		return count, nil
 	}
 	if r.done {
+		if r.endError != nil {
+			return 0, r.endError
+		}
 		return 0, io.EOF
 	}
 	return 0, nil

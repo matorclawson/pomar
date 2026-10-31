@@ -2,6 +2,7 @@ package seatterm
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"testing"
 )
@@ -43,5 +44,28 @@ func TestLocalDetachLiteralPrefixAndUnknownChord(t *testing.T) {
 		if e != nil || !bytes.Equal(b, c.out) {
 			t.Fatal(b, e)
 		}
+	}
+}
+
+// Deliver bytes and a non-EOF read failure together, as io.Reader permits.
+type failedDetachInput struct{ data []byte }
+
+func (r failedDetachInput) Read(p []byte) (int, error) {
+	return copy(p, r.data), io.ErrUnexpectedEOF
+}
+
+func TestDetachPreservesReadFailureAfterPendingBytes(t *testing.T) {
+	for _, input := range [][]byte{[]byte("ab"), {2}} {
+		got, err := io.ReadAll(&DetachReader{Input: failedDetachInput{input}})
+		if !bytes.Equal(got, input) || !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("read failure hidden or bytes lost: %q %v", got, err)
+		}
+	}
+}
+
+func TestExplicitDetachTerminatesLocallyDespiteLaterInputError(t *testing.T) {
+	got, err := io.ReadAll(&DetachReader{Input: failedDetachInput{[]byte{2, 'd'}}})
+	if len(got) != 0 || err != nil {
+		t.Fatalf("explicit local detach leaked: %q %v", got, err)
 	}
 }
