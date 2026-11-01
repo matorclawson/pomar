@@ -322,3 +322,16 @@ import Foundation
     #expect(throws: (any Error).self) { try AgentEnvironment.ensureRootfs(o) }
     #expect(!FileManager.default.fileExists(atPath: o.rootfs))
 }
+
+@Test func sourceDestinationUsesTheSharedGoAndSwiftVectors() throws {
+    struct Vector: Decodable { var name: String; var destination: String; var valid: Bool; var cwd: String? }
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let data = try Data(contentsOf: root.appendingPathComponent("testdata/seat-work-destinations.json"))
+    let vectors = try JSONDecoder().decode([Vector].self, from: data)
+    for v in vectors {
+        let got = AgentEnvironment.sourceWorkingDirectory(destination: v.destination)
+        #expect((got != nil) == v.valid, "\(v.name)")
+        #expect(got == v.cwd, "\(v.name)")
+    }
+}

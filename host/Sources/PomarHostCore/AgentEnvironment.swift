@@ -5,6 +5,22 @@ import CryptoKit
 /// Development agent VM owner. Its writable filesystem lives outside the
 /// container directory and is retained on stop. CI Helper remains unchanged.
 public enum AgentEnvironment {
+    /// Spelling validation only. Retained filesystem custody is checked separately.
+    /// Go and Swift share one vector corpus; declaration paths are never normalized.
+    public static func sourceWorkingDirectory(destination: String) -> String? {
+        if destination.isEmpty { return "/work" }
+        guard destination.utf8.count <= 1024,
+            destination.utf8.allSatisfy({ b in
+                (65...90).contains(b) || (97...122).contains(b) || (48...57).contains(b)
+                    || b == 46 || b == 95 || b == 45 || b == 47
+            }) else { return nil }
+        for component in destination.split(separator: "/", omittingEmptySubsequences: false) {
+            guard !component.isEmpty, component.utf8.count <= 255,
+                component != ".", component != ".." else { return nil }
+        }
+        return "/work/" + destination
+    }
+
     public struct SeatLaunch: Codable, Sendable {
         public var sandbox: String
         public var approvals: String
