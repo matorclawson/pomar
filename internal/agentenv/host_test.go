@@ -200,3 +200,34 @@ func TestRetainedMailSeatCannotChangeWithTheSameDeclarationHash(t *testing.T) {
 		t.Fatal("identity refusal changed retained state")
 	}
 }
+
+func TestHostRefusesDestinationUntilSecureMaterialization(t *testing.T) {
+	const canonical = "code/rasahq/rasa-community-benchmarks/worktrees/rasa-bench"
+	for _, config := range []HostConfig{{SourceDestination: canonical}, {Profiles: map[string]EnvironmentProfile{"seat-example": {SourceDestination: canonical}}}} {
+		if h, err := OpenHost(config); err == nil || err.Error() != "source destination requires secure materialization before start" {
+			if h != nil {
+				h.Close()
+			}
+			t.Fatalf("owner destination admission: %v", err)
+		}
+	}
+	for _, retained := range []bool{false, true} {
+		h := &Host{config: HostConfig{MaxLive: 1, Profiles: map[string]EnvironmentProfile{"seat-example": {}}}, envs: map[string]*Environment{}}
+		e := &Environment{Phase: "stopped", Spec: VMSpec{Profile: "seat-example"}}
+		if retained {
+			e.Spec.SourceDestination = canonical
+		} else {
+			h.config.Profiles["seat-example"] = EnvironmentProfile{SourceDestination: canonical}
+		}
+		if err := h.start(e); err == nil || err.Error() != "source destination requires secure materialization before start" {
+			t.Fatalf("unsupported destination reached launch: %v", err)
+		}
+	}
+}
+func TestDestinationIsPreservedInSelectedProfile(t *testing.T) {
+	h := &Host{config: HostConfig{Profiles: map[string]EnvironmentProfile{"seat-example": {SourceDestination: "code/repo"}}}}
+	cfg, err := h.profileConfig("seat-example")
+	if err != nil || cfg.SourceDestination != "code/repo" {
+		t.Fatalf("destination silently discarded: %+v %v", cfg, err)
+	}
+}

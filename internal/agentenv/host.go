@@ -45,6 +45,7 @@ type HostConfig struct {
 	CodexArchiveSHA256     string      `json:"codexArchiveSHA256"`
 	SourceBundle           string      `json:"sourceBundle"`
 	SourceSHA              string      `json:"sourceSHA"`
+	SourceDestination      string      `json:"sourceDestination,omitempty"`
 	GoProxySocket          string      `json:"goProxySocket"`
 	AllowedHosts           []string    `json:"allowedHosts"`
 	// MailOrigin is an owner-selected upstream, never a guest destination.
@@ -91,6 +92,7 @@ type EnvironmentProfile struct {
 	ImageDigest            string      `json:"imageDigest"`
 	SourceBundle           string      `json:"sourceBundle"`
 	SourceSHA              string      `json:"sourceSHA"`
+	SourceDestination      string      `json:"sourceDestination,omitempty"`
 	AllowedHosts           []string    `json:"allowedHosts"`
 	// Agent, AgentVersion and AgentArchive(SHA256) select a profile's own
 	// coding agent and its pinned package; empty keeps the host's.
@@ -152,6 +154,7 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 	}
 	c.Base, c.ImageRef, c.ImageDigest = p.Base, p.ImageRef, p.ImageDigest
 	c.SourceBundle, c.SourceSHA = p.SourceBundle, p.SourceSHA
+	c.SourceDestination = p.SourceDestination
 	c.AllowedHosts = append([]string(nil), p.AllowedHosts...)
 	c.ControllerCapabilities = append([]string(nil), p.ControllerCapabilities...)
 	if p.Agent != "" {
@@ -258,6 +261,15 @@ func randomID() string {
 }
 
 func OpenHost(config HostConfig) (*Host, error) {
+	if config.SourceDestination != "" {
+		return nil, errors.New("source destination requires secure materialization before start")
+	}
+	for _, p := range config.Profiles {
+		if p.SourceDestination != "" {
+			return nil, errors.New("source destination requires secure materialization before start")
+		}
+	}
+
 	if err := ValidateControllerCapabilities(config.ControllerCapabilities); err != nil {
 		return nil, err
 	}
@@ -593,6 +605,10 @@ func (h *Host) gate(e *Environment) (err error) {
 }
 
 func (h *Host) start(e *Environment) error {
+	if e.Spec.SourceDestination != "" {
+		return errors.New("source destination requires secure materialization before start")
+	}
+
 	if h.fatal != nil {
 		return errors.New("owner journal durability uncertain; launch refused")
 	}
@@ -611,6 +627,9 @@ func (h *Host) start(e *Environment) error {
 	cfg, err := h.profileConfig(e.Spec.Profile)
 	if err != nil {
 		return err
+	}
+	if cfg.SourceDestination != "" {
+		return errors.New("source destination requires secure materialization before start")
 	}
 	if hasHarnessSwitch(e) && harnessBinding(cfg) != harnessBinding(e.Spec.HostConfig) {
 		return errors.New("selected harness profile changed; original selection held")

@@ -545,3 +545,11 @@ The shared slot is released before writing the buffered response to the guest. A
 503 and Retry-After. Messenger's 429/503 Retry-After passes through without an
 internal retry; a 503 without that header receives Retry-After: 5. Only the owner can replace an incarnation; guests cannot reset
 these limits. These limits do not replace native identity and revocation proofs.
+
+Destination source rollout is staged: empty `sourceDestination` preserves the
+legacy `/work` checkout. Non-empty values are explicitly refused by owner
+configuration, start and Swift validation until secure materialization and
+host-side pre-ownership binding are implemented. A retained non-empty disk
+without that binding must be refused, never initialized over. The shared
+Go/Swift spelling parser rejects dot-prefixed components, including `.git`.
+Parser acceptance alone does not authorize filesystem access or launch.

@@ -23,7 +23,7 @@ func SourceWorkingDirectory(destination string) (string, error) {
 		}
 	}
 	for _, c := range strings.Split(destination, "/") {
-		if len(c) == 0 || len(c) > 255 || c == "." || c == ".." {
+		if len(c) == 0 || len(c) > 255 || strings.HasPrefix(c, ".") {
 			return "", errors.New("source destination must have bounded nonempty relative components")
 		}
 	}

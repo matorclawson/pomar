@@ -335,3 +335,12 @@ import Foundation
         #expect(got == v.cwd, "\(v.name)")
     }
 }
+
+@Test func canonicalDestinationCannotStartBeforeSecureMaterialization() {
+    var o = agentOptions()
+    #expect(AgentEnvironment.valid(o))
+    o.sourceDestination = "code/rasahq/rasa-community-benchmarks/worktrees/rasa-bench"
+    #expect(!AgentEnvironment.valid(o))
+    o.sourceDestination = ""
+    #expect(AgentEnvironment.valid(o))
+}

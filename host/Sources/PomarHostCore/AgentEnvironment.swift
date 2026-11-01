@@ -16,7 +16,7 @@ public enum AgentEnvironment {
             }) else { return nil }
         for component in destination.split(separator: "/", omittingEmptySubsequences: false) {
             guard !component.isEmpty, component.utf8.count <= 255,
-                component != ".", component != ".." else { return nil }
+                !component.hasPrefix(".") else { return nil }
         }
         return "/work/" + destination
     }
@@ -42,6 +42,7 @@ public enum AgentEnvironment {
     }
     public struct Options: Codable, Sendable {
         public var requireRetainedDisk: Bool? = nil
+        public var sourceDestination: String? = nil
         public var seatLaunch: SeatLaunch? = nil
         public var environment: String
         public var session: String
@@ -177,7 +178,7 @@ public enum AgentEnvironment {
             !s.isEmpty && s.count <= 128 && s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
         }
         let sha: (String, Int) -> Bool = { s, n in s.count == n && s.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) } }
-        return id(o.environment) && id(o.session) && id(o.incarnation)
+        return (o.sourceDestination ?? "").isEmpty && id(o.environment) && id(o.session) && id(o.incarnation)
             && validControllerCapabilities(o.controllerCapabilities ?? []) && validAgent(o) && validFixture(o)
             && sha(o.sourceSHA, 40) && sha(o.codexArchiveSHA256, 64)
             && o.cpus > 0 && o.cpus <= 4 && o.memoryBytes >= 512 * 1024 * 1024 && o.memoryBytes <= 8 * 1024 * 1024 * 1024
