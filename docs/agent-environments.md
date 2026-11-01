@@ -49,8 +49,9 @@ from the guest agent, not from a hostile host process with the service owner's U
 
 There is no guest network interface. HTTPS goes through a loopback-to-vsock
 relay and a host CONNECT proxy allowing only configured exact DNS names on
-port 443. Connections to private, loopback, link-local or unspecified addresses
-are refused after DNS resolution. Revocation closes established tunnels too.
+port 443. Connections to private, shared address space (`100.64.0.0/10`), loopback,
+link-local or unspecified addresses are refused after DNS resolution. A mixed
+public/shared answer is refused in full; no tailnet exception is configured. Revocation closes established tunnels too.
 No credentials are held by the network proxy. Device-code sign-in occurs inside
 the guest; host credential caches are never copied into it.
 

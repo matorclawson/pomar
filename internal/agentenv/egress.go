@@ -36,8 +36,12 @@ func NewEgress(names []string) (*Egress, error) {
 	return g, nil
 }
 
+// sharedAddressSpace is not covered by net.IP.IsPrivate (RFC 1918/4193).
+// A tailnet destination must not inherit the public egress lease.
+var sharedAddressSpace = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
 func publicAddress(ip net.IP) bool {
-	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsUnspecified()
+	return ip != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() && !sharedAddressSpace.Contains(ip) && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsUnspecified()
 }
 
 func (g *Egress) Revoke() {
