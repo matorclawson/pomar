@@ -3,6 +3,8 @@ package agentenv
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,19 +19,19 @@ import (
 	"time"
 )
 
-const mailRequestLimit = 64 << 10
+const mailRequestLimit = 1 << 20
 const mailResponseLimit = 1 << 20
 
 // mailRelay is bound by the owner to one guest incarnation. It is not a
 // general proxy. A dedicated local channel and Revoke on stop/replacement
 // are required before this component can be integrated into a host.
 type mailRelay struct {
-	seat, incarnation string
-	upstream          *url.URL
-	client            *http.Client
-	mu                sync.Mutex
-	revoked           bool
-	inflight          map[*http.Request]context.CancelFunc
+	seat, guest, incarnation string
+	upstream                 *url.URL
+	client                   *http.Client
+	mu                       sync.Mutex
+	revoked                  bool
+	inflight                 map[*http.Request]context.CancelFunc
 }
 
 var mailID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`)
@@ -37,21 +39,21 @@ var mailID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`)
 // upstream comes from the mail service owner's API contract, never a guest.
 // transport is an owner/test dependency; nil uses direct HTTP, without an
 // environment-selected proxy. No credential or guest header is inherited.
-func newMailRelay(seat, incarnation, upstream string, transport http.RoundTripper) (*mailRelay, error) {
+func newMailRelay(seat, guest, incarnation, upstream string, transport http.RoundTripper) (*mailRelay, error) {
 	u, err := url.Parse(upstream)
 	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawPath != "" {
 		return nil, errors.New("mail relay needs a fixed owner upstream")
 	}
 	host, port, err := net.SplitHostPort(u.Host)
 	n, portErr := strconv.Atoi(port)
-	if err != nil || portErr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port || host == "" || strings.ToLower(host) != host || !strings.Contains(host, ".") || strings.ContainsAny(host, "/*:@ ") || net.ParseIP(host) != nil || !seatProfileName.MatchString(seat) || !validID.MatchString(incarnation) || u.Path == "" || u.Path[0] != '/' || path.Clean(u.Path) != u.Path || strings.ContainsAny(u.Path, "%?#:") || strings.HasPrefix(u.Path, "//") {
-		return nil, errors.New("mail relay needs an owner-bound seat, incarnation and API prefix")
+	if err != nil || portErr != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port || host == "" || strings.ToLower(host) != host || !strings.Contains(host, ".") || strings.ContainsAny(host, "/*:@ ") || net.ParseIP(host) != nil || !seatProfileName.MatchString(seat) || !validID.MatchString(guest) || !validID.MatchString(incarnation) || (u.Path != "" && u.Path != "/") {
+		return nil, errors.New("mail relay needs an owner-bound seat, guest, incarnation and upstream origin")
 	}
 	u.Path = strings.TrimSuffix(u.Path, "/")
 	if transport == nil {
 		transport = &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, MaxIdleConnsPerHost: 4, ResponseHeaderTimeout: 5 * time.Second}
 	}
-	return &mailRelay{seat: seat, incarnation: incarnation, upstream: u, inflight: map[*http.Request]context.CancelFunc{}, client: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &mailRelay{seat: seat, guest: guest, incarnation: incarnation, upstream: u, inflight: map[*http.Request]context.CancelFunc{}, client: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 func (m *mailRelay) Revoke() {
@@ -68,7 +70,10 @@ func mailRoute(r *http.Request) bool {
 	if r.URL.IsAbs() || r.URL.User != nil || r.URL.Fragment != "" || strings.Contains(r.URL.EscapedPath(), "%") || path.Clean(r.URL.Path) != r.URL.Path || strings.HasPrefix(r.URL.Path, "//") {
 		return false
 	}
-	p := r.URL.Path
+	if !strings.HasPrefix(r.URL.Path, "/v1/") {
+		return false
+	}
+	p := strings.TrimPrefix(r.URL.Path, "/v1")
 	allowed := r.Method == "GET" && (p == "/whoami" || p == "/inbox" || p == "/pending") || r.Method == "POST" && p == "/send"
 	for _, route := range []struct{ method, prefix string }{{"GET", "/messages/"}, {"POST", "/reply/"}} {
 		if r.Method == route.method && strings.HasPrefix(p, route.prefix) && mailID.MatchString(strings.TrimPrefix(p, route.prefix)) {
@@ -80,20 +85,56 @@ func mailRoute(r *http.Request) bool {
 		return false
 	}
 	for key, values := range q {
-		if p != "/inbox" || key != "limit" || len(values) != 1 {
+		if r.Method != "GET" || len(values) != 1 {
+			return false
+		}
+		if key == "format" && values[0] == "json" {
+			continue
+		}
+		if key != "limit" || (p != "/inbox" && p != "/pending") {
 			return false
 		}
 		n, err := strconv.Atoi(values[0])
-		if err != nil || n < 1 || n > 200 || strconv.Itoa(n) != values[0] {
+		if err != nil || n < 0 || n > 200 || strconv.Itoa(n) != values[0] {
 			return false
 		}
 	}
 	return true
 }
 
+func strictMailBody(raw []byte, send bool) (map[string]json.RawMessage, error) {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	token, err := d.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, errors.New("mail body must be an object")
+	}
+	object := map[string]json.RawMessage{}
+	for d.More() {
+		token, err := d.Token()
+		key, ok := token.(string)
+		allowed := key == "body" || key == "priority" || key == "final" || key == "json" || send && (key == "to" || key == "subject" || key == "request_id")
+		if err != nil || !ok || !allowed || object[key] != nil {
+			return nil, errors.New("unknown or duplicate mail field")
+		}
+		var value json.RawMessage
+		if err := d.Decode(&value); err != nil {
+			return nil, err
+		}
+		object[key] = value
+	}
+	if token, err := d.Token(); err != nil || token != json.Delim('}') {
+		return nil, errors.New("invalid mail object")
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		return nil, errors.New("trailing mail data")
+	}
+	return object, nil
+}
+
 func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	identities := r.Header.Values("X-Zmail-Instance")
-	if !mailRoute(r) || len(identities) > 1 || len(identities) == 1 && identities[0] != m.seat || r.Header.Get("Upgrade") != "" || len(r.TransferEncoding) != 0 || r.ContentLength < 0 || r.ContentLength > mailRequestLimit || r.Method == "GET" && r.ContentLength != 0 {
+	if !mailRoute(r) || len(identities) > 1 || len(identities) == 1 && identities[0] != m.seat || len(r.Header.Values("Origin")) > 0 || len(r.Header.Values("Sec-Fetch-Site")) > 0 || len(r.Header.Values("Sec-Fetch-Mode")) > 0 || r.Header.Get("Upgrade") != "" || len(r.TransferEncoding) != 0 || r.ContentLength < 0 || r.ContentLength > mailRequestLimit || r.Method == "GET" && r.ContentLength != 0 || r.Method == "POST" && r.Header.Get("Content-Type") != "application/json" {
 		http.Error(w, "mail relay refused", http.StatusForbidden)
 		return
 	}
@@ -118,24 +159,30 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var err error
 		body, err = io.ReadAll(io.LimitReader(r.Body, mailRequestLimit+1))
-		var object map[string]json.RawMessage
-		if err != nil || len(body) > mailRequestLimit || json.Unmarshal(body, &object) != nil || object == nil {
+		if err != nil || len(body) > mailRequestLimit {
 			http.Error(w, "mail body refused", http.StatusBadRequest)
 			return
 		}
-		// Identity is exclusively the owner binding. Never allow a body
-		// field to acquire meaning as a future upstream identity selector.
-		for key := range object {
-			switch strings.ToLower(key) {
-			case "seat", "instance", "from", "sender", "x-zmail-instance":
-				http.Error(w, "mail identity refused", http.StatusForbidden)
+		send := r.URL.Path == "/v1/send"
+		object, err := strictMailBody(body, send)
+		if err != nil {
+			http.Error(w, "mail fields refused", http.StatusBadRequest)
+			return
+		}
+		if send {
+			var id string
+			if json.Unmarshal(object["request_id"], &id) != nil || strings.TrimSpace(id) == "" || len(id) > 4096 {
+				http.Error(w, "mail request_id required", http.StatusBadRequest)
 				return
 			}
-		}
-		if r.URL.Path == "/send" {
-			var id string
-			if json.Unmarshal(object["request_id"], &id) != nil || !mailID.MatchString(id) {
-				http.Error(w, "mail request_id required", http.StatusBadRequest)
+			// A guest retry key is stable across incarnation changes but
+			// distinct from every other guest's key. No guest chooses the
+			// owner-side namespace, and no retry is silently re-keyed.
+			sum := sha256.Sum256([]byte(m.seat + "\x00" + m.guest + "\x00" + id))
+			object["request_id"], _ = json.Marshal(hex.EncodeToString(sum[:]))
+			body, _ = json.Marshal(object)
+			if len(body) > mailRequestLimit {
+				http.Error(w, "scoped mail body too large", http.StatusRequestEntityTooLarge)
 				return
 			}
 		}
