@@ -2,8 +2,10 @@ package agentenv
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -309,5 +311,39 @@ func TestRetainedReseatKeepsDiskAndRequiresItOnNextBoot(t *testing.T) {
 	var restored Environment
 	if json.Unmarshal(data, &restored) != nil || !restored.Spec.RequireRetainedDisk {
 		t.Fatal("disk requirement not durable")
+	}
+}
+
+func legacyDestinationFixture() HostConfig {
+	network := true
+	launch := &SeatLaunch{Sandbox: "workspace-write", Approvals: "never", NetworkAccess: &network, Model: "fixture-model", Effort: "medium", CWD: "/work"}
+	p := EnvironmentProfile{Base: "/owner/base.ext4", ImageRef: "registry.example/image@sha256:" + strings.Repeat("b", 64), ImageDigest: "sha256:" + strings.Repeat("b", 64), SourceBundle: "/owner/source.bundle", SourceSHA: strings.Repeat("a", 40), Seat: "legacy-seat", SeatDeclarationSHA256: strings.Repeat("c", 64), SeatLaunch: launch}
+	return HostConfig{Root: "/owner", Agent: "codex", AgentVersion: "0.160.0", CodexArchive: "/owner/agent.tar", CodexArchiveSHA256: strings.Repeat("d", 64), Seat: "legacy-seat", SeatDeclarationSHA256: strings.Repeat("c", 64), SeatLaunch: launch, AllowedHosts: []string{"api.example"}, Profiles: map[string]EnvironmentProfile{"legacy": p}}
+}
+
+// Expected digests were exported by the actual untouched pre-Destination
+// 06bcf6b source under a virtual test overlay, not recomputed as expectations.
+func TestDestinationBindingKeepsPinnedLegacyHash(t *testing.T) {
+	c := legacyDestinationFixture()
+	raw, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantJSON = "9ddbc9d4811691e30bbf88af4cb4a423da74049548c36eaecda85f797ce8021c"
+	const wantBinding = "75d8baf1af6537ebcf49c9903e357d56b1999c43390aea61cd74a83d5b4b1f2b"
+	if got := fmt.Sprintf("%x", sha256.Sum256(raw)); got != wantJSON {
+		t.Fatalf("legacy profile/config JSON changed: %s", got)
+	}
+	if got := harnessBinding(c); got != wantBinding {
+		t.Fatalf("legacy journal binding changed: %s", got)
+	}
+	c.SourceDestination = "code/legacy-repo"
+	if harnessBinding(c) == wantBinding {
+		t.Fatal("destination missing from journal binding")
+	}
+	other := c
+	other.SourceDestination = "code/another-repo"
+	if harnessBinding(c) == harnessBinding(other) {
+		t.Fatal("retargeted destination preserved launch identity")
 	}
 }

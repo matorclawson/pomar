@@ -69,7 +69,7 @@ func (h *Host) prepareHarnessSwitch(e *Environment, profile, session string) (Ho
 		return HostConfig{}, nil, errors.New("target needs pinned archive and seat declaration")
 	}
 	// Switching harness must not become an implicit image/project/host migration.
-	if old.Root != c.Root || old.Store != c.Store || old.Helper != c.Helper || old.Base != c.Base || old.Kernel != c.Kernel || old.InitRef != c.InitRef || old.InitDigest != c.InitDigest || old.ImageRef != c.ImageRef || old.ImageDigest != c.ImageDigest || old.SourceSHA != c.SourceSHA || old.SourceBundle != c.SourceBundle || old.GuestBinary != c.GuestBinary || old.ShimBinary != c.ShimBinary || old.CPUs != c.CPUs || old.MemoryBytes != c.MemoryBytes {
+	if old.Root != c.Root || old.Store != c.Store || old.Helper != c.Helper || old.Base != c.Base || old.Kernel != c.Kernel || old.InitRef != c.InitRef || old.InitDigest != c.InitDigest || old.ImageRef != c.ImageRef || old.ImageDigest != c.ImageDigest || old.SourceSHA != c.SourceSHA || old.SourceBundle != c.SourceBundle || old.SourceDestination != c.SourceDestination || old.GuestBinary != c.GuestBinary || old.ShimBinary != c.ShimBinary || old.CPUs != c.CPUs || old.MemoryBytes != c.MemoryBytes {
 		return HostConfig{}, nil, errors.New("target changes retained box inputs or resources; harness switch refused")
 	}
 	if err = verifyHarnessArchive(c); err != nil {
@@ -107,7 +107,8 @@ func harnessBinding(c HostConfig) string {
 		Agent, Version, Archive, ArchiveSHA, Seat, Declaration string
 		Launch                                                 *SeatLaunch
 		Hosts                                                  []string
-	}{harnessName(c), c.AgentVersion, c.CodexArchive, c.CodexArchiveSHA256, c.Seat, c.SeatDeclarationSHA256, c.SeatLaunch, c.AllowedHosts})
+		Destination                                            string `json:"sourceDestination,omitempty"`
+	}{harnessName(c), c.AgentVersion, c.CodexArchive, c.CodexArchiveSHA256, c.Seat, c.SeatDeclarationSHA256, c.SeatLaunch, c.AllowedHosts, c.SourceDestination})
 	return digest(b)
 }
 func verifyHarnessArchive(c HostConfig) error {
