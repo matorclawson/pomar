@@ -512,3 +512,26 @@ a guest, issue credentials, reserve capacity or authorize an actor launch.
 A native-seat move additionally needs the owning Runtime handoff, a positive
 source/backend fence, final native-history capture and exact target resume
 evidence; the inventory/plan command alone cannot perform that move.
+
+## Mail for a Codex seat
+
+An owner can set a fixed `mailOrigin` on the development host and `mail: true`
+on a seat profile. It creates that environment's private `mail.sock`, maps it
+into the VM and exposes it only at guest loopback `127.0.0.1:7074`. The Codex
+seat receives `ZMAIL_URL` for this local origin and its own `ZMAIL_INSTANCE`.
+A separately supplied maintained remote mail client uses that override without
+fallback; the relay does not install that client or any credential. With mail
+disabled, the local endpoint is unavailable rather than a direct service route.
+
+The relay fixes identity from the owner profile and scopes send retry keys to
+the seat and stable environment ID, preserving them across incarnation changes.
+It permits only the mail service's six minimal REST operations under `/v1/`,
+with explicit query and JSON fields. It forwards no guest headers, rejects
+another seat identity, and refuses redirects and unlisted operations. Network
+revocation also revokes mail and cancels in-flight relay calls. That cancellation
+is not proof that a remote send did not commit: retry the same original key.
+
+This source transport does not establish service-side node registration, guest
+client installation, native channel qualification, or a completed seat cutover.
+The owner must prove real guest identity and refusal of another seat before
+adoption. General egress retains its shared-address-space refusal.

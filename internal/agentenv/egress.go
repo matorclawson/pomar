@@ -21,6 +21,7 @@ type Egress struct {
 	connections map[net.Conn]struct{}
 	Resolve     func(context.Context, string) ([]net.IPAddr, error)
 	Dial        func(context.Context, string, string) (net.Conn, error)
+	onRevoke    func()
 }
 
 func NewEgress(names []string) (*Egress, error) {
@@ -46,10 +47,14 @@ func publicAddress(ip net.IP) bool {
 
 func (g *Egress) Revoke() {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.revoked = true
 	for c := range g.connections {
 		c.Close()
+	}
+	hook := g.onRevoke
+	g.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
 }
 
