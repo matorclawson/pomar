@@ -19,10 +19,10 @@ func TestEgressRefusalsDoNotDial(t *testing.T) {
 		{"method", "GET", "allowed.example:443", "203.0.113.1"},
 		{"private", "CONNECT", "allowed.example:443", net.IPv4(10, 0, 0, 1).String()},
 		{"loopback", "CONNECT", "allowed.example:443", "127.0.0.1"},
-		{"shared space start", "CONNECT", "allowed.example:443", "100.64.0.0"},
-		{"tailnet", "CONNECT", "allowed.example:443", "100.105.32.109"},
-		{"shared space end", "CONNECT", "allowed.example:443", "100.127.255.255"},
-		{"mapped tailnet", "CONNECT", "allowed.example:443", "::ffff:100.105.32.109"},
+		{"shared space start", "CONNECT", "allowed.example:443", net.IPv4(100, 64, 0, 0).String()},
+		{"tailnet", "CONNECT", "allowed.example:443", net.IPv4(100, 64, 1, 2).String()},
+		{"shared space end", "CONNECT", "allowed.example:443", net.IPv4(100, 127, 255, 255).String()},
+		{"mapped tailnet", "CONNECT", "allowed.example:443", net.IPv4(100, 64, 1, 2).To16().String()},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			g, _ := NewEgress([]string{"allowed.example"})
@@ -45,7 +45,7 @@ func TestEgressRefusalsDoNotDial(t *testing.T) {
 }
 
 func TestPublicAddressSharedSpaceBoundary(t *testing.T) {
-	for _, address := range []string{"100.63.255.255", "100.128.0.0", "203.0.113.1"} {
+	for _, address := range []string{net.IPv4(100, 63, 255, 255).String(), net.IPv4(100, 128, 0, 0).String(), "203.0.113.1"} {
 		if !publicAddress(net.ParseIP(address)) {
 			t.Errorf("public address adjacent to shared space refused: %s", address)
 		}
@@ -53,7 +53,7 @@ func TestPublicAddressSharedSpaceBoundary(t *testing.T) {
 }
 
 func TestEgressRejectsMixedPublicAndSharedDNSAnswers(t *testing.T) {
-	for _, answers := range [][]string{{"203.0.113.1", "100.105.32.109"}, {"100.105.32.109", "203.0.113.1"}} {
+	for _, answers := range [][]string{{"203.0.113.1", net.IPv4(100, 64, 1, 2).String()}, {net.IPv4(100, 64, 1, 2).String(), "203.0.113.1"}} {
 		g, err := NewEgress([]string{"allowed.example"})
 		if err != nil {
 			t.Fatal(err)
@@ -120,5 +120,14 @@ func TestRevocationClosesExistingTunnelAndDeniesNew(t *testing.T) {
 	g.ServeHTTP(w, request)
 	if w.Code != 403 {
 		t.Fatal("new tunnel admitted after revocation")
+	}
+}
+
+func TestPublicAddressRefusesBothSharedAddressRepresentations(t *testing.T) {
+	ip := net.IPv4(100, 64, 1, 2)
+	for _, candidate := range []net.IP{ip.To4(), ip.To16()} {
+		if publicAddress(candidate) {
+			t.Fatal("shared address representation accepted")
+		}
 	}
 }
