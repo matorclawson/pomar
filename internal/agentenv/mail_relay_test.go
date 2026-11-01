@@ -86,6 +86,8 @@ func TestMailRelayRefusesOtherSeatAndUnlistedOperations(t *testing.T) {
 		{"POST", "/v1/reply/id", "", `{"body":"one","body":"two"}`},
 		{"POST", "/v1/reply/id", "", `{"to":"recipient","body":"no"}`},
 		{"POST", "/v1/send", "", `{"request_id":"one","extra":true}`},
+		{"POST", "/v1/send", "", `{"request_id":"one","\u017feat":"other-seat"}`},
+		{"POST", "/v1/reply/id", "", `{"body":"one","bo\u0064y":"two"}`},
 	} {
 		t.Run(c.method+c.path+c.identity+c.body, func(t *testing.T) {
 			m, _ := newMailRelay("example-seat", "guest-1", "incarnation-1", "http://mail.example:7743", mailTransport(func(*http.Request) (*http.Response, error) {
@@ -108,6 +110,28 @@ func TestMailRelayRefusesOtherSeatAndUnlistedOperations(t *testing.T) {
 				t.Fatalf("unlisted request accepted: %d", resp.StatusCode)
 			}
 		})
+	}
+}
+
+func TestMailRelayReencodesReplyFields(t *testing.T) {
+	m, _ := newMailRelay("example-seat", "guest-1", "incarnation-1", "http://mail.example:7743", mailTransport(func(r *http.Request) (*http.Response, error) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil || string(b) != `{"body":"hello"}` {
+			t.Errorf("raw reply keys or bytes forwarded: %q %v", b, err)
+		}
+		return mailResponse(200, `{}`), nil
+	}))
+	s := httptest.NewServer(m)
+	defer s.Close()
+	r, _ := http.NewRequest("POST", s.URL+"/v1/reply/id", strings.NewReader(`{ "bo\u0064y" : "hello" }`))
+	r.Header.Set("Content-Type", "application/json")
+	resp, err := s.Client().Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatal("valid re-encoded reply refused", resp.StatusCode)
 	}
 }
 

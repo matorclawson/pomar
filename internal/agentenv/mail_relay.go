@@ -180,11 +180,13 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// owner-side namespace, and no retry is silently re-keyed.
 			sum := sha256.Sum256([]byte(m.seat + "\x00" + m.guest + "\x00" + id))
 			object["request_id"], _ = json.Marshal(hex.EncodeToString(sum[:]))
-			body, _ = json.Marshal(object)
-			if len(body) > mailRequestLimit {
-				http.Error(w, "scoped mail body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
+		}
+		// Re-encode every permitted object, including replies. Raw guest
+		// keys and duplicate/Unicode-fold variants never reach upstream.
+		body, _ = json.Marshal(object)
+		if len(body) > mailRequestLimit {
+			http.Error(w, "scoped mail body too large", http.StatusRequestEntityTooLarge)
+			return
 		}
 	}
 	u := *m.upstream
