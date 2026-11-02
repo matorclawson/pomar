@@ -181,3 +181,7 @@ verify the actual host end/custody against independent owner policy before
 mapping; these fields or a digest alone are not evidence that the socket
 exists or belongs to the fixed relay. Native process inventory must show
 exactly one live shim and the root collector itself before stop.
+
+After the mail Exec has completed, neither process view may contain a
+UID1000 D1 driver. Even correct mail args cannot authorize a lingering or
+extra process. Only the one UID0 collector mode is expected at inventory.

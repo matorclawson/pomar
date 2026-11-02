@@ -204,3 +204,17 @@ func TestNativePlanRejectsOldSchemaAndMappingDrift(t *testing.T) {
 		})
 	}
 }
+
+func TestPreStopInventoryRefusesAnyLingeringMailDriver(t *testing.T) {
+	_, p := fixture(t)
+	for _, args := range [][]string{nil, {"/pomar/d1-driver", "-mode", "other"}, append([]string{"/pomar/d1-driver"}, mailArgs(p)...)} {
+		row := ProcessRow{PID: 100, UID: 1000, Exe: "/pomar/d1-driver", Args: args}
+		if allowedProcess(row) {
+			t.Fatal("lingering UID1000 driver accepted after completed mail Exec")
+		}
+		s := ProcessSnapshot{ScopeID: "scope", Kind: OwnerGuestInventoryKind, Rows: []ProcessRow{row}}
+		if validateProcesses(s, "scope") == nil {
+			t.Fatal("unexpected mail process accepted")
+		}
+	}
+}

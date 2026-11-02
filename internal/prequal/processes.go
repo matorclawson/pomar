@@ -48,7 +48,9 @@ func allowedProcess(p ProcessRow) bool {
 	case "/pomar/isolation-probe":
 		return p.UID == 1000
 	case "/pomar/d1-driver":
-		return p.UID == 1000 || p.UID == 0 && len(p.Args) == 5 && p.Args[0] == "/pomar/d1-driver" && p.Args[1] == "-mode" && p.Args[2] == "processes" && p.Args[3] == "-scope" && p.Args[4] != ""
+		// Mail Exec has completed before either process view. Any lingering
+		// UID1000 driver is unexpected, even with otherwise correct mail args.
+		return p.UID == 0 && len(p.Args) == 5 && p.Args[0] == "/pomar/d1-driver" && p.Args[1] == "-mode" && p.Args[2] == "processes" && p.Args[3] == "-scope" && p.Args[4] != ""
 	default:
 		return false
 	}
