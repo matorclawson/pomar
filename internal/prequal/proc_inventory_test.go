@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ func procFixture(t *testing.T, pid, uid int, exe string, kernel bool) string {
 	writeProc(t, dir, "stat", procStat(pid, flags, 100))
 	writeProc(t, dir, "status", fmt.Sprintf("Name:\tignored\nUid:\t%d %d %d %d\n", uid, uid, uid, uid))
 	if exe != "" {
+		writeProc(t, dir, "cmdline", exe+"\x00")
 		if e := os.Symlink(exe, filepath.Join(dir, "exe")); e != nil {
 			t.Fatal(e)
 		}
@@ -61,7 +63,10 @@ func TestProcUsesFullExeAndKernelFlag(t *testing.T) {
 				t.Fatal(e)
 			}
 			want := ProcessRow{PID: 42, UID: tc.uid, Exe: tc.exe, KernelThread: tc.kernel}
-			if len(got.Rows) != 1 || got.Rows[0] != want || got.ScopeID != "scope-original" {
+			if !tc.kernel {
+				want.Args = []string{tc.exe}
+			}
+			if len(got.Rows) != 1 || !reflect.DeepEqual(got.Rows[0], want) || got.ScopeID != "scope-original" {
 				t.Fatalf("%+v", got)
 			}
 			if allowedProcess(got.Rows[0]) != tc.allowed {

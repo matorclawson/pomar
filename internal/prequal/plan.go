@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-const PlanSchema = "pomar.pre-model-plan/v1"
-const ResultSchema = "pomar.pre-model-observations/v1"
+const PlanSchema = "pomar.pre-model-plan/v2"
+const ResultSchema = "pomar.pre-model-observations/v2"
 
 // These are the independently reviewed M1/M2/S1/S2 repaired probe pins.
 const ProbeCommit = "c431ec15f2f23e417c98227919fd766ce51163de"
@@ -29,33 +29,48 @@ type Artifact struct {
 // Plan is deliberately not an agentenv.EnvironmentProfile or seatdecl.Compiled.
 // Declaration/catalogue binding is made by the owning adapter; arbitrary
 // guest JSON and a nonempty qualification string cannot create one.
+type MailMapping struct {
+	HostPath          string `json:"host_path"`
+	GuestPath         string `json:"guest_path"`
+	Direction         string `json:"direction"`
+	Mode              uint32 `json:"mode"`
+	Seat              string `json:"seat"`
+	DeniedPairsSHA256 string `json:"denied_pairs_sha256"`
+}
+
 type Plan struct {
-	RegistryStore        string    `json:"registry_store"`
-	RegisteredAt         string    `json:"registered_at"`
-	RegistryRecordSHA256 string    `json:"registry_record_sha256"`
-	Schema               string    `json:"schema"`
-	Operation            string    `json:"operation"`
-	Seat                 string    `json:"seat"`
-	Environment          string    `json:"environment"`
-	Session              string    `json:"session"`
-	Incarnation          string    `json:"incarnation"`
-	DeclarationSHA256    string    `json:"declaration_sha256"`
-	CatalogueSHA256      string    `json:"catalogue_sha256"`
-	ImageSHA256          string    `json:"image_sha256"`
-	SourceCommit         string    `json:"source_commit"`
-	AgentArchive         Artifact  `json:"agent_archive"`
-	CPUs                 int       `json:"cpus"`
-	MemoryGiB            int       `json:"memory_gib"`
-	DiskGiB              int       `json:"disk_gib"`
-	Deadline             time.Time `json:"original_deadline"`
-	ProbeCommit          string    `json:"probe_commit"`
-	Probe                Artifact  `json:"probe"`
-	ProbePlan            Artifact  `json:"probe_plan"`
-	Driver               Artifact  `json:"driver"`
-	HostControlsSHA256   string    `json:"host_controls_sha256"`
+	MailMapping          MailMapping `json:"mail_mapping"`
+	RegistryStore        string      `json:"registry_store"`
+	RegisteredAt         string      `json:"registered_at"`
+	RegistryRecordSHA256 string      `json:"registry_record_sha256"`
+	Schema               string      `json:"schema"`
+	Operation            string      `json:"operation"`
+	Seat                 string      `json:"seat"`
+	Environment          string      `json:"environment"`
+	Session              string      `json:"session"`
+	Incarnation          string      `json:"incarnation"`
+	DeclarationSHA256    string      `json:"declaration_sha256"`
+	CatalogueSHA256      string      `json:"catalogue_sha256"`
+	ImageSHA256          string      `json:"image_sha256"`
+	SourceCommit         string      `json:"source_commit"`
+	AgentArchive         Artifact    `json:"agent_archive"`
+	CPUs                 int         `json:"cpus"`
+	MemoryGiB            int         `json:"memory_gib"`
+	DiskGiB              int         `json:"disk_gib"`
+	Deadline             time.Time   `json:"original_deadline"`
+	ProbeCommit          string      `json:"probe_commit"`
+	Probe                Artifact    `json:"probe"`
+	ProbePlan            Artifact    `json:"probe_plan"`
+	Driver               Artifact    `json:"driver"`
+	MailShim             Artifact    `json:"mail_shim"`
+	HostControlsSHA256   string      `json:"host_controls_sha256"`
 }
 
 func (p Plan) Validate(now time.Time) error {
+	m := p.MailMapping
+	if !filepath.IsAbs(m.HostPath) || filepath.Clean(m.HostPath) != m.HostPath || m.GuestPath != "/run/pomar/mail.sock" || m.Direction != "into" || m.Mode != 0600 || m.Seat != p.Seat || !sha.MatchString(m.DeniedPairsSHA256) {
+		return errors.New("sole owner-bound disposable mail mapping and denied pairs required")
+	}
 	if !filepath.IsAbs(p.RegistryStore) || filepath.Clean(p.RegistryStore) != p.RegistryStore || !sha.MatchString(p.RegistryRecordSHA256) {
 		return errors.New("actual canonical registry store and captured record digest required")
 	}
@@ -75,7 +90,7 @@ func (p Plan) Validate(now time.Time) error {
 	if p.ProbeCommit != ProbeCommit || p.Probe.SHA256 != ProbeSHA256 {
 		return errors.New("only the fixed repaired isolation probe may run")
 	}
-	for _, a := range []Artifact{p.AgentArchive, p.Probe, p.ProbePlan, p.Driver} {
+	for _, a := range []Artifact{p.AgentArchive, p.Probe, p.ProbePlan, p.Driver, p.MailShim} {
 		if !filepath.IsAbs(a.Path) || filepath.Clean(a.Path) != a.Path || !sha.MatchString(a.SHA256) {
 			return errors.New("owner-selected canonical artifact paths and exact SHA256 required")
 		}

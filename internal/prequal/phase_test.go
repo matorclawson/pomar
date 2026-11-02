@@ -25,7 +25,7 @@ func fixture(t *testing.T) (string, Plan) {
 		t.Fatal(e)
 	}
 	a := Artifact{Path: filepath.Join(dir, "public-artifact"), SHA256: strings.Repeat("a", 64)}
-	p := Plan{RegistryStore: filepath.Join(dir, "registry"), RegisteredAt: time.Now().UTC().Format(time.RFC3339Nano), RegistryRecordSHA256: strings.Repeat("c", 64), Schema: PlanSchema, Operation: "original", Seat: "d1-disposable", Environment: "d1-env", Session: "d1-session", Incarnation: "d1-incarnation", DeclarationSHA256: a.SHA256, CatalogueSHA256: a.SHA256, ImageSHA256: a.SHA256, SourceCommit: strings.Repeat("b", 40), AgentArchive: a, CPUs: 1, MemoryGiB: 1, DiskGiB: 4, Deadline: time.Now().Add(time.Minute), ProbeCommit: ProbeCommit, Probe: Artifact{a.Path, ProbeSHA256}, ProbePlan: a, Driver: a, HostControlsSHA256: a.SHA256}
+	p := Plan{MailMapping: MailMapping{HostPath: filepath.Join(dir, "mail.sock"), GuestPath: "/run/pomar/mail.sock", Direction: "into", Mode: 0600, Seat: "d1-disposable", DeniedPairsSHA256: a.SHA256}, RegistryStore: filepath.Join(dir, "registry"), RegisteredAt: time.Now().UTC().Format(time.RFC3339Nano), RegistryRecordSHA256: strings.Repeat("c", 64), Schema: PlanSchema, Operation: "original", Seat: "d1-disposable", Environment: "d1-env", Session: "d1-session", Incarnation: "d1-incarnation", DeclarationSHA256: a.SHA256, CatalogueSHA256: a.SHA256, ImageSHA256: a.SHA256, SourceCommit: strings.Repeat("b", 40), AgentArchive: a, CPUs: 1, MemoryGiB: 1, DiskGiB: 4, Deadline: time.Now().Add(time.Minute), ProbeCommit: ProbeCommit, Probe: Artifact{a.Path, ProbeSHA256}, ProbePlan: a, Driver: a, MailShim: a, HostControlsSHA256: a.SHA256}
 	return dir, p
 }
 
@@ -88,10 +88,21 @@ func (v *vmFake) Boot(_ context.Context, p Plan, _ Registration) (string, error)
 	}
 	return "owned-scope", nil
 }
+func (v *vmFake) StartTransport(_ context.Context, scope, operation string, c Command) (Transport, error) {
+	return Transport{ScopeID: scope, Operation: operation, Handle: "actual-test-process", Command: c, Ready: true}, nil
+}
 func (v *vmFake) Exec(_ context.Context, c Command) (Output, error) {
 	v.calls = append(v.calls, c)
 	if c.Program != "/pomar/isolation-probe" && c.Program != "/pomar/d1-driver" && c.Program != "/bin/ps" {
 		return Output{}, errors.New("FORBIDDEN MODEL/BROKER/SUPERVISOR EXEC")
+	}
+	if c.Kind == "owner-guest-inventory" {
+		rows := []ProcessRow{{PID: 1, UID: 0, Exe: "/bin/sleep"}, {PID: 2, UID: 0, Exe: "/bin/ps"}, {PID: 3, UID: 0, Exe: "/pomar/shim", Args: mailShimArgs()}, {PID: 4, UID: 0, Exe: "/pomar/d1-driver", Args: append([]string{"/pomar/d1-driver"}, collectorCommand("owned-scope").Args...)}}
+		if v.hiddenHostAgent {
+			rows = append(rows, ProcessRow{PID: 9, UID: 1000, Exe: "/usr/bin/node"})
+		}
+		raw, _ := json.Marshal(ProcessSnapshot{ScopeID: "owned-scope", Kind: OwnerGuestInventoryKind, Rows: rows})
+		return Output{Bytes: raw}, nil
 	}
 	if c.Kind == "guest-process-list" {
 		v.listings++
@@ -117,13 +128,9 @@ func (v *vmFake) Stop(_ context.Context, scope string) (Drain, error) {
 }
 func (v *vmFake) HostListing(context.Context, string) (ProcessSnapshot, error) {
 	if v.stops > 0 {
-		return ProcessSnapshot{ScopeID: "owned-scope", Rows: []ProcessRow{}}, nil
+		return ProcessSnapshot{ScopeID: "owned-scope", Kind: HostAfterStopKind, Rows: []ProcessRow{}}, nil
 	}
-	rows := []ProcessRow{{PID: 1, UID: 0, Exe: "/bin/sleep"}, {PID: 2, UID: 0, Exe: "/bin/ps"}}
-	if v.hiddenHostAgent {
-		rows = append(rows, ProcessRow{PID: 9, UID: 1000, Exe: "/usr/bin/node"})
-	}
-	return ProcessSnapshot{ScopeID: "owned-scope", Rows: rows}, nil
+	return ProcessSnapshot{}, errors.New("host view cannot substitute for pre-stop in-guest inventory")
 }
 
 func simulatedVerify(Artifact) error { return nil }
@@ -135,7 +142,7 @@ func TestSuccessRecordsAllExecsAndRetiresWithoutAuthority(t *testing.T) {
 	if e != nil || r.State != "observations_complete_requires_owner_join" || reg.calls != 1 || reg.retires != 1 || v.stops != 1 {
 		t.Fatalf("%+v %v", r, e)
 	}
-	if r.AdmissionGranted || r.InteractiveQualified || r.Retirement == nil || r.HostBefore == nil || r.HostAfter == nil || len(r.Executions) != 4 {
+	if r.AdmissionGranted || r.InteractiveQualified || r.Retirement == nil || r.HostBefore == nil || r.HostAfter == nil || len(r.Executions) != 5 {
 		t.Fatal(r)
 	}
 	b1, _ := json.Marshal(v.calls)
@@ -230,7 +237,7 @@ func TestClosedExecutorRejectsModelBeforeBackend(t *testing.T) {
 		t.Fatal(e)
 	}
 	v := &vmFake{}
-	r := Result{}
+	r := Result{Plan: p, ScopeID: "owned-scope"}
 	for _, program := range []string{"/pomar/agent-broker", "/pomar/agent-guest", "/bin/seat-supervisor", "/opt/codex", "/opt/claude", "/bin/sh"} {
 		if _, e = j.execute(context.Background(), v, Command{"isolation", program, nil, 1000}, &r); e == nil {
 			t.Fatal("forbidden exec admitted", program)
@@ -417,12 +424,12 @@ func TestSoleApprovedRowCannotBeChangedByPlan(t *testing.T) {
 }
 func TestClosedProcessAllowlistRejectsTruncationInterpretersAndHiddenHostRows(t *testing.T) {
 	for _, exe := range []string{"/pomar/pomar-agent-gue", "/opt/pomar-agent-guest", "/usr/bin/node", "/usr/bin/python3", "/bin/sh", "/tmp/ps", "/pomar/isolation-prob"} {
-		s := ProcessSnapshot{"owned", []ProcessRow{{PID: 3, UID: 1000, Exe: exe}}}
+		s := ProcessSnapshot{ScopeID: "owned", Kind: OwnerGuestInventoryKind, Rows: []ProcessRow{{PID: 3, UID: 1000, Exe: exe}}}
 		if validateProcesses(s, "owned") == nil {
 			t.Fatal("host executable accepted", exe)
 		}
 	}
-	s := ProcessSnapshot{"owned", []ProcessRow{{PID: 1, UID: 0, Exe: "/bin/sleep"}}}
+	s := ProcessSnapshot{ScopeID: "owned", Kind: OwnerGuestInventoryKind, Rows: []ProcessRow{{PID: 1, UID: 0, Exe: "/bin/sleep"}}}
 	for _, raw := range []string{"3 1000 pomar-agent-gue\n", "3 1000 /usr/bin/node agent.js\n", "3 1000 [fake-kernel]\n"} {
 		if validateGuestProcesses([]byte(raw), s) == nil {
 			t.Fatal("guest executable accepted", raw)
@@ -432,7 +439,7 @@ func TestClosedProcessAllowlistRejectsTruncationInterpretersAndHiddenHostRows(t 
 	reg := &registryFake{approval: bindingFor(p)}
 	vm := &vmFake{hiddenHostAgent: true}
 	r, e := run(context.Background(), dir, p, reg, vm, simulatedVerify)
-	if e == nil || r.State != "failed_stopped" || r.HostBefore == nil || len(r.HostBefore.Rows) != 3 {
+	if e == nil || r.State != "failed_stopped" || r.HostBefore == nil || len(r.HostBefore.Rows) != 5 {
 		t.Fatal("host-only agent omitted by guest accepted", r, e)
 	}
 }
@@ -448,9 +455,9 @@ func TestOversizedExecIsDurablyRecordedAsFailure(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	r := Result{}
+	r := Result{Plan: p, ScopeID: "owned-scope"}
 	v := &oversizedVM{}
-	if _, e = j.execute(context.Background(), v, Command{"isolation", "/pomar/isolation-probe", nil, 1000}, &r); e == nil {
+	if _, e = j.execute(context.Background(), v, Command{"isolation", "/pomar/isolation-probe", []string{"-plan", "/pomar/probe-plan.json", "-plan-sha256", p.ProbePlan.SHA256, "-deadline", time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339)}, 1000}, &r); e == nil {
 		t.Fatal("oversize accepted")
 	}
 	raw, e := os.ReadFile(filepath.Join(j.dir, eventName(2)))

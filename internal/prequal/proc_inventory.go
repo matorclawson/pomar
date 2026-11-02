@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,7 +43,7 @@ func collectProc(ctx context.Context, path, scope string, between func(int) erro
 	if err != nil {
 		return empty, err
 	}
-	out := ProcessSnapshot{ScopeID: scope, Rows: make([]ProcessRow, 0, len(ids))}
+	out := ProcessSnapshot{ScopeID: scope, Kind: OwnerGuestInventoryKind, Rows: make([]ProcessRow, 0, len(ids))}
 	for _, pid := range ids {
 		if err := ctx.Err(); err != nil {
 			return empty, err
@@ -63,7 +64,7 @@ func collectProc(ctx context.Context, path, scope string, between func(int) erro
 		if e != nil {
 			return empty, fmt.Errorf("pid %d inventory: %w", pid, e)
 		}
-		if first != second {
+		if !reflect.DeepEqual(first, second) {
 			return empty, fmt.Errorf("pid %d identity changed during inventory", pid)
 		}
 		out.Rows = append(out.Rows, second.row)
@@ -219,6 +220,20 @@ func readProcIdentity(dir *os.Root, pid int) (procIdentity, error) {
 	} else if err != nil || len(exe) == 0 || len(exe) > maxProcMetadata || !strings.HasPrefix(exe, "/") {
 		return out, errors.New("full proc executable unavailable")
 	}
-	out = procIdentity{row: ProcessRow{PID: pid, UID: uid, Exe: exe, KernelThread: kernel}, birth: birth}
+	var args []string
+	if !kernel {
+		cmdline, e := procBytes(dir, "cmdline")
+		if e != nil {
+			return out, e
+		}
+		if len(cmdline) == 0 || cmdline[len(cmdline)-1] != 0 {
+			return out, errors.New("bounded complete proc cmdline required")
+		}
+		args = strings.Split(string(cmdline[:len(cmdline)-1]), "\x00")
+		if len(args) > 256 {
+			return out, errors.New("proc argv exceeds bound")
+		}
+	}
+	out = procIdentity{row: ProcessRow{PID: pid, UID: uid, Exe: exe, KernelThread: kernel, Args: args}, birth: birth}
 	return out, nil
 }
