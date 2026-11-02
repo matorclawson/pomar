@@ -223,3 +223,9 @@ handler a foreign X-Zmail-Instance is refused locally before forwarding;
 it is not merely overwritten. The native driver must validate that actual
 layer, and the separate node-row/live-file prerequisites still apply. This
 source seam is not installed in release410 and provides no live D1 pathname.
+
+The root collector inventory enforces exactly one live shim and one root
+collector. A missing or duplicate instance refuses qualification. The earlier
+guest ps view must include the shim PID from that inventory and refuses any
+D1 driver: its own collector has not been invoked at that point. These are
+sequential observations, not a claim of simultaneous process snapshots.

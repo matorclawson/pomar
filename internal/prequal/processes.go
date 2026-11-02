@@ -61,15 +61,28 @@ func validateProcesses(s ProcessSnapshot, scope string) error {
 		return errors.New("actual bounded owner process inventory required")
 	}
 	seen := map[int]bool{}
+	shims, collectors := 0, 0
 	for _, p := range s.Rows {
 		if seen[p.PID] || !allowedProcess(p) || p.Exe == "/pomar/d1-driver" && p.UID == 0 && p.Args[4] != scope {
 			return errors.New("owner process outside closed executable/uid allowlist")
 		}
 		seen[p.PID] = true
+		if p.Exe == "/pomar/shim" {
+			shims++
+		}
+		if p.Exe == "/pomar/d1-driver" {
+			collectors++
+		}
+	}
+	if shims != 1 || collectors != 1 {
+		return errors.New("exactly one live shim and root collector required")
 	}
 	return nil
 }
 func validateGuestProcesses(raw []byte, host ProcessSnapshot) error {
+	if err := validateProcesses(host, host.ScopeID); err != nil {
+		return err
+	}
 	if len(raw) == 0 || len(raw) > 1<<20 {
 		return errors.New("bounded guest process view required")
 	}
@@ -105,11 +118,16 @@ func validateGuestProcesses(raw []byte, host ProcessSnapshot) error {
 			if known && actual.Exe == observed.Exe {
 				observed.Args = actual.Args
 			}
-			if !allowedProcess(observed) || (known && (actual.KernelThread || actual.UID != uid || actual.Exe != observed.Exe)) {
+			if observed.Exe == "/pomar/d1-driver" || !allowedProcess(observed) || (known && (actual.KernelThread || actual.UID != uid || actual.Exe != observed.Exe)) {
 				return errors.New("guest executable truncated/spoofed/not allowlisted")
 			}
 		}
 
+	}
+	for _, p := range host.Rows {
+		if p.Exe == "/pomar/shim" && !seen[p.PID] {
+			return errors.New("guest view omits live shim")
+		}
 	}
 	if len(seen) == 0 {
 		return errors.New("empty guest view")

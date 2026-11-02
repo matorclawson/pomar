@@ -109,7 +109,7 @@ func (v *vmFake) Exec(_ context.Context, c Command) (Output, error) {
 		if v.agentAtDrain && v.listings >= 2 {
 			return Output{Bytes: []byte("4 1000 /opt/codex\n")}, nil
 		}
-		return Output{Bytes: []byte("1 0 /bin/sleep\n2 0 /bin/ps\n")}, nil
+		return Output{Bytes: []byte("1 0 /bin/sleep\n2 0 /bin/ps\n3 0 /pomar/shim\n")}, nil
 	}
 	if v.failProbe && c.Kind == "isolation" {
 		return Output{Exit: 1, Bytes: []byte("denial failed")}, nil
