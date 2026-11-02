@@ -88,8 +88,8 @@ history API is a prerequisite. Null fields alone still prove nothing.
 The pre-stop owner-executed in-guest inventory carries the owning adapter's
 scope, PID, UID, full executable path and complete argv. It is not a host
 process view or a model-phase qualification. They are checked against a closed path/UID allowlist, including
-only the configured init/sleep paths, verified kernel threads, the pinned
-probe/driver, and ps. Interpreters, truncated names and unknown executables
+only the configured init/sleep paths, verified kernel threads, the exact
+root collector/relay shim, and ps. Interpreters, truncated names and unknown executables
 are rejected. Kernel status must come from the owner collector; brackets in
 guest text never confer it. Guest ps uses full arguments as a second view and
 the same executable policy. The owner-executed guest snapshot is collected before stop, so
@@ -185,3 +185,8 @@ exactly one live shim and the root collector itself before stop.
 After the mail Exec has completed, neither process view may contain a
 UID1000 D1 driver. Even correct mail args cannot authorize a lingering or
 extra process. Only the one UID0 collector mode is expected at inventory.
+
+The isolation probe has also completed before either pre-stop inventory.
+Any lingering or extra probe is refused in both views, independently of UID
+or arguments. The earlier source allowance is not carried into this backend
+follow-up.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,6 +216,22 @@ func TestPreStopInventoryRefusesAnyLingeringMailDriver(t *testing.T) {
 		s := ProcessSnapshot{ScopeID: "scope", Kind: OwnerGuestInventoryKind, Rows: []ProcessRow{row}}
 		if validateProcesses(s, "scope") == nil {
 			t.Fatal("unexpected mail process accepted")
+		}
+	}
+}
+
+func TestPreStopInventoryRefusesLingeringIsolationProbeInBothViews(t *testing.T) {
+	for _, uid := range []int{0, 1000} {
+		row := ProcessRow{PID: 100, UID: uid, Exe: "/pomar/isolation-probe", Args: []string{"/pomar/isolation-probe", "-plan", "/pomar/probe-plan.json"}}
+		if allowedProcess(row) {
+			t.Fatal("completed probe accepted in process inventory")
+		}
+		s := ProcessSnapshot{ScopeID: "scope", Kind: OwnerGuestInventoryKind, Rows: []ProcessRow{row}}
+		if validateProcesses(s, "scope") == nil {
+			t.Fatal("probe accepted in owner-executed guest inventory")
+		}
+		if validateGuestProcesses([]byte(fmt.Sprintf("100 %d /pomar/isolation-probe -plan /pomar/probe-plan.json\n", uid)), s) == nil {
+			t.Fatal("probe accepted in ps view")
 		}
 	}
 }

@@ -46,7 +46,8 @@ func allowedProcess(p ProcessRow) bool {
 	case "/sbin/init", "/sbin/vminitd", "/bin/sleep", "/usr/bin/sleep", "/bin/ps", "/usr/bin/ps":
 		return p.UID == 0
 	case "/pomar/isolation-probe":
-		return p.UID == 1000
+		// The awaited probe completed before either pre-stop inventory.
+		return false
 	case "/pomar/d1-driver":
 		// Mail Exec has completed before either process view. Any lingering
 		// UID1000 driver is unexpected, even with otherwise correct mail args.
