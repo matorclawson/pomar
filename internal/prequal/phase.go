@@ -47,17 +47,21 @@ type Drain struct {
 
 // VM is a distinct disposable owner backend, never the ordinary agent launch
 // path. Boot stages the EXACT verified bytes and creates the VM but issues no
-// hidden guest exec. Every guest exec is routed through Exec below. HostListing
-// is the owning host's actual scope listing at drain, not a guest attestation.
+// hidden guest exec. The explicit StartTransport and Exec calls are journaled.
+// Pre-stop inventory is owner-executed in-guest with no model, not a host view.
+// HostListing is used only for the host's post-stop empty scope observation.
 // No concrete production adapter is supplied by this package.
 type VM interface {
 	Boot(context.Context, Plan, Registration) (scopeID string, err error)
+	StartTransport(context.Context, string, string, Command) (Transport, error)
 	Exec(context.Context, Command) (Output, error)
 	Stop(context.Context, string) (Drain, error)
 	HostListing(context.Context, string) (ProcessSnapshot, error)
 }
 type Result struct {
-	HostBefore           *ProcessSnapshot `json:"host_processes_before_stop,omitempty"`
+	HostBefore           *ProcessSnapshot `json:"owner_guest_processes_before_stop,omitempty"`
+	ScopeID              string           `json:"scope_id,omitempty"`
+	Transport            *Transport       `json:"mail_transport,omitempty"`
 	HostAfter            *ProcessSnapshot `json:"host_processes_after_stop,omitempty"`
 	ProbeObservation     json.RawMessage  `json:"probe_observation,omitempty"`
 	MailObservation      json.RawMessage  `json:"mail_observation,omitempty"`
@@ -104,8 +108,8 @@ func verifyArtifact(a Artifact) error {
 func (j *journal) execute(ctx context.Context, v VM, c Command, r *Result) (Output, error) {
 	// A closed executable set makes accidental broker/supervisor calls fail
 	// before the backend sees them. Plan/guest JSON cannot expand it.
-	if !(c.Kind == "isolation" && c.Program == "/pomar/isolation-probe" && c.UID == 1000 || c.Kind == "mail-d1" && c.Program == "/pomar/d1-driver" && c.UID == 1000 || c.Kind == "guest-process-list" && c.Program == "/bin/ps" && c.UID == 0) {
-		return Output{}, errors.New("pre-model phase refuses broker, supervisor or arbitrary exec")
+	if !allowedPhaseCommand(c, r.Plan, r.ScopeID) {
+		return Output{}, errors.New("pre-model phase refuses non-exact exec role/uid/argv")
 	}
 	if e := j.event(struct {
 		Stage   string
@@ -114,7 +118,9 @@ func (j *journal) execute(ctx context.Context, v VM, c Command, r *Result) (Outp
 		return Output{}, e
 	}
 	r.Executions = append(r.Executions, c)
-	out, e := v.Exec(ctx, c)
+	sent := c
+	sent.Args = append([]string(nil), c.Args...)
+	out, e := v.Exec(ctx, sent)
 	reportedBytes := len(out.Bytes)
 	over := reportedBytes > 1<<20
 	if over {
@@ -166,7 +172,7 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 	if approvalErr != nil || !approved.matches(p) {
 		return r, errors.New("plan differs from the sole owner-approved registration")
 	}
-	for _, a := range []Artifact{p.AgentArchive, p.Probe, p.ProbePlan, p.Driver} {
+	for _, a := range []Artifact{p.AgentArchive, p.Probe, p.ProbePlan, p.Driver, p.MailShim} {
 		if err = verify(a); err != nil {
 			return r, err
 		}
@@ -195,8 +201,12 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 			// Both views are collected before stop: a hidden agent must not vanish
 			// from the evidence merely because the VM has subsequently drained.
 			guest, gerr := j.execute(cleanup, v, Command{"guest-process-list", "/bin/ps", []string{"-eo", "pid=,uid=,args="}, 0}, &r)
-			host, herr := v.HostListing(cleanup, scope)
+			inventory, herr := j.execute(cleanup, v, collectorCommand(scope), &r)
+			var host ProcessSnapshot
 			if herr == nil {
+				host, herr = parseInventory(inventory.Bytes, scope)
+			}
+			if host.ScopeID != "" {
 				r.HostBefore = &host
 			}
 			if herr != nil || gerr != nil || validateProcesses(host, scope) != nil || validateGuestProcesses(guest.Bytes, host) != nil {
@@ -212,7 +222,7 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 			if x == nil {
 				r.HostAfter = &after
 			}
-			if x != nil || after.ScopeID != scope || after.Rows == nil || len(after.Rows) != 0 {
+			if x != nil || after.Kind != HostAfterStopKind || after.ScopeID != scope || after.Rows == nil || len(after.Rows) != 0 {
 				err = errors.Join(err, errors.New("post-stop owner inventory not empty/confirmed"))
 				safe = false
 			}
@@ -289,6 +299,10 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 	if scope == "" {
 		return r, errors.New("boot returned no actual owner scope")
 	}
+	r.ScopeID = scope
+	if err = j.startTransport(phase, v, &r); err != nil {
+		return r, err
+	}
 	// The probe's own deadline is at most60s within the original phase budget.
 	probeEnd := time.Now().Add(55 * time.Second)
 	if p.Deadline.Before(probeEnd) {
@@ -302,7 +316,7 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 		return r, err
 	}
 	r.ProbeObservation = append([]byte(nil), probe.Bytes...)
-	mail, me := j.execute(phase, v, Command{"mail-d1", "/pomar/d1-driver", []string{"-seat", p.Seat, "-operation", p.Operation, "-deadline", p.Deadline.UTC().Format(time.RFC3339)}, 1000}, &r)
+	mail, me := j.execute(phase, v, Command{"mail-d1", "/pomar/d1-driver", mailArgs(p), 1000}, &r)
 	if me != nil {
 		return r, me
 	}
@@ -317,7 +331,7 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 	if len(out.Bytes) == 0 {
 		return r, errors.New("guest process listing missing")
 	}
-	for _, a := range []Artifact{p.AgentArchive, p.Probe, p.ProbePlan, p.Driver} {
+	for _, a := range []Artifact{p.AgentArchive, p.Probe, p.ProbePlan, p.Driver, p.MailShim} {
 		if err = verify(a); err != nil {
 			return r, err
 		}

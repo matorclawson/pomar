@@ -6,8 +6,8 @@ launch command or an interactive-agent qualification. It has no production
 registry adapter, VM adapter or CLI yet. Calling it with missing adapters
 refuses before allocation. This source alone cannot run D1.
 
-The plan schema is `pomar.pre-model-plan/v1`; results use
-`pomar.pre-model-observations/v1`. Neither is accepted as the declaration or
+The plan schema is `pomar.pre-model-plan/v2`; results use
+`pomar.pre-model-observations/v2`. Neither is accepted as the declaration or
 class catalogue used by `seat profile` and `seat up`. Normal interactive
 qualification guards remain unchanged. Even a complete observation result
 always has `admission_granted=false` and `interactive_qualified=false`.
@@ -39,8 +39,9 @@ the in-memory test registry is not that implementation.
 verified public bytes and exact configuration and creates the owned scope;
 it must issue no hidden guest exec or agent startup. Every phase-issued exec
 is recorded durably before invocation and with bounded output afterwards.
-The only permitted programs are the pinned isolation probe, pinned D1
-observation driver (both UID1000), and a process listing. The probe has a
+The pinned isolation probe and mail driver run as UID1000; the driver
+collector mode and process listing run as UID0. The single maintained mail
+shim is started separately through the explicit journaled transport step. The probe has a
 subdeadline at most55 seconds within the original phase. No broker,
 supervisor, Codex, Claude or shell command is admitted by the phase executor.
 A recording fake VM test fails on any such exec. The normal Swift agent
@@ -51,7 +52,7 @@ The host-written terminal is `JOURNAL_ROOT/ORIGINAL_OPERATION/terminal.json`.
 Its sibling plan.json and numbered exclusive event files retain original
 inputs, register intent, every exec/result and retirement intent. Before
 retirement the phase collects a guest process listing, positive owner
-stop/reap with an empty live-process set, and the host's actual scope listing.
+stop/reap with an empty live-process set, and the host's actual post-stop scope listing.
 It records registration and retirement in the terminal, including the retirement
 command terminal and independent readback hashes. A retirement command can
 commit the status before teardown fails: that split outcome is retained as
@@ -84,13 +85,14 @@ another row. Council accepts Root's actual absent-path/fresh-registration and
 intended-use evidence for this sole row. No new registry field or general
 history API is a prerequisite. Null fields alone still prove nothing.
 
-Process inventories now carry the owning adapter's scope, PID, UID and full
-executable path. They are checked against a closed path/UID allowlist, including
+The pre-stop owner-executed in-guest inventory carries the owning adapter's
+scope, PID, UID, full executable path and complete argv. It is not a host
+process view or a model-phase qualification. They are checked against a closed path/UID allowlist, including
 only the configured init/sleep paths, verified kernel threads, the pinned
 probe/driver, and ps. Interpreters, truncated names and unknown executables
 are rejected. Kernel status must come from the owner collector; brackets in
 guest text never confer it. Guest ps uses full arguments as a second view and
-the same executable policy. The owner snapshot is collected before stop, so
+the same executable policy. The owner-executed guest snapshot is collected before stop, so
 an agent the guest omits cannot disappear from the evidence at teardown.
 A post-stop owner snapshot must positively report the same scope empty.
 Transient allowed ps processes may exit between the views; their absence
@@ -100,3 +102,82 @@ Oversized output is bounded and durably recorded as a failed exec-after event
 before the call returns an error. That record names the reported byte count
 and truncation. Native adapters must also bound their capture streams; this
 core check does not license unbounded transport buffering.
+
+### Linux process inventory library
+
+`CollectLinuxProcessSnapshot` is a library entry for a future pinned owner
+adapter. It refuses non-Linux/non-root callers and reads only the current
+namespace's `/proc`, checked as procfs. It obtains complete executable paths
+from `/proc/PID/exe`, equal real/effective/saved/filesystem UIDs from status,
+and kernel-thread identity from Linux's `PF_KTHREAD` bit. Mutable `comm`,
+argv and bracketed names never establish executable or kernel identity.
+Metadata reads and enumeration are bounded; missing, reused, changed,
+malformed or inaccessible entries fail the whole observation. Birth, UID,
+executable and kernel identity are sampled twice, with process membership
+checked again after enumeration. Returned rows are sorted by PID.
+
+This is a conservative, non-atomic view of process leaders. It cannot prove
+absence between samples or detect an executable changing away and back
+between reads. The existing closed exec policy and pinned image/driver are
+still required. The caller-supplied scope string is a label: only an owning
+adapter can establish the original VM/namespace binding. Guest-supplied JSON
+or an arbitrary invocation does not become independent owner evidence by
+using this library. No production executable, privileged transport, backend,
+allowlist exception or invocation is added here. Any eventual collector exec
+must be pinned and journaled through the qualification phase before use.
+
+The field references are [Linux proc stat](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html),
+[proc status](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html), and
+[Linux PF_KTHREAD](https://github.com/torvalds/linux/blob/master/include/linux/sched.h).
+
+Zombie or dead leaders explicitly refuse the inventory until the owner reaps
+them. Their missing executable link is never used to infer an allowlisted
+program, a kernel thread, or an empty process set.
+
+
+## Native phase transport contract
+
+Boot issues no hidden exec. `StartTransport` is a separate owner call with a
+journaled before/after record and original scope/operation/process handle.
+It starts only the existing pinned `/pomar/shim` as UID0 with exactly
+`-listen 127.0.0.1:7743 -socket /run/pomar/mail.sock -ready /pomar/shim-mail.ready`.
+The plan binds its staged bytes as `mail_shim`. Root is needed to connect the
+reviewed 0600/root mapped UDS and write the root-owned ready path; port7743
+itself does not require root. Unknown start/readiness or changed handle
+scope, original operation, executable, UID or args refuses further probes.
+The root collector checks full shim executable/UID/argv before shutdown.
+
+Only the host end of the approved disposable seat's fixed relay maps into
+`/run/pomar/mail.sock`, direction into the guest, permissions0600. Its actual
+canonical host path must be independently bound by the owning backend, never
+guessed or guest-selected. No agent control socket out of the guest,
+egress/module-proxy/other-seat socket or host directory share is allowed.
+Actual denied guest/host resource pairs still need the pinned probe plan and
+separate host-control evidence. This library supplies no live mapping.
+
+The driver has separate exact phase entries: UID1000 `-mode mail -seat SEAT
+-operation ORIGINAL -deadline DEADLINE`, and UID0 `-mode processes -scope
+ACTUAL_SCOPE`. Every invocation is recorded before and after. The latter
+returns `inventory_kind=owner_executed_in_guest_no_model` from the guest
+kernel via the owned transport; it never claims to be a host observation.
+The ordinary `ps` view is still checked separately. Post-stop `HostListing`
+must report `inventory_kind=host_scope_after_stop`, same scope and an
+explicitly empty process set. The owning backend must obtain that from its
+actual stop/reap/scope state, not relabel a guest document.
+
+These are phase interfaces with recording fixture tests, not production
+adapters or an executable native run. The driver mail bytes remain retained
+JSON awaiting the semantic wire validator and owner join. Messenger's actual
+foreign-message refusal status/body is still unverified; a source guess or
+json.Valid alone never completes native D1 acceptance. No normal profile or
+model launch becomes authorized by these observations.
+
+
+This successor uses v2 plan/result schemas. The earlier v1 source-only core
+plan is explicitly refused: v2 adds the required pinned mail shim and sole
+mail mapping (canonical owner host path, fixed guest path/direction/0600,
+exact disposable seat and denied-pairs digest). The concrete backend must
+verify the actual host end/custody against independent owner policy before
+mapping; these fields or a digest alone are not evidence that the socket
+exists or belongs to the fixed relay. Native process inventory must show
+exactly one live shim and the root collector itself before stop.

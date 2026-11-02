@@ -3,23 +3,30 @@ package prequal
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
 
-// ProcessSnapshot must come from the owner adapter's actual pid/uid/executable
-// inventory of the owned scope, independently of guest ps output. Exe is the
-// full executable path, never comm, argv[0], a basename or a truncated name.
-// KernelThread is derived by that trusted collector, never from [name] text.
+const OwnerGuestInventoryKind = "owner_executed_in_guest_no_model"
+const HostAfterStopKind = "host_scope_after_stop"
+
+// ProcessSnapshot before stop is owner-executed in the no-model guest's kernel,
+// through the pinned root collector and original VM transport. It is not a host
+// process view or model-phase qualification. Kind distinguishes that inventory
+// from the owning host's post-stop empty scope observation. Exe is full, never
+// comm/argv[0]/basename; KernelThread comes from actual kernel flags.
 type ProcessSnapshot struct {
 	ScopeID string       `json:"scope_id"`
+	Kind    string       `json:"inventory_kind"`
 	Rows    []ProcessRow `json:"rows"`
 }
 type ProcessRow struct {
-	PID          int    `json:"pid"`
-	UID          int    `json:"uid"`
-	Exe          string `json:"exe"`
-	KernelThread bool   `json:"kernel_thread"`
+	PID          int      `json:"pid"`
+	UID          int      `json:"uid"`
+	Exe          string   `json:"exe"`
+	KernelThread bool     `json:"kernel_thread"`
+	Args         []string `json:"args,omitempty"`
 }
 
 func allowedProcess(p ProcessRow) bool {
@@ -27,27 +34,32 @@ func allowedProcess(p ProcessRow) bool {
 		return false
 	}
 	if p.KernelThread {
-		return p.UID == 0 && p.Exe == ""
+		return p.UID == 0 && p.Exe == "" && len(p.Args) == 0
 	}
 	if !filepath.IsAbs(p.Exe) || filepath.Clean(p.Exe) != p.Exe {
 		return false
 	}
+	if p.Exe == "/pomar/shim" {
+		return p.UID == 0 && slices.Equal(p.Args, mailShimArgs())
+	}
 	switch p.Exe {
 	case "/sbin/init", "/sbin/vminitd", "/bin/sleep", "/usr/bin/sleep", "/bin/ps", "/usr/bin/ps":
 		return p.UID == 0
-	case "/pomar/isolation-probe", "/pomar/d1-driver":
+	case "/pomar/isolation-probe":
 		return p.UID == 1000
+	case "/pomar/d1-driver":
+		return p.UID == 1000 || p.UID == 0 && len(p.Args) == 5 && p.Args[0] == "/pomar/d1-driver" && p.Args[1] == "-mode" && p.Args[2] == "processes" && p.Args[3] == "-scope" && p.Args[4] != ""
 	default:
 		return false
 	}
 }
 func validateProcesses(s ProcessSnapshot, scope string) error {
-	if scope == "" || s.ScopeID != scope || len(s.Rows) == 0 || len(s.Rows) > 65536 {
+	if s.Kind != OwnerGuestInventoryKind || scope == "" || s.ScopeID != scope || len(s.Rows) == 0 || len(s.Rows) > 65536 {
 		return errors.New("actual bounded owner process inventory required")
 	}
 	seen := map[int]bool{}
 	for _, p := range s.Rows {
-		if seen[p.PID] || !allowedProcess(p) {
+		if seen[p.PID] || !allowedProcess(p) || p.Exe == "/pomar/d1-driver" && p.UID == 0 && p.Args[4] != scope {
 			return errors.New("owner process outside closed executable/uid allowlist")
 		}
 		seen[p.PID] = true
@@ -85,6 +97,11 @@ func validateGuestProcesses(raw []byte, host ProcessSnapshot) error {
 			}
 		} else {
 			observed := ProcessRow{PID: pid, UID: uid, Exe: f[2]}
+			// Infrastructure args are authoritative only in the paired root
+			// proc inventory; guest ps text alone cannot authorize them.
+			if known && actual.Exe == observed.Exe {
+				observed.Args = actual.Args
+			}
 			if !allowedProcess(observed) || (known && (actual.KernelThread || actual.UID != uid || actual.Exe != observed.Exe)) {
 				return errors.New("guest executable truncated/spoofed/not allowlisted")
 			}
