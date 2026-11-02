@@ -178,3 +178,13 @@ func TestProcSortedInventoryAndSymlinkPIDRefusal(t *testing.T) {
 		t.Fatal("symlink pid accepted")
 	}
 }
+
+func TestProcZombieRequiresExplicitOwnerReap(t *testing.T) {
+	root := procFixture(t, 42, 0, "", false)
+	dir := filepath.Join(root, "42")
+	writeProc(t, dir, "stat", strings.Replace(procStat(42, 0, 100), ") S ", ") Z ", 1))
+	got, e := collectProc(context.Background(), root, "original", nil)
+	if e == nil || !strings.Contains(e.Error(), "requires owner reap") || len(got.Rows) != 0 {
+		t.Fatalf("zombie silently accepted or dropped: %+v %v", got, e)
+	}
+}

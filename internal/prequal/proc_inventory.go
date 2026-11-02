@@ -167,6 +167,12 @@ func readProcIdentity(dir *os.Root, pid int) (procIdentity, error) {
 	if len(fields) < 20 || len(fields[0]) != 1 {
 		return out, errors.New("short proc stat")
 	}
+	// A zombie/dead leader has no executable link. Keep the inventory
+	// unaccepted until the owning parent reaps it; never infer an allowed
+	// executable or silently drop its PID.
+	if fields[0] == "Z" || fields[0] == "X" || fields[0] == "x" {
+		return out, errors.New("zombie or dead process requires owner reap before inventory")
+	}
 	flags, e1 := strconv.ParseUint(fields[6], 10, 64)
 	birth, e2 := strconv.ParseUint(fields[19], 10, 64)
 	if e1 != nil || e2 != nil {

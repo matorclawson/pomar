@@ -127,3 +127,7 @@ must be pinned and journaled through the qualification phase before use.
 The field references are [Linux proc stat](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html),
 [proc status](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html), and
 [Linux PF_KTHREAD](https://github.com/torvalds/linux/blob/master/include/linux/sched.h).
+
+Zombie or dead leaders explicitly refuse the inventory until the owner reaps
+them. Their missing executable link is never used to infer an allowlisted
+program, a kernel thread, or an empty process set.
