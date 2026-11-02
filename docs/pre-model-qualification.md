@@ -74,3 +74,29 @@ Council read and the operator's live-file action. This work creates no
 node, private tailnet daemon, policy change, login or credential. Native D1,
 interactive agent login/restart/echo/wake, profile adoption and production
 launch remain unfinished and separately observable.
+
+## Council source-review repair
+
+The owning Registry adapter supplies one frozen `ApprovedBinding` separately
+from the plan. For this run its private policy names the accepted fresh
+instance, store, registered_at and captured row digest; the plan cannot select
+another row. Council accepts Root's actual absent-path/fresh-registration and
+intended-use evidence for this sole row. No new registry field or general
+history API is a prerequisite. Null fields alone still prove nothing.
+
+Process inventories now carry the owning adapter's scope, PID, UID and full
+executable path. They are checked against a closed path/UID allowlist, including
+only the configured init/sleep paths, verified kernel threads, the pinned
+probe/driver, and ps. Interpreters, truncated names and unknown executables
+are rejected. Kernel status must come from the owner collector; brackets in
+guest text never confer it. Guest ps uses full arguments as a second view and
+the same executable policy. The owner snapshot is collected before stop, so
+an agent the guest omits cannot disappear from the evidence at teardown.
+A post-stop owner snapshot must positively report the same scope empty.
+Transient allowed ps processes may exit between the views; their absence
+from the later view is not treated as a mismatched PID.
+
+Oversized output is bounded and durably recorded as a failed exec-after event
+before the call returns an error. That record names the reported byte count
+and truncation. Native adapters must also bound their capture streams; this
+core check does not license unbounded transport buffering.

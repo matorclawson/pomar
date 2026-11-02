@@ -30,12 +30,17 @@ func fixture(t *testing.T) (string, Plan) {
 }
 
 type registryFake struct {
+	approval       Binding
 	retireFault    bool
 	calls, retires int
 	edit           func(*Registration)
 	fail           bool
 }
 
+func bindingFor(p Plan) Binding {
+	return Binding{p.Seat, p.RegistryStore, p.RegisteredAt, p.RegistryRecordSHA256}
+}
+func (r *registryFake) ApprovedBinding(context.Context) (Binding, error) { return r.approval, nil }
 func (r *registryFake) ClaimFreshRegistration(_ context.Context, p Plan) (Registration, error) {
 	r.calls++
 	if r.fail {
@@ -61,6 +66,7 @@ func (r *registryFake) Retire(_ context.Context, v Registration) (Retirement, er
 // Recording fake: fails on any broker/supervisor/model exec. This is a test
 // backend, not a concrete registry/VM implementation or native evidence.
 type vmFake struct {
+	hiddenHostAgent                                 bool
 	plan                                            Plan
 	badProbeReceipt                                 bool
 	calls                                           []Command
@@ -109,19 +115,27 @@ func (v *vmFake) Stop(_ context.Context, scope string) (Drain, error) {
 	v.stops++
 	return Drain{scope, true, !v.badStop, []int{}}, nil
 }
-func (v *vmFake) HostListing(context.Context, string) ([]byte, error) {
-	return []byte("owned-scope: no live processes; TEST ONLY\n"), nil
+func (v *vmFake) HostListing(context.Context, string) (ProcessSnapshot, error) {
+	if v.stops > 0 {
+		return ProcessSnapshot{ScopeID: "owned-scope", Rows: []ProcessRow{}}, nil
+	}
+	rows := []ProcessRow{{PID: 1, UID: 0, Exe: "/bin/sleep"}, {PID: 2, UID: 0, Exe: "/bin/ps"}}
+	if v.hiddenHostAgent {
+		rows = append(rows, ProcessRow{PID: 9, UID: 1000, Exe: "/usr/bin/node"})
+	}
+	return ProcessSnapshot{ScopeID: "owned-scope", Rows: rows}, nil
 }
+
 func simulatedVerify(Artifact) error { return nil }
 func TestSuccessRecordsAllExecsAndRetiresWithoutAuthority(t *testing.T) {
 	dir, p := fixture(t)
-	reg := &registryFake{}
+	reg := &registryFake{approval: bindingFor(p)}
 	v := &vmFake{}
 	r, e := run(context.Background(), dir, p, reg, v, simulatedVerify)
 	if e != nil || r.State != "observations_complete_requires_owner_join" || reg.calls != 1 || reg.retires != 1 || v.stops != 1 {
 		t.Fatalf("%+v %v", r, e)
 	}
-	if r.AdmissionGranted || r.InteractiveQualified || r.Retirement == nil || len(r.HostProcessListing) == 0 || len(r.Executions) != 4 {
+	if r.AdmissionGranted || r.InteractiveQualified || r.Retirement == nil || r.HostBefore == nil || r.HostAfter == nil || len(r.Executions) != 4 {
 		t.Fatal(r)
 	}
 	b1, _ := json.Marshal(v.calls)
@@ -153,7 +167,7 @@ func TestFreshDisposableRegistryBoundary(t *testing.T) {
 	for _, change := range []string{"host", "history-session", "history-mail", "existing-name", "different-operation", "missing-evidence", "unknown-effect"} {
 		t.Run(change, func(t *testing.T) {
 			dir, p := fixture(t)
-			reg := &registryFake{edit: func(r *Registration) {
+			reg := &registryFake{approval: bindingFor(p), edit: func(r *Registration) {
 				switch change {
 				case "host":
 					r.Runtime = "host-seat"
@@ -181,7 +195,7 @@ func TestFailuresRetainOriginalAndPositiveCleanup(t *testing.T) {
 	for _, which := range []string{"probe-failed", "unknown-stop", "agent-at-drain", "terminal-write-fault"} {
 		t.Run(which, func(t *testing.T) {
 			dir, p := fixture(t)
-			reg := &registryFake{}
+			reg := &registryFake{approval: bindingFor(p)}
 			v := &vmFake{failProbe: which == "probe-failed", badStop: which == "unknown-stop", agentAtDrain: which == "agent-at-drain", terminalFault: which == "terminal-write-fault", parent: dir}
 			r, e := run(context.Background(), dir, p, reg, v, simulatedVerify)
 			if e == nil || v.stops != 1 || r.AdmissionGranted || r.InteractiveQualified {
@@ -288,7 +302,7 @@ func TestNoDefaultAdaptersAndNoUnpinnedNativeStart(t *testing.T) {
 	if _, e := Run(context.Background(), dir, p, nil, nil); e == nil {
 		t.Fatal("missing owner adapters accepted")
 	}
-	reg := &registryFake{}
+	reg := &registryFake{approval: bindingFor(p)}
 	v := &vmFake{}
 	if _, e := Run(context.Background(), dir, p, reg, v); e == nil || reg.calls != 0 || v.boot != 0 {
 		t.Fatal("missing pinned public artifacts reached effects", e)
@@ -299,7 +313,7 @@ func TestCancelledOriginalDoesNotAllocateOrRegister(t *testing.T) {
 	dir, p := fixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	reg := &registryFake{}
+	reg := &registryFake{approval: bindingFor(p)}
 	v := &vmFake{}
 	if _, err := run(ctx, dir, p, reg, v, simulatedVerify); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
@@ -344,7 +358,7 @@ func TestProbeReceiptBindingAndNoSelfAcceptance(t *testing.T) {
 		}
 	}
 	dir, p := fixture(t)
-	reg := &registryFake{}
+	reg := &registryFake{approval: bindingFor(p)}
 	vm := &vmFake{badProbeReceipt: true}
 	r, e := run(context.Background(), dir, p, reg, vm, simulatedVerify)
 	if e == nil || r.State != "failed_stopped" || vm.stops != 1 {
@@ -354,7 +368,7 @@ func TestProbeReceiptBindingAndNoSelfAcceptance(t *testing.T) {
 
 func TestSplitRetirementRetainsCommittedRowAndTeardownFailure(t *testing.T) {
 	dir, p := fixture(t)
-	reg := &registryFake{retireFault: true}
+	reg := &registryFake{approval: bindingFor(p), retireFault: true}
 	vm := &vmFake{}
 	r, e := run(context.Background(), dir, p, reg, vm, simulatedVerify)
 	if e == nil || r.State != "unknown_retained" || r.Retirement == nil || r.Retirement.Status != "retired" || r.Retirement.TerminalExit != 1 || r.Retirement.Teardown != "unknown" || vm.stops != 1 || reg.retires != 1 {
@@ -368,7 +382,7 @@ func TestActualRegistrationBindingAndAuthorityDrift(t *testing.T) {
 	for _, change := range []string{"store", "registered-at", "record-sha", "authority", "status"} {
 		t.Run(change, func(t *testing.T) {
 			dir, p := fixture(t)
-			reg := &registryFake{edit: func(r *Registration) {
+			reg := &registryFake{approval: bindingFor(p), edit: func(r *Registration) {
 				switch change {
 				case "store":
 					r.Store += "-changed"
@@ -388,5 +402,69 @@ func TestActualRegistrationBindingAndAuthorityDrift(t *testing.T) {
 				t.Fatal(r, e)
 			}
 		})
+	}
+}
+
+func TestSoleApprovedRowCannotBeChangedByPlan(t *testing.T) {
+	dir, p := fixture(t)
+	reg := &registryFake{approval: bindingFor(p)}
+	vm := &vmFake{}
+	q := p
+	q.Seat = "another-fresh-seat"
+	if _, e := run(context.Background(), dir, q, reg, vm, simulatedVerify); e == nil || reg.calls != 0 || vm.boot != 0 {
+		t.Fatal("another row admitted", e)
+	}
+}
+func TestClosedProcessAllowlistRejectsTruncationInterpretersAndHiddenHostRows(t *testing.T) {
+	for _, exe := range []string{"/pomar/pomar-agent-gue", "/opt/pomar-agent-guest", "/usr/bin/node", "/usr/bin/python3", "/bin/sh", "/tmp/ps", "/pomar/isolation-prob"} {
+		s := ProcessSnapshot{"owned", []ProcessRow{{PID: 3, UID: 1000, Exe: exe}}}
+		if validateProcesses(s, "owned") == nil {
+			t.Fatal("host executable accepted", exe)
+		}
+	}
+	s := ProcessSnapshot{"owned", []ProcessRow{{PID: 1, UID: 0, Exe: "/bin/sleep"}}}
+	for _, raw := range []string{"3 1000 pomar-agent-gue\n", "3 1000 /usr/bin/node agent.js\n", "3 1000 [fake-kernel]\n"} {
+		if validateGuestProcesses([]byte(raw), s) == nil {
+			t.Fatal("guest executable accepted", raw)
+		}
+	}
+	dir, p := fixture(t)
+	reg := &registryFake{approval: bindingFor(p)}
+	vm := &vmFake{hiddenHostAgent: true}
+	r, e := run(context.Background(), dir, p, reg, vm, simulatedVerify)
+	if e == nil || r.State != "failed_stopped" || r.HostBefore == nil || len(r.HostBefore.Rows) != 3 {
+		t.Fatal("host-only agent omitted by guest accepted", r, e)
+	}
+}
+
+type oversizedVM struct{ vmFake }
+
+func (v *oversizedVM) Exec(context.Context, Command) (Output, error) {
+	return Output{Bytes: make([]byte, (1<<20)+1)}, nil
+}
+func TestOversizedExecIsDurablyRecordedAsFailure(t *testing.T) {
+	dir, p := fixture(t)
+	j, e := openJournal(dir, p.Operation)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r := Result{}
+	v := &oversizedVM{}
+	if _, e = j.execute(context.Background(), v, Command{"isolation", "/pomar/isolation-probe", nil, 1000}, &r); e == nil {
+		t.Fatal("oversize accepted")
+	}
+	raw, e := os.ReadFile(filepath.Join(j.dir, eventName(2)))
+	if e != nil {
+		t.Fatal("exec-after missing", e)
+	}
+	var event struct {
+		Stage         string
+		Failed        bool
+		OutputLimit   bool
+		ReportedBytes int
+		Output        Output
+	}
+	if json.Unmarshal(raw, &event) != nil || event.Stage != "exec-after" || !event.Failed || !event.OutputLimit || event.ReportedBytes != (1<<20)+1 || len(event.Output.Bytes) != 1<<20 {
+		t.Fatal("failed bounded output not recorded")
 	}
 }

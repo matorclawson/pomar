@@ -121,3 +121,16 @@ type Retirement struct {
 	TerminalExit          int    `json:"terminal_exit"`
 	Teardown              string `json:"teardown"`
 }
+
+// Binding comes from the owning adapter's fixed private approval, never from
+// the plan or a guest. For this run the owner approval names exactly one row.
+type Binding struct {
+	Instance     string `json:"instance"`
+	Store        string `json:"store"`
+	RegisteredAt string `json:"registered_at"`
+	RecordSHA256 string `json:"record_sha256"`
+}
+
+func (b Binding) matches(p Plan) bool {
+	return b.Instance == p.Seat && b.Store == p.RegistryStore && b.RegisteredAt == p.RegisteredAt && b.RecordSHA256 == p.RegistryRecordSHA256
+}

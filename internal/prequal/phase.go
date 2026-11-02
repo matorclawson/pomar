@@ -10,8 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -23,6 +21,7 @@ import (
 // the ORIGINAL operation. Retire must bind the actual instance/store/registered_at and captured
 // command terminal plus independent readback, including split outcomes.
 type Registry interface {
+	ApprovedBinding(context.Context) (Binding, error)
 	ClaimFreshRegistration(context.Context, Plan) (Registration, error)
 	Retire(context.Context, Registration) (Retirement, error)
 }
@@ -55,22 +54,23 @@ type VM interface {
 	Boot(context.Context, Plan, Registration) (scopeID string, err error)
 	Exec(context.Context, Command) (Output, error)
 	Stop(context.Context, string) (Drain, error)
-	HostListing(context.Context, string) ([]byte, error)
+	HostListing(context.Context, string) (ProcessSnapshot, error)
 }
 type Result struct {
-	ProbeObservation     json.RawMessage `json:"probe_observation,omitempty"`
-	MailObservation      json.RawMessage `json:"mail_observation,omitempty"`
-	Schema               string          `json:"schema"`
-	State                string          `json:"state"`
-	Plan                 Plan            `json:"plan"`
-	Registration         *Registration   `json:"registration,omitempty"`
-	Retirement           *Retirement     `json:"retirement,omitempty"`
-	Executions           []Command       `json:"executions"`
-	Drain                *Drain          `json:"drain,omitempty"`
-	HostProcessListing   []byte          `json:"host_process_listing,omitempty"`
-	TerminalPath         string          `json:"host_written_terminal_path"`
-	AdmissionGranted     bool            `json:"admission_granted"`
-	InteractiveQualified bool            `json:"interactive_qualified"`
+	HostBefore           *ProcessSnapshot `json:"host_processes_before_stop,omitempty"`
+	HostAfter            *ProcessSnapshot `json:"host_processes_after_stop,omitempty"`
+	ProbeObservation     json.RawMessage  `json:"probe_observation,omitempty"`
+	MailObservation      json.RawMessage  `json:"mail_observation,omitempty"`
+	Schema               string           `json:"schema"`
+	State                string           `json:"state"`
+	Plan                 Plan             `json:"plan"`
+	Registration         *Registration    `json:"registration,omitempty"`
+	Retirement           *Retirement      `json:"retirement,omitempty"`
+	Executions           []Command        `json:"executions"`
+	Drain                *Drain           `json:"drain,omitempty"`
+	TerminalPath         string           `json:"host_written_terminal_path"`
+	AdmissionGranted     bool             `json:"admission_granted"`
+	InteractiveQualified bool             `json:"interactive_qualified"`
 }
 
 func eventName(n int) string { return fmt.Sprintf("event-%06d.json", n) }
@@ -115,16 +115,23 @@ func (j *journal) execute(ctx context.Context, v VM, c Command, r *Result) (Outp
 	}
 	r.Executions = append(r.Executions, c)
 	out, e := v.Exec(ctx, c)
-	if len(out.Bytes) > 1<<20 {
-		return Output{}, errors.New("bounded exec output exceeded")
+	reportedBytes := len(out.Bytes)
+	over := reportedBytes > 1<<20
+	if over {
+		out.Bytes = out.Bytes[:1<<20]
 	}
 	if je := j.event(struct {
-		Stage   string
-		Command Command
-		Output  Output
-		Failed  bool
-	}{"exec-after", c, out, e != nil}); je != nil {
+		Stage         string
+		Command       Command
+		Output        Output
+		Failed        bool
+		OutputLimit   bool
+		ReportedBytes int
+	}{"exec-after", c, out, e != nil || out.Exit != 0 || over, over, reportedBytes}); je != nil {
 		return Output{}, je
+	}
+	if over {
+		return Output{}, errors.New("bounded exec output exceeded")
 	}
 	if e != nil {
 		return out, e
@@ -132,32 +139,8 @@ func (j *journal) execute(ctx context.Context, v VM, c Command, r *Result) (Outp
 	if out.Exit != 0 {
 		return out, errors.New("qualification exec failed")
 	}
+
 	return out, nil
-}
-func noAgent(list []byte) bool {
-	if len(strings.TrimSpace(string(list))) == 0 {
-		return false
-	}
-	for _, line := range strings.Split(string(list), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 0 {
-			continue
-		}
-		if len(f) != 3 {
-			return false
-		}
-		pid, pe := strconv.Atoi(f[0])
-		uid, ue := strconv.Atoi(f[1])
-		if pe != nil || ue != nil || pid < 1 || uid < 0 {
-			return false
-		}
-		// ps format is pid, uid, comm; arguments cannot disguise an executable.
-		switch filepath.Base(f[2]) {
-		case "pomar-agent-guest", "agent-guest", "agent-broker", "seat-supervisor", "codex", "claude":
-			return false
-		}
-	}
-	return true
 }
 
 // Run creates an exclusive host journal before contacting any adapter. An
@@ -176,6 +159,12 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 	}
 	if reg == nil || v == nil {
 		return r, errors.New("actual owning registry and disposable VM adapters required")
+	}
+	approvalCtx, approvalCancel := context.WithDeadline(ctx, p.Deadline)
+	approved, approvalErr := reg.ApprovedBinding(approvalCtx)
+	approvalCancel()
+	if approvalErr != nil || !approved.matches(p) {
+		return r, errors.New("plan differs from the sole owner-approved registration")
 	}
 	for _, a := range []Artifact{p.AgentArchive, p.Probe, p.ProbePlan, p.Driver} {
 		if err = verify(a); err != nil {
@@ -203,10 +192,15 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 		defer done()
 		safe := !bootAttempted
 		if bootAttempted {
-			// Collect process observations on failure too, then obtain a positive
-			// owner stop/reap and host scope listing. Uncertainty keeps row/custody.
-			if out, x := j.execute(cleanup, v, Command{"guest-process-list", "/bin/ps", []string{"-eo", "pid=,uid=,comm="}, 0}, &r); x != nil || !noAgent(out.Bytes) {
-				err = errors.Join(err, errors.New("drain guest process observation failed"), x)
+			// Both views are collected before stop: a hidden agent must not vanish
+			// from the evidence merely because the VM has subsequently drained.
+			guest, gerr := j.execute(cleanup, v, Command{"guest-process-list", "/bin/ps", []string{"-eo", "pid=,uid=,args="}, 0}, &r)
+			host, herr := v.HostListing(cleanup, scope)
+			if herr == nil {
+				r.HostBefore = &host
+			}
+			if herr != nil || gerr != nil || validateProcesses(host, scope) != nil || validateGuestProcesses(guest.Bytes, host) != nil {
+				err = errors.Join(err, errors.New("pre-stop owner/guest process inventory failed"), herr, gerr)
 			}
 			dr, x := v.Stop(cleanup, scope)
 			r.Drain = &dr
@@ -214,14 +208,16 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 				err = errors.Join(err, x)
 			}
 			safe = x == nil && scope != "" && dr.ScopeID == scope && dr.Stopped && dr.LeaderReaped && dr.LiveProcesses != nil && len(dr.LiveProcesses) == 0
-			b, x := v.HostListing(cleanup, scope)
-			if x != nil || len(b) == 0 || len(b) > 1<<20 {
-				err = errors.Join(err, errors.New("actual bounded host process listing required"))
+			after, x := v.HostListing(cleanup, scope)
+			if x == nil {
+				r.HostAfter = &after
+			}
+			if x != nil || after.ScopeID != scope || after.Rows == nil || len(after.Rows) != 0 {
+				err = errors.Join(err, errors.New("post-stop owner inventory not empty/confirmed"))
 				safe = false
-			} else {
-				r.HostProcessListing = b
 			}
 		}
+
 		if registered && safe {
 			if x := j.event(struct {
 				Stage string
@@ -314,12 +310,12 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 		return r, errors.New("actual structured D1 observations missing")
 	}
 	r.MailObservation = append([]byte(nil), mail.Bytes...)
-	out, e := j.execute(phase, v, Command{"guest-process-list", "/bin/ps", []string{"-eo", "pid=,uid=,comm="}, 0}, &r)
+	out, e := j.execute(phase, v, Command{"guest-process-list", "/bin/ps", []string{"-eo", "pid=,uid=,args="}, 0}, &r)
 	if e != nil {
 		return r, e
 	}
-	if !noAgent(out.Bytes) {
-		return r, errors.New("process listing missing or contains an agent/broker/supervisor")
+	if len(out.Bytes) == 0 {
+		return r, errors.New("guest process listing missing")
 	}
 	for _, a := range []Artifact{p.AgentArchive, p.Probe, p.ProbePlan, p.Driver} {
 		if err = verify(a); err != nil {
