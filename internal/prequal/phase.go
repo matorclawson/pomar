@@ -20,7 +20,8 @@ import (
 // guest document. ClaimFreshRegistration verifies the original absent-name registration and atomically claims it for
 // this phase, refusing a different original, a pre-existing-before-registration seat,
 // prior session/mail and non-disposable row. An uncertain effect is held under
-// the ORIGINAL operation. Retire must bind that same row and registration.
+// the ORIGINAL operation. Retire must bind the actual instance/store/registered_at and captured
+// command terminal plus independent readback, including split outcomes.
 type Registry interface {
 	ClaimFreshRegistration(context.Context, Plan) (Registration, error)
 	Retire(context.Context, Registration) (Retirement, error)
@@ -232,7 +233,8 @@ func run(ctx context.Context, parent string, p Plan, reg Registry, v VM, verify 
 		}
 		if registered && safe {
 			rr, x := reg.Retire(cleanup, row)
-			if x != nil || rr.RowID != row.RowID || rr.RegistrationID != row.RegistrationID || !sha.MatchString(rr.EvidenceSHA256) {
+			r.Retirement = &rr
+			if x != nil || rr.Instance != row.Instance || rr.Store != row.Store || rr.RegisteredAt != row.RegisteredAt || rr.Operation != p.Operation || rr.Status != "retired" || rr.TerminalExit != 0 || rr.Teardown != "confirmed" || !sha.MatchString(rr.CommandTerminalSHA256) || !sha.MatchString(rr.ReadbackSHA256) {
 				err = errors.Join(err, errors.New("original registration retirement unconfirmed"))
 				safe = false
 			} else {

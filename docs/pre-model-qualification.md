@@ -24,10 +24,10 @@ binary SHA256 in plan.go; older or unpinned probes are refused.
 `Registry.ClaimFreshRegistration` is a required real owning-registrar operation. It
 verifies the original absent-name disposable registration and atomically claims
 that exact registration for the qualification operation, checking actual empty
-prior session and mail histories. The plan binds both the original registrar
-operation and registration ID. An already-issued fresh mailbox is reconciled,
-never created again or replaced under a new identity. It returns exact row, registration,
-row/history evidence hashes and original operation. A caller Boolean, a
+prior session and mail histories. The plan binds the actual instance, canonical managed store, registered_at
+and captured record SHA256; it invents no generation or registration ID. An already-issued fresh mailbox is reconciled,
+never created again or replaced under a new identity. It returns the exact captured registration, history evidence hash and
+qualification operation. A caller Boolean, a
 manually populated JSON row or an arbitrary callback is not an admission
 adapter. Returned host rows, existing-name preimages, earlier sessions/mail,
 wrong originals or missing evidence are rejected before VM boot. No host
@@ -52,7 +52,10 @@ Its sibling plan.json and numbered exclusive event files retain original
 inputs, register intent, every exec/result and retirement intent. Before
 retirement the phase collects a guest process listing, positive owner
 stop/reap with an empty live-process set, and the host's actual scope listing.
-It records row registration and retirement in the terminal. Missing or
+It records registration and retirement in the terminal, including the retirement
+command terminal and independent readback hashes. A retirement command can
+commit the status before teardown fails: that split outcome is retained as
+unknown even if the row already says retired, with no blind retry. Missing or
 uncertain stop, scope mismatch or unavailable host listing retains the row
 and custody for original-operation reconciliation. A failed observation
 with positive cleanup is recorded as failed_stopped, never acceptance.

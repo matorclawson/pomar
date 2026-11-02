@@ -25,11 +25,12 @@ func fixture(t *testing.T) (string, Plan) {
 		t.Fatal(e)
 	}
 	a := Artifact{Path: filepath.Join(dir, "public-artifact"), SHA256: strings.Repeat("a", 64)}
-	p := Plan{RegistrationOperation: "original-register", RegistrationID: "original-registration", Schema: PlanSchema, Operation: "original", Seat: "d1-disposable", Environment: "d1-env", Session: "d1-session", Incarnation: "d1-incarnation", DeclarationSHA256: a.SHA256, CatalogueSHA256: a.SHA256, ImageSHA256: a.SHA256, SourceCommit: strings.Repeat("b", 40), AgentArchive: a, CPUs: 1, MemoryGiB: 1, DiskGiB: 4, Deadline: time.Now().Add(time.Minute), ProbeCommit: ProbeCommit, Probe: Artifact{a.Path, ProbeSHA256}, ProbePlan: a, Driver: a, HostControlsSHA256: a.SHA256}
+	p := Plan{RegistryStore: filepath.Join(dir, "registry"), RegisteredAt: time.Now().UTC().Format(time.RFC3339Nano), RegistryRecordSHA256: strings.Repeat("c", 64), Schema: PlanSchema, Operation: "original", Seat: "d1-disposable", Environment: "d1-env", Session: "d1-session", Incarnation: "d1-incarnation", DeclarationSHA256: a.SHA256, CatalogueSHA256: a.SHA256, ImageSHA256: a.SHA256, SourceCommit: strings.Repeat("b", 40), AgentArchive: a, CPUs: 1, MemoryGiB: 1, DiskGiB: 4, Deadline: time.Now().Add(time.Minute), ProbeCommit: ProbeCommit, Probe: Artifact{a.Path, ProbeSHA256}, ProbePlan: a, Driver: a, HostControlsSHA256: a.SHA256}
 	return dir, p
 }
 
 type registryFake struct {
+	retireFault    bool
 	calls, retires int
 	edit           func(*Registration)
 	fail           bool
@@ -40,7 +41,7 @@ func (r *registryFake) ClaimFreshRegistration(_ context.Context, p Plan) (Regist
 	if r.fail {
 		return Registration{}, errors.New("registrar uncertain")
 	}
-	v := Registration{RegistrationOperation: p.RegistrationOperation, Seat: p.Seat, Kind: "disposable", Operation: p.Operation, RowID: "actual-row", RegistrationID: "original-registration", RowSHA256: strings.Repeat("a", 64), HistorySHA256: strings.Repeat("b", 64), Preimage: "absent"}
+	v := Registration{Instance: p.Seat, Store: p.RegistryStore, RegisteredAt: p.RegisteredAt, RecordSHA256: p.RegistryRecordSHA256, Runtime: "pre-model-observer", WriteAuthority: "none", Status: "active", Operation: p.Operation, HistorySHA256: strings.Repeat("b", 64), Preimage: "absent"}
 	if r.edit != nil {
 		r.edit(&v)
 	}
@@ -48,7 +49,13 @@ func (r *registryFake) ClaimFreshRegistration(_ context.Context, p Plan) (Regist
 }
 func (r *registryFake) Retire(_ context.Context, v Registration) (Retirement, error) {
 	r.retires++
-	return Retirement{v.RowID, v.RegistrationID, strings.Repeat("c", 64)}, nil
+	rr := Retirement{Instance: v.Instance, Store: v.Store, RegisteredAt: v.RegisteredAt, Operation: v.Operation, Status: "retired", CommandTerminalSHA256: strings.Repeat("c", 64), ReadbackSHA256: strings.Repeat("d", 64), Teardown: "confirmed"}
+	if r.retireFault {
+		rr.TerminalExit = 1
+		rr.Teardown = "unknown"
+		return rr, errors.New("status committed before teardown fault")
+	}
+	return rr, nil
 }
 
 // Recording fake: fails on any broker/supervisor/model exec. This is a test
@@ -127,7 +134,7 @@ func TestSuccessRecordsAllExecsAndRetiresWithoutAuthority(t *testing.T) {
 		t.Fatal(e)
 	}
 	var saved Result
-	if json.Unmarshal(b, &saved) != nil || saved.State != r.State || saved.Registration.RowID != "actual-row" || saved.Retirement.RegistrationID != "original-registration" {
+	if json.Unmarshal(b, &saved) != nil || saved.State != r.State || saved.Registration.Store != p.RegistryStore || saved.Retirement.RegisteredAt != p.RegisteredAt {
 		t.Fatal(string(b))
 	}
 	entries, e := os.ReadDir(filepath.Dir(r.TerminalPath))
@@ -149,7 +156,7 @@ func TestFreshDisposableRegistryBoundary(t *testing.T) {
 			reg := &registryFake{edit: func(r *Registration) {
 				switch change {
 				case "host":
-					r.Kind = "host-seat"
+					r.Runtime = "host-seat"
 				case "history-session":
 					r.EarlierSessions = 1
 				case "history-mail":
@@ -342,5 +349,44 @@ func TestProbeReceiptBindingAndNoSelfAcceptance(t *testing.T) {
 	r, e := run(context.Background(), dir, p, reg, vm, simulatedVerify)
 	if e == nil || r.State != "failed_stopped" || vm.stops != 1 {
 		t.Fatal(r, e)
+	}
+}
+
+func TestSplitRetirementRetainsCommittedRowAndTeardownFailure(t *testing.T) {
+	dir, p := fixture(t)
+	reg := &registryFake{retireFault: true}
+	vm := &vmFake{}
+	r, e := run(context.Background(), dir, p, reg, vm, simulatedVerify)
+	if e == nil || r.State != "unknown_retained" || r.Retirement == nil || r.Retirement.Status != "retired" || r.Retirement.TerminalExit != 1 || r.Retirement.Teardown != "unknown" || vm.stops != 1 || reg.retires != 1 {
+		t.Fatal(r, e)
+	}
+	if _, e = run(context.Background(), dir, p, reg, vm, simulatedVerify); !errors.Is(e, ErrOriginalExists) || reg.retires != 1 {
+		t.Fatal("split retirement retried", e)
+	}
+}
+func TestActualRegistrationBindingAndAuthorityDrift(t *testing.T) {
+	for _, change := range []string{"store", "registered-at", "record-sha", "authority", "status"} {
+		t.Run(change, func(t *testing.T) {
+			dir, p := fixture(t)
+			reg := &registryFake{edit: func(r *Registration) {
+				switch change {
+				case "store":
+					r.Store += "-changed"
+				case "registered-at":
+					r.RegisteredAt = "2000-01-01T00:00:00Z"
+				case "record-sha":
+					r.RecordSHA256 = strings.Repeat("0", 64)
+				case "authority":
+					r.WriteAuthority = "write"
+				case "status":
+					r.Status = "retired"
+				}
+			}}
+			vm := &vmFake{}
+			r, e := run(context.Background(), dir, p, reg, vm, simulatedVerify)
+			if e == nil || vm.boot != 0 || r.State != "unknown_retained" {
+				t.Fatal(r, e)
+			}
+		})
 	}
 }
