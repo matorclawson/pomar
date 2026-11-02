@@ -100,3 +100,30 @@ Oversized output is bounded and durably recorded as a failed exec-after event
 before the call returns an error. That record names the reported byte count
 and truncation. Native adapters must also bound their capture streams; this
 core check does not license unbounded transport buffering.
+
+### Linux process inventory library
+
+`CollectLinuxProcessSnapshot` is a library entry for a future pinned owner
+adapter. It refuses non-Linux/non-root callers and reads only the current
+namespace's `/proc`, checked as procfs. It obtains complete executable paths
+from `/proc/PID/exe`, equal real/effective/saved/filesystem UIDs from status,
+and kernel-thread identity from Linux's `PF_KTHREAD` bit. Mutable `comm`,
+argv and bracketed names never establish executable or kernel identity.
+Metadata reads and enumeration are bounded; missing, reused, changed,
+malformed or inaccessible entries fail the whole observation. Birth, UID,
+executable and kernel identity are sampled twice, with process membership
+checked again after enumeration. Returned rows are sorted by PID.
+
+This is a conservative, non-atomic view of process leaders. It cannot prove
+absence between samples or detect an executable changing away and back
+between reads. The existing closed exec policy and pinned image/driver are
+still required. The caller-supplied scope string is a label: only an owning
+adapter can establish the original VM/namespace binding. Guest-supplied JSON
+or an arbitrary invocation does not become independent owner evidence by
+using this library. No production executable, privileged transport, backend,
+allowlist exception or invocation is added here. Any eventual collector exec
+must be pinned and journaled through the qualification phase before use.
+
+The field references are [Linux proc stat](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html),
+[proc status](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html), and
+[Linux PF_KTHREAD](https://github.com/torvalds/linux/blob/master/include/linux/sched.h).
