@@ -190,3 +190,36 @@ The isolation probe has also completed before either pre-stop inventory.
 Any lingering or extra probe is refused in both views, independently of UID
 or arguments. The earlier source allowance is not carried into this backend
 follow-up.
+
+
+## Mail-only host endpoint source seam
+
+`agentenv.OpenMailOnlyChannel(ctx, options)` reuses the maintained mail relay,
+HTTP timeouts, four-slot process upstream budget, per-guest shares, fixed
+identity/header/body rules, retry-key namespace and revocation. It does not
+call `Host.gate`, start egress/Go proxy channels, open an agent host, register a
+seat or admit a profile. The owning phase must already have its real claim
+and must journal the call and returned binding before VM mapping.
+
+The caller supplies existing canonical private current-owner Root and
+Root/Environment directories, exact environment/incarnation/operation/seat,
+the approved upstream origin and a live owner context of at most ten minutes.
+Only Root/Environment/mail.sock is bound (0600). Occupied regular/live/dead
+socket paths refuse; no stale socket is removed to make room. Exclusive
+intent/ready/closed evidence and an owner lock preserve original identity.
+The live Binding method checks actual socket inode/mode and the privately
+created listener's still-open kernel binding; a ready JSON file is historical
+and cannot make an empty, dead or replaced pathname an endpoint.
+
+`Revoke` cancels upstream work and closes the listener/connections. `Close`
+also waits for actual handler and server drain, checks parent/socket identity,
+and unlinks only its observed original socket. A timeout retains the original
+for another Close/inspection; it does not write a positive drain terminal.
+A replaced socket/parent is retained and reported, never removed as cleanup.
+Owner context cancellation revokes the endpoint without granting a new life.
+
+The listener binding is not upstream seat authorization. In the maintained
+handler a foreign X-Zmail-Instance is refused locally before forwarding;
+it is not merely overwritten. The native driver must validate that actual
+layer, and the separate node-row/live-file prerequisites still apply. This
+source seam is not installed in release410 and provides no live D1 pathname.
