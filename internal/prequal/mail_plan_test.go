@@ -21,7 +21,10 @@ func fixtureDenial(id string) MailDenial {
 func fixtureTemplate() MailDenialTemplate {
 	b := fixtureDenial(mailIDToken).Body
 	h := sha256.Sum256(b)
-	return MailDenialTemplate{Version: MailDenialTemplateVersion, CallerSeat: "pomar-d1-disposable-20261102", Body: b, SHA256: hex.EncodeToString(h[:])}
+	headers := []MailHeader{{"Content-Type", "application/json"}}
+	rawHeaders, _ := json.Marshal(headers)
+	hh := sha256.Sum256(rawHeaders)
+	return MailDenialTemplate{Headers: headers, HeadersSHA256: hex.EncodeToString(hh[:]), Version: MailDenialTemplateVersion, CallerSeat: "pomar-d1-disposable-20261102", Body: b, SHA256: hex.EncodeToString(h[:])}
 }
 
 func fixLength(d *MailDenial) { d.Headers[2].Value = strconv.Itoa(len(d.Body)) }
@@ -133,6 +136,8 @@ func TestMailDenialsRejectPairwiseEqualNoncanonicalBodies(t *testing.T) {
 func TestMailDenialsRejectUnpinnedOrDifferentCallerTemplate(t *testing.T) {
 	for _, change := range []func(*MailDenialTemplate){
 		func(t *MailDenialTemplate) { t.SHA256 = "" },
+		func(t *MailDenialTemplate) { t.HeadersSHA256 = "" },
+		func(t *MailDenialTemplate) { t.Headers[0].Value = "text/plain" },
 		func(t *MailDenialTemplate) { t.Version = "unreviewed-version" },
 		func(t *MailDenialTemplate) { t.CallerSeat = "another-seat" },
 		func(t *MailDenialTemplate) {
@@ -159,5 +164,32 @@ func TestMailDenialsValidateDistinctSafeIDs(t *testing.T) {
 		if _, err := CompareMailDenials(fixtureTemplate(), ids[0], ids[1], fixtureDenial(ids[0]), fixtureDenial(ids[1])); err == nil {
 			t.Fatal("accepted ambiguous fixture identity")
 		}
+	}
+}
+
+func TestMailDenialsRejectRepeatedIDAndWrongPosition(t *testing.T) {
+	for _, modify := range []func([]byte, string) []byte{
+		func(b []byte, id string) []byte { return bytes.Replace(b, []byte(id), []byte(id+" "+id), 1) },
+		func(b []byte, id string) []byte {
+			return bytes.Replace(b, []byte("no message "+id), []byte(id+" no message"), 1)
+		},
+	} {
+		f, m := fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")
+		f.Body = modify(f.Body, "msg-foreign-existing")
+		m.Body = modify(m.Body, "msg-missing")
+		fixLength(&f)
+		fixLength(&m)
+		if _, err := CompareMailDenials(fixtureTemplate(), "msg-foreign-existing", "msg-missing", f, m); err == nil {
+			t.Fatal("accepted IDs outside sole declared slot")
+		}
+	}
+}
+
+func TestMailDenialsBindPinnedHeaderSet(t *testing.T) {
+	f, m := fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")
+	f.Headers = append(f.Headers, MailHeader{"X-Undeclared", "same"})
+	m.Headers = append(m.Headers, MailHeader{"X-Undeclared", "same"})
+	if _, err := CompareMailDenials(fixtureTemplate(), "msg-foreign-existing", "msg-missing", f, m); err == nil {
+		t.Fatal("accepted matching but unpinned headers")
 	}
 }

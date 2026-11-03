@@ -31,11 +31,12 @@ type MailDenial struct {
 // MailDenialComparison retains raw body digests and exact replacement counts.
 // This partial GET comparison never grants full D1 acceptance or execution.
 type MailDenialComparison struct {
-	TemplateSHA256    string `json:"template_sha256"`
-	ForeignBodySHA256 string `json:"foreign_body_sha256"`
-	MissingBodySHA256 string `json:"missing_body_sha256"`
-	ForeignIDCount    int    `json:"foreign_id_count"`
-	MissingIDCount    int    `json:"missing_id_count"`
+	TemplateSHA256        string `json:"template_sha256"`
+	TemplateHeadersSHA256 string `json:"template_headers_sha256"`
+	ForeignBodySHA256     string `json:"foreign_body_sha256"`
+	MissingBodySHA256     string `json:"missing_body_sha256"`
+	ForeignIDCount        int    `json:"foreign_id_count"`
+	MissingIDCount        int    `json:"missing_id_count"`
 }
 
 const mailIDToken = "__POMAR_VALIDATED_INPUT_ID__"
@@ -44,10 +45,12 @@ const MailDenialTemplateVersion = "pomar.pre-model-mail-denial/v1"
 // MailDenialTemplate is frozen in the reviewed host plan, not supplied by a
 // guest response. Its sole token marks the maintained wire's echoed ID slot.
 type MailDenialTemplate struct {
-	Version    string
-	CallerSeat string
-	Body       []byte
-	SHA256     string
+	Version       string
+	CallerSeat    string
+	Body          []byte
+	SHA256        string
+	Headers       []MailHeader
+	HeadersSHA256 string
 }
 
 func validateMailDenialTemplate(t MailDenialTemplate) error {
@@ -57,6 +60,28 @@ func validateMailDenialTemplate(t MailDenialTemplate) error {
 	h := sha256.Sum256(t.Body)
 	if t.SHA256 != hex.EncodeToString(h[:]) {
 		return errors.New("denial template hash mismatch")
+	}
+	// The pinned header set excludes only the two explicit dynamic fields.
+	// Its JSON-array bytes (MailHeader Name/Value fields, no trailing newline)
+	// form a separate exact SHA256 input recorded in the host plan.
+	if len(t.Headers) == 0 || len(t.Headers) > 128 {
+		return errors.New("bounded pinned template header set required")
+	}
+	for _, header := range t.Headers {
+		if strings.EqualFold(header.Name, "Date") || strings.EqualFold(header.Name, "Content-Length") {
+			return errors.New("dynamic headers cannot be pinned as template fields")
+		}
+	}
+	if _, err := comparableMailHeaders(MailDenial{Headers: t.Headers, Body: t.Body}); err != nil {
+		return err
+	}
+	headerBytes, err := json.Marshal(t.Headers)
+	if err != nil {
+		return errors.New("invalid template headers")
+	}
+	hh := sha256.Sum256(headerBytes)
+	if t.HeadersSHA256 != hex.EncodeToString(hh[:]) {
+		return errors.New("template header set hash mismatch")
 	}
 	// Architect ruling arch-pomar-m1-template-ruling-20261103 requires one
 	// canonical complete response, not equality between arbitrary denials.
@@ -82,6 +107,7 @@ func CompareMailDenials(template MailDenialTemplate, foreignID, missingID string
 		return r, err
 	}
 	r.TemplateSHA256 = template.SHA256
+	r.TemplateHeadersSHA256 = template.HeadersSHA256
 	if !validMailFixtureID(foreignID) || !validMailFixtureID(missingID) || foreignID == missingID {
 		return r, errors.New("distinct validated fixture IDs required")
 	}
@@ -117,6 +143,18 @@ func CompareMailDenials(template MailDenialTemplate, foreignID, missingID string
 	for i := range a {
 		if a[i] != b[i] {
 			return r, errors.New("different denial headers")
+		}
+	}
+	actual := a
+	if len(actual) > 0 && actual[len(actual)-1].Name == "\x00content-length-present" {
+		actual = actual[:len(actual)-1]
+	}
+	if len(actual) != len(template.Headers) {
+		return r, errors.New("denial headers differ from pinned template set")
+	}
+	for i := range actual {
+		if actual[i] != template.Headers[i] {
+			return r, errors.New("denial headers differ from pinned template set")
 		}
 	}
 	fh, mh := sha256.Sum256(foreign.Body), sha256.Sum256(missing.Body)
