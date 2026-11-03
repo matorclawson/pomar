@@ -1,0 +1,198 @@
+package prequal
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
+
+// MailHeader retains observed header name/value bytes and ordering. Callers
+// must not canonicalize, sort, combine, or discard fields before comparison.
+type MailHeader struct {
+	Name  string
+	Value string
+}
+
+// MailDenial is an observation, not evidence that its input ID exists. The
+// owner must separately bind fixture custody and the actual original VM.
+type MailDenial struct {
+	Status  int
+	Headers []MailHeader
+	Body    []byte
+}
+
+// MailDenialComparison retains raw body digests and exact replacement counts.
+// This partial GET comparison never grants full D1 acceptance or execution.
+type MailDenialComparison struct {
+	ForeignBodySHA256 string `json:"foreign_body_sha256"`
+	MissingBodySHA256 string `json:"missing_body_sha256"`
+	ForeignIDCount    int    `json:"foreign_id_count"`
+	MissingIDCount    int    `json:"missing_id_count"`
+	RawEquality       bool   `json:"raw_equality"`
+}
+
+const mailIDToken = "__POMAR_VALIDATED_INPUT_ID__"
+
+// CompareMailDenials implements Council ans_8dd01de9e47f46d0: replace only
+// each validated input ID in the raw body, compare every remaining byte, and
+// compare all observed headers except Date and each body's own Content-Length.
+// The original bodies remain with the caller; errors never include payloads.
+func CompareMailDenials(foreignID, missingID string, foreign, missing MailDenial) (MailDenialComparison, error) {
+	r := MailDenialComparison{}
+	if !validMailFixtureID(foreignID) || !validMailFixtureID(missingID) || foreignID == missingID {
+		return r, errors.New("distinct validated fixture IDs required")
+	}
+	for _, d := range []MailDenial{foreign, missing} {
+		if d.Status != 422 || len(d.Body) == 0 || len(d.Body) > 1<<20 || !utf8.Valid(d.Body) {
+			return r, errors.New("bounded UTF-8 HTTP422 denial required")
+		}
+		if err := validateMailDenialBody(d.Body); err != nil {
+			return r, err
+		}
+		if bytes.Contains(d.Body, []byte(mailIDToken)) {
+			return r, errors.New("comparison token collision")
+		}
+	}
+	a, err := comparableMailHeaders(foreign)
+	if err != nil {
+		return r, err
+	}
+	b, err := comparableMailHeaders(missing)
+	if err != nil {
+		return r, err
+	}
+	if len(a) != len(b) {
+		return r, errors.New("different denial headers")
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return r, errors.New("different denial headers")
+		}
+	}
+	fh, mh := sha256.Sum256(foreign.Body), sha256.Sum256(missing.Body)
+	r.ForeignBodySHA256, r.MissingBodySHA256 = hex.EncodeToString(fh[:]), hex.EncodeToString(mh[:])
+	r.ForeignIDCount = bytes.Count(foreign.Body, []byte(foreignID))
+	r.MissingIDCount = bytes.Count(missing.Body, []byte(missingID))
+	if r.ForeignIDCount != r.MissingIDCount {
+		return r, errors.New("unequal input ID occurrence counts")
+	}
+	if r.ForeignIDCount == 0 {
+		r.RawEquality = bytes.Equal(foreign.Body, missing.Body)
+		if !r.RawEquality {
+			return r, errors.New("nonidentical denial without ID echo")
+		}
+		return r, nil
+	}
+	if !bytes.Equal(bytes.ReplaceAll(foreign.Body, []byte(foreignID), []byte(mailIDToken)), bytes.ReplaceAll(missing.Body, []byte(missingID), []byte(mailIDToken))) {
+		return r, errors.New("different denial bytes after exact input ID replacement")
+	}
+	return r, nil
+}
+
+func validMailFixtureID(s string) bool {
+	if len(s) == 0 || len(s) > 256 || strings.Contains(s, mailIDToken) {
+		return false
+	}
+	for _, c := range []byte(s) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateMailDenialBody(raw []byte) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	t, err := d.Token()
+	if err != nil || t != json.Delim('{') {
+		return errors.New("denial envelope required")
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		t, err = d.Token()
+		name, ok := t.(string)
+		if err != nil || !ok || seen[name] {
+			return errors.New("duplicate or invalid denial field")
+		}
+		seen[name] = true
+		switch name {
+		case "exit":
+			var code int
+			if d.Decode(&code) != nil || code != 2 {
+				return errors.New("denial must carry CLI exit2")
+			}
+		case "output":
+			var output *string
+			if d.Decode(&output) != nil || output == nil {
+				return errors.New("denial output string required")
+			}
+		default:
+			return errors.New("unknown denial field")
+		}
+	}
+	if t, err = d.Token(); err != nil || t != json.Delim('}') || !seen["exit"] || !seen["output"] {
+		return errors.New("complete denial envelope required")
+	}
+	var trailing any
+	if d.Decode(&trailing) != io.EOF {
+		return errors.New("trailing denial document")
+	}
+	return nil
+}
+
+func comparableMailHeaders(d MailDenial) ([]MailHeader, error) {
+	if len(d.Headers) > 128 {
+		return nil, errors.New("bounded headers required")
+	}
+	var result []MailHeader
+	seen := map[string]bool{}
+	total := 0
+	for _, h := range d.Headers {
+		total += len(h.Name) + len(h.Value)
+		if total > 64<<10 || h.Name == "" || strings.ContainsAny(h.Name+h.Value, "\r\n\x00") {
+			return nil, errors.New("invalid or oversized denial header")
+		}
+		for _, c := range []byte(h.Name) {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c))) {
+				return nil, errors.New("invalid denial header name")
+			}
+		}
+		name := strings.ToLower(h.Name)
+		switch name {
+		case "date", "content-length", "content-type":
+			if seen[name] {
+				return nil, errors.New("ambiguous duplicate denial header")
+			}
+			seen[name] = true
+		}
+		switch name {
+		case "date":
+			continue
+		case "content-length":
+			n, e := strconv.Atoi(h.Value)
+			if e != nil || n != len(d.Body) || h.Value != strconv.Itoa(n) {
+				return nil, errors.New("Content-Length disagrees with raw denial body")
+			}
+			continue
+		case "content-type":
+			if h.Value != "application/json" {
+				return nil, errors.New("JSON denial Content-Type required")
+			}
+		}
+		result = append(result, h)
+	}
+	if !seen["content-type"] {
+		return nil, errors.New("JSON denial Content-Type required")
+	}
+	// Presence itself is observed: do not discard a missing length on one side.
+	if seen["content-length"] {
+		result = append(result, MailHeader{Name: "\x00content-length-present"})
+	}
+	return result, nil
+}
