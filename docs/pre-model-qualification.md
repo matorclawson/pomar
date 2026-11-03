@@ -229,3 +229,21 @@ collector. A missing or duplicate instance refuses qualification. The earlier
 guest ps view must include the shim PID from that inventory and refuses any
 D1 driver: its own collector has not been invoked at that point. These are
 sequential observations, not a claim of simultaneous process snapshots.
+
+## Internal process-observation command
+
+The source-only `pomar-d1-driver` command now accepts exactly
+`-mode processes -scope ORIGINAL`. It invokes the existing fixed `/proc`
+Linux-root reader under a context of at most 20s and emits one bounded
+process snapshot. Unknown roles/args, incomplete or differently bound
+observations, cancellation, reader errors and output failures return nonzero.
+Unexpected processes remain visible for the owner's separate policy checks.
+No arbitrary executable, proc path or model command is accepted.
+
+The command's scope label is not proof of the VM namespace or caller. The
+owner adapter must establish that binding, retain complete output/exit and
+apply the existing paired process policy. The owner also bounds transport
+and drain; a context alone does not guarantee an interrupted stdout write.
+This collector mode does not implement mail mode, semantic mail validation,
+registration, a VM adapter or native D1 acceptance. It is a later source
+increment than the qualified mail-only endpoint PR.
