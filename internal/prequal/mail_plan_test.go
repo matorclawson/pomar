@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 func fixtureDenial(id string) MailDenial {
@@ -191,6 +193,133 @@ func TestMailDenialsBindPinnedHeaderSet(t *testing.T) {
 	m.Headers = append(m.Headers, MailHeader{"X-Undeclared", "same"})
 	if _, err := CompareMailDenials(fixtureTemplate(), "msg-foreign-existing", "msg-missing", f, m); err == nil {
 		t.Fatal("accepted matching but unpinned headers")
+	}
+}
+
+func fixtureMailPlan(t *testing.T) (MailPlan, MailPlanBinding, time.Time) {
+	t.Helper()
+	now := time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC)
+	row, receipt, evidence := strings.Repeat("1", 64), strings.Repeat("2", 64), strings.Repeat("3", 64)
+	p := MailPlan{Schema: MailPlanSchema, Operation: "original-d1", Seat: "pomar-d1-disposable-20261102", Environment: "disposable-env", Incarnation: "original-incarnation", ScopeID: "owner-scope-1", Deadline: now.Add(5 * time.Minute), RegistryRecordSHA256: row, FixtureReceiptSHA256: receipt, DenialTemplate: fixtureTemplate(), Positive: MailFixtureCase{ID: "msg-positive", Recipient: "pomar-d1-disposable-20261102", EvidenceSHA256: evidence, ExpectedOutputSHA256: strings.Repeat("4", 64)}, ForeignExisting: MailFixtureCase{ID: "msg-foreign", Recipient: "designated-test-recipient", EvidenceSHA256: evidence}, Missing: MailFixtureCase{ID: "msg-missing", Recipient: "pomar-d1-disposable-20261102", EvidenceSHA256: evidence}}
+	b := MailPlanBinding{Operation: p.Operation, Seat: p.Seat, Environment: p.Environment, Incarnation: p.Incarnation, ScopeID: p.ScopeID, Deadline: p.Deadline, RegistryRecordSHA256: row, FixtureReceiptSHA256: receipt, TemplateSHA256: p.DenialTemplate.SHA256, TemplateHeadersSHA256: p.DenialTemplate.HeadersSHA256}
+	return p, b, now
+}
+
+func encodeFixtureMailPlan(t *testing.T, p MailPlan, b MailPlanBinding) ([]byte, MailPlanBinding) {
+	t.Helper()
+	raw, e := json.Marshal(p)
+	if e != nil {
+		t.Fatal(e)
+	}
+	h := sha256.Sum256(raw)
+	b.PlanSHA256 = hex.EncodeToString(h[:])
+	return raw, b
+}
+
+func TestParseMailPlanBindsExactOriginalAndPreservesRaw(t *testing.T) {
+	p, b, now := fixtureMailPlan(t)
+	raw, b := encodeFixtureMailPlan(t, p, b)
+	before := bytes.Clone(raw)
+	got, e := ParseMailPlan(raw, b, now)
+	if e != nil || got.Operation != p.Operation || got.Positive.ID != p.Positive.ID || got.ForeignExisting.Recipient != p.ForeignExisting.Recipient {
+		t.Fatalf("valid fixture input: %v", e)
+	}
+	if !bytes.Equal(raw, before) {
+		t.Fatal("parser changed exact input bytes")
+	}
+	other := append(bytes.Clone(raw), ' ')
+	if _, e = ParseMailPlan(other, b, now); e == nil {
+		t.Fatal("accepted byte substitution with the old pin")
+	}
+}
+
+func TestParseMailPlanRejectsUnboundInputs(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*MailPlan)
+	}{
+		{"schema", func(p *MailPlan) { p.Schema = "pomar.pre-model-mail-plan/v2" }},
+		{"operation", func(p *MailPlan) { p.Operation = "another-operation" }},
+		{"seat", func(p *MailPlan) { p.Seat = "another-seat" }},
+		{"environment", func(p *MailPlan) { p.Environment = "another-env" }},
+		{"incarnation", func(p *MailPlan) { p.Incarnation = "another-incarnation" }},
+		{"scope", func(p *MailPlan) { p.ScopeID = "another-owner-scope" }},
+		{"deadline", func(p *MailPlan) { p.Deadline = p.Deadline.Add(time.Second) }},
+		{"registry", func(p *MailPlan) { p.RegistryRecordSHA256 = strings.Repeat("9", 64) }},
+		{"receipt", func(p *MailPlan) { p.FixtureReceiptSHA256 = strings.Repeat("9", 64) }},
+		{"template pin", func(p *MailPlan) { p.DenialTemplate.SHA256 = strings.Repeat("9", 64) }},
+		{"header pin", func(p *MailPlan) { p.DenialTemplate.HeadersSHA256 = strings.Repeat("9", 64) }},
+		{"duplicate cases", func(p *MailPlan) { p.Missing.ID = p.ForeignExisting.ID }},
+		{"wrong positive recipient", func(p *MailPlan) { p.Positive.Recipient = p.ForeignExisting.Recipient }},
+		{"same foreign recipient", func(p *MailPlan) { p.ForeignExisting.Recipient = p.Seat }},
+		{"wrong missing recipient", func(p *MailPlan) { p.Missing.Recipient = p.ForeignExisting.Recipient }},
+		{"missing evidence", func(p *MailPlan) { p.ForeignExisting.EvidenceSHA256 = "" }},
+		{"fixed text collision", func(p *MailPlan) { p.Missing.ID = "inbox" }},
+		{"missing positive digest", func(p *MailPlan) { p.Positive.ExpectedOutputSHA256 = "" }},
+		{"foreign payload digest", func(p *MailPlan) { p.ForeignExisting.ExpectedOutputSHA256 = strings.Repeat("8", 64) }},
+		{"missing payload digest", func(p *MailPlan) { p.Missing.ExpectedOutputSHA256 = strings.Repeat("8", 64) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, b, now := fixtureMailPlan(t)
+			tt.change(&p)
+			raw, b := encodeFixtureMailPlan(t, p, b)
+			got, e := ParseMailPlan(raw, b, now)
+			if e == nil || got.Schema != "" {
+				t.Fatal("accepted substitution or returned a partially validated plan")
+			}
+		})
+	}
+}
+
+func TestParseMailPlanRejectsAmbiguousJSON(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func([]byte) []byte
+	}{
+		{"duplicate root", func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"schema":`), []byte(`"schema":"ignored","schema":`), 1)
+		}},
+		{"duplicate nested", func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"id":"msg-positive"`), []byte(`"id":"ignored","id":"msg-positive"`), 1)
+		}},
+		{"case alias", func(b []byte) []byte { return bytes.Replace(b, []byte(`"seat":`), []byte(`"Seat":`), 1) }},
+		{"nested alias", func(b []byte) []byte { return bytes.Replace(b, []byte(`"Headers":`), []byte(`"headers":`), 1) }},
+		{"unknown field", func(b []byte) []byte { return append([]byte(`{"extra":true,`), b[1:]...) }},
+		{"missing field", func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`,"expected_output_sha256":""`), nil, 1)
+		}},
+		{"null string", func(b []byte) []byte {
+			return bytes.Replace(b, []byte(`"seat":"pomar-d1-disposable-20261102"`), []byte(`"seat":null`), 1)
+		}},
+		{"trailing", func(b []byte) []byte { return append(b, []byte(`{}`)...) }},
+		{"invalid UTF8", func(b []byte) []byte { return append(b, 0xff) }},
+		{"oversize", func(b []byte) []byte { return append(b, bytes.Repeat([]byte(" "), 64<<10)...) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, b, now := fixtureMailPlan(t)
+			raw, b := encodeFixtureMailPlan(t, p, b)
+			changed := tt.change(bytes.Clone(raw))
+			if bytes.Equal(raw, changed) {
+				t.Fatal("mutation did not reach schema fixture")
+			}
+			h := sha256.Sum256(changed)
+			b.PlanSHA256 = hex.EncodeToString(h[:])
+			if _, e := ParseMailPlan(changed, b, now); e == nil {
+				t.Fatal("accepted ambiguous or malformed JSON")
+			}
+		})
+	}
+}
+
+func TestParseMailPlanRequiresLiveBoundedOriginalDeadline(t *testing.T) {
+	for _, delta := range []time.Duration{-time.Second, 0, 10*time.Minute + time.Nanosecond} {
+		p, b, now := fixtureMailPlan(t)
+		p.Deadline = now.Add(delta)
+		b.Deadline = p.Deadline
+		raw, b := encodeFixtureMailPlan(t, p, b)
+		if _, e := ParseMailPlan(raw, b, now); e == nil {
+			t.Fatal("accepted expired or unbounded original deadline")
+		}
 	}
 }
 

@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -41,6 +43,184 @@ type MailDenialComparison struct {
 
 const mailIDToken = "__POMAR_VALIDATED_INPUT_ID__"
 const MailDenialTemplateVersion = "pomar.pre-model-mail-denial/v1"
+const MailPlanSchema = "pomar.pre-model-mail-plan/v3"
+
+type MailFixtureCase struct {
+	ID                   string `json:"id"`
+	Recipient            string `json:"recipient"`
+	EvidenceSHA256       string `json:"evidence_sha256"`
+	ExpectedOutputSHA256 string `json:"expected_output_sha256"`
+}
+
+// MailPlan contains no fixture body or host credentials. Receipt/provenance and
+// actual VM mapping must still be verified by the owning adapter, independently.
+type MailPlan struct {
+	Schema               string             `json:"schema"`
+	Operation            string             `json:"operation"`
+	Seat                 string             `json:"seat"`
+	Environment          string             `json:"environment"`
+	Incarnation          string             `json:"incarnation"`
+	ScopeID              string             `json:"scope_id"`
+	Deadline             time.Time          `json:"original_deadline"`
+	RegistryRecordSHA256 string             `json:"registry_record_sha256"`
+	FixtureReceiptSHA256 string             `json:"fixture_receipt_sha256"`
+	DenialTemplate       MailDenialTemplate `json:"denial_template"`
+	Positive             MailFixtureCase    `json:"positive"`
+	ForeignExisting      MailFixtureCase    `json:"foreign_existing"`
+	Missing              MailFixtureCase    `json:"missing"`
+}
+
+// MailPlanBinding must come from the independently admitted host Plan and the
+// actual original VM handle, never by copying fields from the guest document.
+type MailPlanBinding struct {
+	Operation, Seat, Environment, Incarnation, ScopeID     string
+	Deadline                                               time.Time
+	PlanSHA256, RegistryRecordSHA256, FixtureReceiptSHA256 string
+	TemplateSHA256, TemplateHeadersSHA256                  string
+}
+
+// ParseMailPlan verifies exact bounded bytes and pure input bindings only. It
+// neither acquires a host file nor attests custodian authority or execution.
+func ParseMailPlan(raw []byte, binding MailPlanBinding, now time.Time) (MailPlan, error) {
+	var p MailPlan
+	if len(raw) == 0 || len(raw) > 64<<10 || !utf8.Valid(raw) {
+		return p, errors.New("bounded UTF-8 mail plan required")
+	}
+	h := sha256.Sum256(raw)
+	if !sha.MatchString(binding.PlanSHA256) || binding.PlanSHA256 != hex.EncodeToString(h[:]) {
+		return p, errors.New("mail plan byte hash mismatch")
+	}
+	if err := strictMailJSON(raw, &p); err != nil {
+		return MailPlan{}, err
+	}
+	if p.Schema != MailPlanSchema || !id.MatchString(binding.Operation) || !id.MatchString(binding.Seat) || !id.MatchString(binding.Environment) || !id.MatchString(binding.Incarnation) || binding.ScopeID == "" || len(binding.ScopeID) > 256 || strings.ContainsAny(binding.ScopeID, "\r\n\x00") {
+		return MailPlan{}, errors.New("valid original mail plan binding required")
+	}
+	if p.Operation != binding.Operation || p.Seat != binding.Seat || p.Environment != binding.Environment || p.Incarnation != binding.Incarnation || p.ScopeID != binding.ScopeID || !p.Deadline.Equal(binding.Deadline) || !p.Deadline.After(now) || p.Deadline.Sub(now) > 10*time.Minute {
+		return MailPlan{}, errors.New("mail plan differs from live original identities or deadline")
+	}
+	if !sha.MatchString(binding.RegistryRecordSHA256) || !sha.MatchString(binding.FixtureReceiptSHA256) || p.RegistryRecordSHA256 != binding.RegistryRecordSHA256 || p.FixtureReceiptSHA256 != binding.FixtureReceiptSHA256 {
+		return MailPlan{}, errors.New("mail plan receipt or original row pin mismatch")
+	}
+	if p.DenialTemplate.CallerSeat != binding.Seat || p.DenialTemplate.SHA256 != binding.TemplateSHA256 || p.DenialTemplate.HeadersSHA256 != binding.TemplateHeadersSHA256 {
+		return MailPlan{}, errors.New("mail template differs from admitted host pins")
+	}
+	if err := validateMailDenialTemplate(p.DenialTemplate); err != nil {
+		return MailPlan{}, err
+	}
+	if !validMailFixtureID(p.Positive.ID) || !validMailFixtureID(p.ForeignExisting.ID) || !validMailFixtureID(p.Missing.ID) || p.Positive.ID == p.ForeignExisting.ID || p.Positive.ID == p.Missing.ID || p.ForeignExisting.ID == p.Missing.ID {
+		return MailPlan{}, errors.New("three distinct valid mail fixture IDs required")
+	}
+	if p.Positive.Recipient != binding.Seat || !id.MatchString(p.ForeignExisting.Recipient) || p.ForeignExisting.Recipient == binding.Seat || p.Missing.Recipient != binding.Seat {
+		return MailPlan{}, errors.New("exact positive, foreign and missing recipient bindings required")
+	}
+	for _, c := range []MailFixtureCase{p.Positive, p.ForeignExisting, p.Missing} {
+		if !sha.MatchString(c.EvidenceSHA256) || bytes.Count(p.DenialTemplate.Body, []byte(c.ID)) != 0 {
+			return MailPlan{}, errors.New("fixture evidence pin or unambiguous input ID required")
+		}
+	}
+	if !sha.MatchString(p.Positive.ExpectedOutputSHA256) || p.ForeignExisting.ExpectedOutputSHA256 != "" || p.Missing.ExpectedOutputSHA256 != "" {
+		return MailPlan{}, errors.New("only positive fixture may carry output digest")
+	}
+	return p, nil
+}
+
+// strictMailJSON rejects exact and case-aliased unknown/duplicate fields at
+// every typed object boundary before ordinary decoding can overwrite a value.
+func strictMailJSON(raw []byte, dst any) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	if err := scanMailJSON(d, reflect.TypeOf(dst).Elem()); err != nil {
+		return err
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		return errors.New("trailing mail plan document")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(dst) != nil {
+		return errors.New("invalid typed mail plan")
+	}
+	return nil
+}
+
+func scanMailJSON(d *json.Decoder, typ reflect.Type) error {
+	if typ == reflect.TypeFor[time.Time]() {
+		t, e := d.Token()
+		if _, ok := t.(string); e != nil || !ok {
+			return errors.New("mail deadline string required")
+		}
+		return nil
+	}
+	switch typ.Kind() {
+	case reflect.Struct:
+		t, e := d.Token()
+		if e != nil || t != json.Delim('{') {
+			return errors.New("mail plan object required")
+		}
+		fields := map[string]reflect.Type{}
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			name := strings.Split(f.Tag.Get("json"), ",")[0]
+			if name == "" {
+				name = f.Name
+			}
+			fields[name] = f.Type
+		}
+		seen := map[string]bool{}
+		for d.More() {
+			t, e = d.Token()
+			name, ok := t.(string)
+			field, exists := fields[name]
+			if e != nil || !ok || !exists || seen[name] {
+				return errors.New("unknown or duplicate mail plan field")
+			}
+			seen[name] = true
+			if e = scanMailJSON(d, field); e != nil {
+				return e
+			}
+		}
+		if t, e = d.Token(); e != nil || t != json.Delim('}') {
+			return errors.New("incomplete mail plan object")
+		}
+		if len(seen) != len(fields) {
+			return errors.New("mail plan fields must be explicit")
+		}
+		return nil
+	case reflect.Slice:
+		if typ.Elem().Kind() == reflect.Uint8 {
+			t, e := d.Token()
+			if _, ok := t.(string); e != nil || !ok {
+				return errors.New("base64 mail template bytes required")
+			}
+			return nil
+		}
+		t, e := d.Token()
+		if e != nil || t != json.Delim('[') {
+			return errors.New("mail header array required")
+		}
+		for d.More() {
+			if e = scanMailJSON(d, typ.Elem()); e != nil {
+				return e
+			}
+		}
+		if t, e = d.Token(); e != nil || t != json.Delim(']') {
+			return errors.New("incomplete mail header array")
+		}
+		return nil
+	default:
+		t, e := d.Token()
+		if e != nil || t == nil {
+			return errors.New("explicit non-null mail plan value required")
+		}
+		if typ.Kind() == reflect.String {
+			if _, ok := t.(string); !ok {
+				return errors.New("mail plan string required")
+			}
+		}
+		return nil
+	}
+}
 
 // MailDenialTemplate is frozen in the reviewed host plan, not supplied by a
 // guest response. Its sole token marks the maintained wire's echoed ID slot.
