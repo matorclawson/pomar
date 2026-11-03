@@ -18,18 +18,24 @@ func fixtureDenial(id string) MailDenial {
 	return MailDenial{Status: 422, Headers: []MailHeader{{"Content-Type", "application/json"}, {"Date", "first"}, {"Content-Length", strconv.Itoa(len(b))}}, Body: b}
 }
 
+func fixtureTemplate() MailDenialTemplate {
+	b := fixtureDenial(mailIDToken).Body
+	h := sha256.Sum256(b)
+	return MailDenialTemplate{CallerSeat: "pomar-d1-disposable-20261102", Body: b, SHA256: hex.EncodeToString(h[:])}
+}
+
 func fixLength(d *MailDenial) { d.Headers[2].Value = strconv.Itoa(len(d.Body)) }
 
 func TestMailDenialsExactIDComparisonRetainsRaw(t *testing.T) {
 	f, m := fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")
 	m.Headers[1].Value = "second"
 	beforeF, beforeM := bytes.Clone(f.Body), bytes.Clone(m.Body)
-	r, err := CompareMailDenials("msg-foreign-existing", "msg-missing", f, m)
+	r, err := CompareMailDenials(fixtureTemplate(), "msg-foreign-existing", "msg-missing", f, m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fh, mh := sha256.Sum256(beforeF), sha256.Sum256(beforeM)
-	if r.ForeignBodySHA256 != hex.EncodeToString(fh[:]) || r.MissingBodySHA256 != hex.EncodeToString(mh[:]) || r.ForeignIDCount != 1 || r.MissingIDCount != 1 || r.RawEquality {
+	if r.ForeignBodySHA256 != hex.EncodeToString(fh[:]) || r.MissingBodySHA256 != hex.EncodeToString(mh[:]) || r.ForeignIDCount != 1 || r.MissingIDCount != 1 {
 		t.Fatalf("wrong comparison receipt: %+v", r)
 	}
 	if !bytes.Equal(f.Body, beforeF) || !bytes.Equal(m.Body, beforeM) {
@@ -101,33 +107,55 @@ func TestMailDenialsRejectOracleAndMalformedObservations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f, m := fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")
 			tt.edit(&f, &m)
-			if _, err := CompareMailDenials("msg-foreign-existing", "msg-missing", f, m); err == nil {
+			if _, err := CompareMailDenials(fixtureTemplate(), "msg-foreign-existing", "msg-missing", f, m); err == nil {
 				t.Fatal("accepted invalid or distinguishable denial")
 			}
 		})
 	}
 }
 
-func TestMailDenialsNoEchoRequiresRawEquality(t *testing.T) {
-	f, m := fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")
-	f.Body = []byte("{\"exit\":2,\"output\":\"denied\"}\n")
-	m.Body = bytes.Clone(f.Body)
-	fixLength(&f)
-	fixLength(&m)
-	r, err := CompareMailDenials("msg-foreign-existing", "msg-missing", f, m)
-	if err != nil || !r.RawEquality || r.ForeignIDCount != 0 || r.MissingIDCount != 0 {
-		t.Fatalf("identical non-echo denial: %+v %v", r, err)
+func TestMailDenialsRejectPairwiseEqualNoncanonicalBodies(t *testing.T) {
+	for _, raw := range []string{
+		"{\"exit\":2,\"output\":\"denied\"}\n",
+		"{\"exit\":2,\"output\":\"constant private payload\"}\n",
+	} {
+		f, m := fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")
+		f.Body = []byte(raw)
+		m.Body = []byte(raw)
+		fixLength(&f)
+		fixLength(&m)
+		if _, err := CompareMailDenials(fixtureTemplate(), "msg-foreign-existing", "msg-missing", f, m); err == nil {
+			t.Fatal("accepted pairwise-equal noncanonical body")
+		}
 	}
-	m.Body = bytes.ReplaceAll(m.Body, []byte("denied"), []byte("absent"))
-	fixLength(&m)
-	if _, err := CompareMailDenials("msg-foreign-existing", "msg-missing", f, m); err == nil {
-		t.Fatal("no-echo oracle accepted")
+}
+
+func TestMailDenialsRejectUnpinnedOrDifferentCallerTemplate(t *testing.T) {
+	for _, change := range []func(*MailDenialTemplate){
+		func(t *MailDenialTemplate) { t.SHA256 = "" },
+		func(t *MailDenialTemplate) { t.CallerSeat = "another-seat" },
+		func(t *MailDenialTemplate) {
+			t.Body = append(t.Body, ' ')
+			h := sha256.Sum256(t.Body)
+			t.SHA256 = hex.EncodeToString(h[:])
+		},
+		func(t *MailDenialTemplate) {
+			t.Body = bytes.ReplaceAll(t.Body, []byte("no message"), []byte("secret payload"))
+			h := sha256.Sum256(t.Body)
+			t.SHA256 = hex.EncodeToString(h[:])
+		},
+	} {
+		template := fixtureTemplate()
+		change(&template)
+		if _, err := CompareMailDenials(template, "msg-foreign-existing", "msg-missing", fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")); err == nil {
+			t.Fatal("accepted unpinned or mismatched template")
+		}
 	}
 }
 
 func TestMailDenialsValidateDistinctSafeIDs(t *testing.T) {
 	for _, ids := range [][2]string{{"", "missing"}, {"same", "same"}, {"quote\"", "missing"}, {mailIDToken, "missing"}, {string(bytes.Repeat([]byte("a"), 257)), "missing"}} {
-		if _, err := CompareMailDenials(ids[0], ids[1], fixtureDenial(ids[0]), fixtureDenial(ids[1])); err == nil {
+		if _, err := CompareMailDenials(fixtureTemplate(), ids[0], ids[1], fixtureDenial(ids[0]), fixtureDenial(ids[1])); err == nil {
 			t.Fatal("accepted ambiguous fixture identity")
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -30,21 +31,55 @@ type MailDenial struct {
 // MailDenialComparison retains raw body digests and exact replacement counts.
 // This partial GET comparison never grants full D1 acceptance or execution.
 type MailDenialComparison struct {
+	TemplateSHA256    string `json:"template_sha256"`
 	ForeignBodySHA256 string `json:"foreign_body_sha256"`
 	MissingBodySHA256 string `json:"missing_body_sha256"`
 	ForeignIDCount    int    `json:"foreign_id_count"`
 	MissingIDCount    int    `json:"missing_id_count"`
-	RawEquality       bool   `json:"raw_equality"`
 }
 
 const mailIDToken = "__POMAR_VALIDATED_INPUT_ID__"
 
-// CompareMailDenials implements Council ans_8dd01de9e47f46d0: replace only
-// each validated input ID in the raw body, compare every remaining byte, and
-// compare all observed headers except Date and each body's own Content-Length.
+// MailDenialTemplate is frozen in the reviewed host plan, not supplied by a
+// guest response. Its sole token marks the maintained wire's echoed ID slot.
+type MailDenialTemplate struct {
+	CallerSeat string
+	Body       []byte
+	SHA256     string
+}
+
+func validateMailDenialTemplate(t MailDenialTemplate) error {
+	if !id.MatchString(t.CallerSeat) || len(t.Body) == 0 || len(t.Body) > 64<<10 {
+		return errors.New("bounded pinned denial template and caller required")
+	}
+	h := sha256.Sum256(t.Body)
+	if t.SHA256 != hex.EncodeToString(h[:]) {
+		return errors.New("denial template hash mismatch")
+	}
+	// Architect ruling arch-pomar-m1-template-ruling-20261103 requires one
+	// canonical complete response, not equality between arbitrary denials.
+	want, err := json.Marshal(struct {
+		Exit   int    `json:"exit"`
+		Output string `json:"output"`
+	}{2, fmt.Sprintf("zmail: no message %s in %s's inbox; zmsg inbox --all lists every message it has\n", mailIDToken, t.CallerSeat)})
+	if err != nil || !bytes.Equal(t.Body, append(want, '\n')) || bytes.Count(t.Body, []byte(mailIDToken)) != 1 {
+		return errors.New("template must match the maintained canonical denial wire")
+	}
+	return nil
+}
+
+// CompareMailDenials implements Council ans_8dd01de9e47f46d0 and the later
+// Architect pinned-template ruling: instantiate the sole echoed input ID slot,
+// compare every remaining byte, and compare all observed headers except Date
+// and each body's own Content-Length. A no-echo product wire needs a newly
+// reviewed template; it cannot be accepted by pairwise equality alone.
 // The original bodies remain with the caller; errors never include payloads.
-func CompareMailDenials(foreignID, missingID string, foreign, missing MailDenial) (MailDenialComparison, error) {
+func CompareMailDenials(template MailDenialTemplate, foreignID, missingID string, foreign, missing MailDenial) (MailDenialComparison, error) {
 	r := MailDenialComparison{}
+	if err := validateMailDenialTemplate(template); err != nil {
+		return r, err
+	}
+	r.TemplateSHA256 = template.SHA256
 	if !validMailFixtureID(foreignID) || !validMailFixtureID(missingID) || foreignID == missingID {
 		return r, errors.New("distinct validated fixture IDs required")
 	}
@@ -57,6 +92,12 @@ func CompareMailDenials(foreignID, missingID string, foreign, missing MailDenial
 		}
 		if bytes.Contains(d.Body, []byte(mailIDToken)) {
 			return r, errors.New("comparison token collision")
+		}
+	}
+	for i, input := range []string{foreignID, missingID} {
+		want := bytes.Replace(template.Body, []byte(mailIDToken), []byte(input), 1)
+		if !bytes.Equal([]MailDenial{foreign, missing}[i].Body, want) {
+			return r, errors.New("denial differs from pinned canonical template")
 		}
 	}
 	a, err := comparableMailHeaders(foreign)
@@ -79,15 +120,8 @@ func CompareMailDenials(foreignID, missingID string, foreign, missing MailDenial
 	r.ForeignBodySHA256, r.MissingBodySHA256 = hex.EncodeToString(fh[:]), hex.EncodeToString(mh[:])
 	r.ForeignIDCount = bytes.Count(foreign.Body, []byte(foreignID))
 	r.MissingIDCount = bytes.Count(missing.Body, []byte(missingID))
-	if r.ForeignIDCount != r.MissingIDCount {
-		return r, errors.New("unequal input ID occurrence counts")
-	}
-	if r.ForeignIDCount == 0 {
-		r.RawEquality = bytes.Equal(foreign.Body, missing.Body)
-		if !r.RawEquality {
-			return r, errors.New("nonidentical denial without ID echo")
-		}
-		return r, nil
+	if r.ForeignIDCount != 1 || r.MissingIDCount != 1 {
+		return r, errors.New("one unambiguous echoed input ID required in each denial")
 	}
 	if !bytes.Equal(bytes.ReplaceAll(foreign.Body, []byte(foreignID), []byte(mailIDToken)), bytes.ReplaceAll(missing.Body, []byte(missingID), []byte(mailIDToken))) {
 		return r, errors.New("different denial bytes after exact input ID replacement")
