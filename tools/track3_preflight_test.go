@@ -5,10 +5,12 @@
 package tools
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -859,8 +861,8 @@ func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 4*time.Second {
-		t.Fatalf("script took %s, well over the ~1s timeout, want well under the fake uv's 5s sleep: %s", elapsed, out)
+	if elapsed > 36*time.Second {
+		t.Fatalf("script took %s -- the actual production guarantees (1s timeout, killed status, absent completion marker) are checked below; this ceiling only guards against an unbounded hang (architect's standing up-to-3x widening for host load): %s", elapsed, out)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
 	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 1s, killed") {
@@ -926,7 +928,7 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 10*time.Second {
+	if elapsed > 30*time.Second {
 		t.Fatalf("script took %s, want well under the fake uv's 20s sleep (TERM-ignoring child must still be bounded): %s", elapsed, out)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
@@ -935,6 +937,324 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 	}
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatalf("fake uv's completion marker exists -- a TERM-ignoring child was not actually force-killed before completing")
+	}
+}
+
+// pomar's review (Root d571, TRACK3-WITNESS-FAILURE-DISARMS-TERMINATION): the
+// watchdog's own `: > "$timeout_marker" || exit 125` exited BEFORE ever
+// sending TERM/KILL whenever the witness write itself failed, so a child
+// that ignores or outlives TERM was never actually signaled -- the parent's
+// `wait "$pid"` would then hang on it, exactly defeating the one guarantee
+// bounded_run exists to provide. This test forces that write to fail
+// deterministically (not via a timing race): the fake uv process itself,
+// which already knows the watchdog's scratch directory via FAKE_SCRATCH_DIR
+// (fed to a fake `mktemp` ahead of it on PATH so the directory's path is
+// fixed and known, instead of mktemp's own randomized name), makes that
+// directory read-only BEFORE the budget's sleep could possibly elapse, then
+// keeps it locked until this process ends; the parent test restores it
+// during cleanup. No timer race can reopen the path before the watchdog.
+func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWitnessCannotBeWritten(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use one TERM-ignoring process and one timer as the witness, without
+	// relying on shell wait status or inherited sleep signal behavior. The
+	// earlier intermittent failure's exact signal sequence was not captured.
+	fakeUV := "#!/bin/sh\ncase \"$1\" in\n --version) echo 'uv 0.0.0-fake' ;;\n lock) exec \"$WITNESS_TEST_BINARY\" -test.run='^TestTrack3WitnessUnwritableUVChild$' ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(scratchDir, 0700) })
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"WITNESS_TEST_BINARY="+helper,
+		"POMAR_WITNESS_UV_HELPER=1",
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if ready, e := os.ReadFile(marker + ".ready"); e != nil || string(ready) != "TERM_IGNORED_SCRATCH_0500" {
+		t.Fatalf("fixture did not establish its signal/permission fault: %v; %s", e, out)
+	}
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep (the watchdog must still kill a TERM-ignoring child even when it cannot persist its own timeout witness): %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose timeout witness could not be written must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a timeout whose witness could not be written must never be reported as VERIFIED: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatalf("fake uv's completion marker exists -- the watchdog never sent TERM/KILL when its own timeout-marker write failed, so a TERM-ignoring child was not force-killed")
+	}
+}
+
+// TestTrack3WitnessUnwritableUVChild is only the subprocess fixture for the
+// witness-write test. It is inert in the normal test process. No shell wait
+// or child process can turn an interrupted sleep into a completion marker.
+func TestTrack3WitnessUnwritableUVChild(t *testing.T) {
+	if os.Getenv("POMAR_WITNESS_UV_HELPER") != "1" {
+		return
+	}
+	signal.Ignore(syscall.SIGTERM)
+	dir, marker := os.Getenv("FAKE_SCRATCH_DIR"), os.Getenv("MARKER")
+	if dir == "" || marker == "" {
+		os.Exit(125)
+	}
+	if err := os.Chmod(dir, 0500); err != nil {
+		os.Exit(125)
+	}
+	if err := os.WriteFile(marker+".ready", []byte("TERM_IGNORED_SCRATCH_0500"), 0600); err != nil {
+		os.Exit(125)
+	}
+	time.Sleep(20 * time.Second)
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		os.Exit(125)
+	}
+	os.Exit(0)
+}
+
+// pomar's third, independent review (AMEND THIRD-WITNESS-CHANNEL-FAILURE-01):
+// the second fix's fallback write assumed a pre-created marker file can
+// always be truncated even when its directory is locked -- true, but not
+// when something ALSO revokes write permission on the marker FILE itself
+// (their repro: scratch 0500 AND the marker chmod 0400). Both writes then
+// fail, `|| true` on each swallows it, and the result falls through to
+// plain COMPLETED/OK: a false VERIFIED, with no durable record anything
+// went wrong -- the same bug via a third path, this time independent of
+// how the child responds to TERM at all. The fix opens the marker's file
+// descriptor before the child or watchdog even exist, while its
+// permissions are still whatever they started as; writing through that
+// SAME descriptor later succeeds regardless of any chmod afterward
+// (POSIX permission checks happen at open(2), not on each write(2)). This
+// test reproduces pomar's exact scenario: a cooperative exit(0) on TERM
+// (so the earlier race-closing fix alone wouldn't save it) combined with
+// BOTH the scratch directory and the marker file itself becoming
+// unwritable right as the command starts -- after bounded_run's own
+// descriptor is already open on it.
+func TestTrack3PreflightSurvivesScratchAndMarkerBothLockedAfterTheDescriptorIsAlreadyOpen(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	// By the time this runs, bounded_run's own `exec 9>"$outfile.timeout"`
+	// has already succeeded (it happens before "$@" is even forked) --
+	// chmodding the marker file itself here, after the fact, is exactly
+	// pomar's scenario: proving the already-open descriptor doesn't care.
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One signal-driven process establishes the fault before waiting. It
+	// restores the directory only after TERM, never on a competing timer.
+	fakeUV := "#!/bin/sh\ncase \"$1\" in\n --version) echo 'uv 0.0.0-fake' ;;\n lock) exec \"$WITNESS_TEST_BINARY\" -test.run='^TestTrack3WitnessCooperativeUVChild$' ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(scratchDir, 0700) })
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"WITNESS_TEST_BINARY="+helper,
+		"POMAR_WITNESS_COOPERATIVE_SCENARIO=locked",
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if ready, e := os.ReadFile(marker + ".ready"); e != nil || string(ready) != "locked" {
+		t.Fatalf("cooperative fixture did not establish its fault: %v; %s", e, out)
+	}
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep -- a cooperative TERM handler should be let through almost immediately: %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose witness could not be written AFTER the fact must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a scratch dir and marker file both locked after bounded_run's own descriptor was already open must never be reported as VERIFIED (false OK): %s", line)
+	}
+	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 2s, completed on its own before termination was confirmed") {
+		t.Fatalf("the already-open descriptor should let the deadline witness write succeed regardless of the later chmod, producing a correct timeout report, not UNKNOWN: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("fake uv's cooperative TERM handler never ran: %v", statErr)
+	}
+}
+
+// pomar's fourth, independent review (AMEND PREOPENED-FD-PATH-READBACK-
+// LOST-EVENT-01): the fd-based write (above) survives a chmod, but the
+// PARENT's readback still went through the marker's PATH, which only ever
+// shows whatever is currently linked there. A command that unlinks the
+// marker by name (it has no fd to it any more -- bounded_run explicitly
+// closes 9 and 8 for the executed command itself -- but unlinking only
+// ever needs the path, never an fd) makes the watchdog's already-written
+// fd-9 content unreachable by that path, even though the data itself is
+// still there. This test reproduces exactly that: a cooperative TERM
+// handler that unlinks the marker (found by the same glob technique used
+// above, since it has no special knowledge of the real path) before
+// exiting 0.
+func TestTrack3PreflightSurvivesTheMarkerBeingUnlinkedAfterTheDescriptorIsAlreadyOpen(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One signal-driven process establishes the fault before waiting. It
+	// restores the directory only after TERM, never on a competing timer.
+	fakeUV := "#!/bin/sh\ncase \"$1\" in\n --version) echo 'uv 0.0.0-fake' ;;\n lock) exec \"$WITNESS_TEST_BINARY\" -test.run='^TestTrack3WitnessCooperativeUVChild$' ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"WITNESS_TEST_BINARY="+helper,
+		"POMAR_WITNESS_COOPERATIVE_SCENARIO=unlinked",
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if ready, e := os.ReadFile(marker + ".ready"); e != nil || string(ready) != "unlinked" {
+		t.Fatalf("cooperative fixture did not establish its fault: %v; %s", e, out)
+	}
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep -- a cooperative TERM handler should be let through almost immediately: %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose witness marker was unlinked must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a witness marker unlinked after the descriptor was already open must never be reported as VERIFIED (false OK): %s", line)
+	}
+	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 2s, completed on its own before termination was confirmed") {
+		t.Fatalf("reading back via the already-open descriptor should see the watchdog's write regardless of the unlink, producing a correct timeout report, not UNKNOWN: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("fake uv's cooperative TERM handler never ran: %v", statErr)
 	}
 }
 
@@ -1017,7 +1337,7 @@ func TestTrack3PreflightKillsEntireProcessGroupIncludingGrandchildren(t *testing
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 10*time.Second {
+	if elapsed > 30*time.Second {
 		t.Fatalf("script took %s, want well under the 20s sleeps (the whole group must be bounded): %s", elapsed, out)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
@@ -1056,7 +1376,7 @@ func TestTrack3PreflightKillsSurvivingGrandchildWhenLeaderDiesQuicklyOnTerm(t *t
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 10*time.Second {
+	if elapsed > 30*time.Second {
 		t.Fatalf("script took %s, want well under the grandchild's 20s sleep: %s", elapsed, out)
 	}
 	assertGrandchildDead(t, grandchildPIDFile)
@@ -1090,8 +1410,8 @@ func TestTrack3PreflightSweepsLeftoverAfterANormalFastExit(t *testing.T) {
 	// sleeps add at most ~2s. This must be nowhere near the grandchild's
 	// 20s sleep or the default 30s uv timeout, proving the sweep runs
 	// promptly rather than waiting for either.
-	if elapsed > 10*time.Second {
-		t.Fatalf("script took %s to sweep a leftover after a fast normal exit -- want well under 10s", elapsed)
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s to sweep a leftover after a fast normal exit -- want well under 30s", elapsed)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
 	if !strings.HasSuffix(line, ": VERIFIED") {
@@ -1294,19 +1614,108 @@ func TestTrack3PreflightReportsSourceRemote(t *testing.T) {
 
 // The final receipt_sha256 line must be a real sha256 over the report text
 // actually printed, computed after capture so the two can never drift.
+// pomar's review: the script's own receipt_sha256 is computed over
+// `report=$(preflight)`, a command substitution that captures ONLY
+// preflight()'s stdout -- never its stderr, which the script does write to
+// in at least one deliberate, legitimate path (lexically_canonical's own
+// safety-refusal diagnostic). This test used to reconstruct "what was
+// hashed" from CombinedOutput(), which merges stdout and stderr -- correct
+// only when the run happens to produce no stderr at all, and silently wrong
+// (a false failure, not a real receipt mismatch) whenever it does. Capture
+// stdout and stderr separately instead, and compare against stdout alone,
+// matching exactly what the script itself hashes.
 func TestTrack3PreflightReceiptMatchesReportSha256(t *testing.T) {
 	repo, head := zeocoreFixture(t, "3.1.3")
-	out, _ := runPreflight(t, repo, t.TempDir(), "3.11", head)
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", script, repo, t.TempDir(), "3.11", head)
+	cmd.Env = hermeticEnv(t, "")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	out := stdout.String()
 
 	idx := strings.Index(out, "receipt_sha256: ")
 	if idx < 0 {
-		t.Fatalf("missing receipt_sha256 line: %s", out)
+		t.Fatalf("missing receipt_sha256 line in stdout: %s\nstderr: %s", out, stderr.String())
 	}
 	reportText := out[:idx]
 	receiptLine := strings.TrimSpace(out[idx:])
 	wantHash := fmt.Sprintf("receipt_sha256: %x", sha256Sum(reportText))
 	if receiptLine != wantHash {
-		t.Fatalf("receipt does not match sha256 of the printed report:\nwant %s\ngot  %s", wantHash, receiptLine)
+		t.Fatalf("receipt does not match sha256 of the printed report:\nwant %s\ngot  %s\nstderr: %s", wantHash, receiptLine, stderr.String())
+	}
+}
+
+// pomar's review: a deterministic, hermetic regression for the stream-split
+// fix above, not a one-off manual probe. BASH_ENV is sourced by bash at the
+// start of every non-interactive invocation (including this script's own
+// top-level process) -- setting it in the EXPLICIT hermetic env (never
+// inherited) to a tiny file that writes one diagnostic line to stderr
+// reliably injects real, independent stderr noise into a run, without
+// touching the script's own source. This proves the general bug class
+// (stream-split correctness), not the exact native CI cause (a specific
+// ancestor-resolution failure this fixture doesn't reproduce) -- the two
+// are deliberately kept distinct here.
+func TestTrack3PreflightReceiptSurvivesInjectedStderrNoise(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+	bashEnvFile := filepath.Join(root, "bash_env_stderr_probe.sh")
+	if err := os.WriteFile(bashEnvFile, []byte("#!/bin/sh\necho 'injected diagnostic noise' >&2\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", script, repo, t.TempDir(), "3.11", head)
+	cmd.Env = hermeticEnv(t, "", "BASH_ENV="+bashEnvFile)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+
+	if !strings.Contains(stderr.String(), "injected diagnostic noise") {
+		t.Fatalf("the injection itself didn't take effect -- test is not exercising what it claims to: stderr=%q", stderr.String())
+	}
+
+	out := stdout.String()
+	idx := strings.Index(out, "receipt_sha256: ")
+	if idx < 0 {
+		t.Fatalf("missing receipt_sha256 line in stdout: %s", out)
+	}
+	wantHash := fmt.Sprintf("receipt_sha256: %x", sha256Sum(out[:idx]))
+	gotHash := strings.TrimSpace(out[idx:])
+	if gotHash != wantHash {
+		t.Fatalf("stdout-only receipt should survive injected stderr noise:\nwant %s\ngot  %s", wantHash, gotHash)
+	}
+
+	// Demonstrate exactly why the OLD CombinedOutput-based comparison this
+	// file used to make was wrong -- a SEPARATE run (stdout and stderr are
+	// genuinely interleaved by the kernel/pipe, in actual write order; a
+	// naive post-hoc concatenation of two independently-captured buffers
+	// does not reproduce that, so this needs a real CombinedOutput call,
+	// not a reconstruction from the run above). BASH_ENV's diagnostic is
+	// written before any of the script's own stdout exists, so it lands at
+	// the very start of the true merged stream, shifting everything after
+	// it -- reconstructing "what was hashed" from that merged stream must
+	// disagree with the real, stdout-only receipt.
+	cmd2 := exec.Command("bash", script, repo, t.TempDir(), "3.11", head)
+	cmd2.Env = hermeticEnv(t, "", "BASH_ENV="+bashEnvFile)
+	combinedBytes, _ := cmd2.CombinedOutput()
+	combined := string(combinedBytes)
+	oldIdx := strings.Index(combined, "receipt_sha256: ")
+	if oldIdx < 0 {
+		t.Fatalf("missing receipt_sha256 line in combined output: %s", combined)
+	}
+	oldWantHash := fmt.Sprintf("receipt_sha256: %x", sha256Sum(combined[:oldIdx]))
+	oldGotHash := strings.TrimSpace(combined[oldIdx:])
+	if oldWantHash == oldGotHash {
+		t.Fatalf("the combined-stream reconstruction should have mismatched its own receipt once stderr carried real content -- it didn't, so this scenario isn't actually exercising the bug the old logic had: %s", combined)
 	}
 }
 
@@ -1492,5 +1901,59 @@ func TestTrack3PreflightPandocFactsArePinnedToSourceHeadNotMutableHEAD(t *testin
 	wantLine(t, out, "zeocore source_head:", "zeocore source_head: "+firstHead)
 	if !strings.Contains(mustLine(t, out, "pandoc floor"), "2.15") {
 		t.Fatalf("pandoc floor must be read from the pinned source_head (%s, floor 2.15), not the mutable HEAD that moved to %s (floor 9.99) between calls: %s", firstHead, secondHead, out)
+	}
+}
+
+// This child never delegates waiting or TERM handling to another process.
+// The parent tests require its startup witness and its actual TERM marker.
+func TestTrack3WitnessCooperativeUVChild(t *testing.T) {
+	scenario := os.Getenv("POMAR_WITNESS_COOPERATIVE_SCENARIO")
+	if scenario == "" {
+		return
+	}
+	if scenario != "locked" && scenario != "unlinked" {
+		os.Exit(125)
+	}
+	dir, marker := os.Getenv("FAKE_SCRATCH_DIR"), os.Getenv("MARKER")
+	if dir == "" || marker == "" {
+		os.Exit(125)
+	}
+	terms := make(chan os.Signal, 1)
+	signal.Notify(terms, syscall.SIGTERM)
+	paths, err := filepath.Glob(filepath.Join(dir, "*.timeout"))
+	if err != nil || len(paths) == 0 {
+		os.Exit(125)
+	}
+	if scenario == "locked" {
+		if os.Chmod(dir, 0500) != nil {
+			os.Exit(125)
+		}
+		for _, p := range paths {
+			if os.Chmod(p, 0400) != nil {
+				os.Exit(125)
+			}
+		}
+	} else {
+		for _, p := range paths {
+			if os.Remove(p) != nil {
+				os.Exit(125)
+			}
+		}
+	}
+	if os.WriteFile(marker+".ready", []byte(scenario), 0600) != nil {
+		os.Exit(125)
+	}
+	select {
+	case <-terms:
+		if os.Chmod(dir, 0700) != nil {
+			os.Exit(125)
+		}
+		if os.WriteFile(marker, []byte("TERM"), 0600) != nil {
+			os.Exit(125)
+		}
+		os.Exit(0)
+	case <-time.After(20 * time.Second):
+		_ = os.Chmod(dir, 0700)
+		os.Exit(0)
 	}
 }

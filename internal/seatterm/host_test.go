@@ -81,9 +81,42 @@ func TestASessionOutlivesItsClients(t *testing.T) {
 	}
 	collect(t, c, snap.Data, "first")
 	c.Detach()
-	time.Sleep(900 * time.Millisecond)
 	if !s.Info().Running {
 		t.Fatal("detaching stopped the program")
+	}
+	// pomar's review: attaching c2 immediately and polling ITS snapshot
+	// would let "second" arrive over c2's own live event stream while it
+	// is already attached, which no longer tests the actual premise here
+	// -- that the session retains output while NO client is attached at
+	// all. Poll the session's own retained state directly instead (same
+	// package: snapshotLocked, under its own s.mu), with nothing attached,
+	// and only attach c2 once that is already true. The shell's own 0.5s
+	// sleep is measured from ITS process start, not from any fixed point
+	// this test controls, so a fixed wait here only has to be "long
+	// enough" under whatever scheduling delay happens to apply to the
+	// CHILD specifically -- poll for the real condition instead of
+	// guessing a bigger margin that still has to hold under arbitrary
+	// contention.
+	var observedDetached bool
+	var lastRetained []byte
+	for end := time.Now().Add(5 * time.Second); !observedDetached && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		s.mu.Lock()
+		lastRetained = s.snapshotLocked().Data
+		s.mu.Unlock()
+		if strings.Contains(string(lastRetained), "firstsecond") {
+			observedDetached = true
+		}
+	}
+	// pomar's review: falling through to Attach regardless of whether the
+	// loop above actually observed the condition (vs merely expiring)
+	// would let output that only arrives in the gap between expiry and
+	// Attach satisfy c2's later snapshot without ever having proven the
+	// no-client-attached premise at all -- fail explicitly here instead.
+	if !observedDetached {
+		t.Fatalf("never observed retained output while no client was attached: %q", lastRetained)
+	}
+	if !s.Info().Running {
+		t.Fatal("waiting with no client attached stopped the program")
 	}
 	c2, snap2, err := s.Attach("operator")
 	if err != nil {
@@ -191,17 +224,25 @@ func TestOnlyTheControllerReachesThePTY(t *testing.T) {
 // queued input never lands; and only the new controller's input arrives.
 func TestATakeoverFencesTheOldControllersQueuedInput(t *testing.T) {
 	h, j := newHost(t)
-	s, _, err := h.Create("op-4", "operator", sh("stty raw -echo; sleep 2; exec cat"))
+	// pomar/architect review: a fixed sleep here only has to be "long
+	// enough" for the child to have actually reached `stty raw -echo`
+	// under whatever host scheduling delay applies to ITS startup
+	// specifically -- unrelated to delay anywhere else in the test. The
+	// shell now writes an explicit marker right after that call returns,
+	// so the test can wait for the real condition the blocking-writer
+	// behavior below actually depends on (raw/no-echo mode genuinely
+	// active), rather than guess a duration.
+	s, _, err := h.Create("op-4", "operator", sh("stty raw -echo; printf 'RAWREADY\\n'; sleep 2; exec cat"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.cmd.Process.Kill()
-	time.Sleep(200 * time.Millisecond)
 	a, snap, _ := s.Attach("seat")
 	defer a.Detach()
 	if _, err := a.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
+	snap.Data = collect(t, a, snap.Data, "RAWREADY")
 	filler := bytes.Repeat([]byte("."), MaxData)
 	for i := 0; i < 4; i++ { // more than the terminal's input holds: the writer blocks
 		if err := a.Input(filler); err != nil {
