@@ -30,8 +30,16 @@ type MailInputRootBinding struct {
 }
 
 type MailInputAncestor struct {
-	CanonicalPath string            `json:"canonical_path"`
-	Metadata      MailInputMetadata `json:"metadata"`
+	CanonicalPath string                    `json:"canonical_path"`
+	Metadata      MailInputAncestorMetadata `json:"metadata"`
+}
+
+// Ancestor directory entry churn is unrelated to custody of this input.
+// Bind only identity/permissions; inspect ACLs on held descriptors each time.
+type MailInputAncestorMetadata struct {
+	Device, Inode uint64
+	UID, GID      uint32
+	Mode          os.FileMode
 }
 
 type MailInputMetadata struct {
@@ -56,12 +64,13 @@ type MailInputCustody struct {
 // Backend read-only mapping, receipt authority and post-run checks are separate.
 // Source files must be private0400/0600 and the established root private0700.
 func AcquireMailInput(root *os.Root, binding MailInputRootBinding, name string, size int64, digest string) ([]byte, MailInputCustody, error) {
-	return acquireMailInput(root, binding, name, size, digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe})
+	return acquireMailInput(root, binding, name, size, digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: hostpolicy.DescriptorACLSafe})
 }
 
 // Fault/unknown-metadata seams are package-private and never caller options.
 type mailInputHooks struct {
 	acl                   func(*os.File) bool
+	ancestorACL           func(*os.File) bool
 	beforeOpen, afterRead func()
 }
 
@@ -69,7 +78,7 @@ var errMailInputCustody = errors.New("mail input custody unavailable or changed"
 
 func acquireMailInput(root *os.Root, binding MailInputRootBinding, name string, size int64, digest string, hooks mailInputHooks) ([]byte, MailInputCustody, error) {
 	fail := func() ([]byte, MailInputCustody, error) { return nil, MailInputCustody{}, errMailInputCustody }
-	if root == nil || name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\x00") || size < 1 || size > 64<<10 || !sha.MatchString(digest) || hooks.acl == nil {
+	if root == nil || name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\x00") || size < 1 || size > 64<<10 || !sha.MatchString(digest) || hooks.acl == nil || hooks.ancestorACL == nil {
 		return fail()
 	}
 	if !filepath.IsAbs(binding.CanonicalPath) || filepath.Clean(binding.CanonicalPath) != binding.CanonicalPath || root.Name() != binding.CanonicalPath || binding.OwnerUID != uint32(os.Geteuid()) || !sha.MatchString(binding.AncestorsSHA256) || !sha.MatchString(binding.HostControlsSHA256) {
@@ -80,7 +89,7 @@ func acquireMailInput(root *os.Root, binding MailInputRootBinding, name string, 
 		return fail()
 	}
 	defer dir.Close()
-	rootBefore, e := checkMailInputRoot(root, dir, binding, hooks.acl)
+	rootBefore, e := checkMailInputRoot(root, dir, binding, hooks.acl, hooks.ancestorACL)
 	if e != nil {
 		return fail()
 	}
@@ -133,7 +142,7 @@ func acquireMailInput(root *os.Root, binding MailInputRootBinding, name string, 
 	if e != nil || pathFinal != final {
 		return fail()
 	}
-	rootAfter, e := checkMailInputRoot(root, dir, binding, hooks.acl)
+	rootAfter, e := checkMailInputRoot(root, dir, binding, hooks.acl, hooks.ancestorACL)
 	if e != nil || rootAfter != rootBefore {
 		return fail()
 	}
@@ -148,9 +157,9 @@ func safeMailInputFile(m MailInputMetadata, size int64) bool {
 	return m.Mode.IsRegular() && (m.Mode == 0400 || m.Mode == 0600) && m.UID == uint32(os.Geteuid()) && m.Links == 1 && m.Size == size
 }
 
-func checkMailInputRoot(root *os.Root, dir *os.File, binding MailInputRootBinding, acl func(*os.File) bool) (MailInputMetadata, error) {
+func checkMailInputRoot(root *os.Root, dir *os.File, binding MailInputRootBinding, acl, ancestorACL func(*os.File) bool) (MailInputMetadata, error) {
 	var zero MailInputMetadata
-	if !mailInputAncestorsMatch(binding) {
+	if !mailInputAncestorsMatch(binding, ancestorACL) {
 		return zero, errMailInputCustody
 	}
 	canonical, e := filepath.EvalSymlinks(binding.CanonicalPath)
@@ -176,7 +185,7 @@ func checkMailInputRoot(root *os.Root, dir *os.File, binding MailInputRootBindin
 	return m, nil
 }
 
-func mailInputAncestorsMatch(binding MailInputRootBinding) bool {
+func mailInputAncestorsMatch(binding MailInputRootBinding, acl func(*os.File) bool) bool {
 	if len(binding.Ancestors) == 0 || len(binding.Ancestors) > 128 || len(binding.CanonicalPath) > 4096 {
 		return false
 	}
@@ -207,12 +216,50 @@ func mailInputAncestorsMatch(binding MailInputRootBinding) bool {
 		if e != nil {
 			return false
 		}
-		meta, e := mailInputMetadata(info)
+		meta, e := mailInputAncestorMetadata(info)
 		if e != nil || meta != expected.Metadata || !meta.Mode.IsDir() || meta.Mode.Perm()&0022 != 0 || (meta.UID != 0 && meta.UID != uint32(os.Geteuid())) {
+			return false
+		}
+		if !mailInputAncestorDescriptorMatches(path, info, expected.Metadata, acl) {
 			return false
 		}
 	}
 	return true
+}
+
+func mailInputAncestorDescriptorMatches(path string, before os.FileInfo, expected MailInputAncestorMetadata, acl func(*os.File) bool) bool {
+	f, e := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_DIRECTORY, 0)
+	if e != nil {
+		return false
+	}
+	defer f.Close()
+	opened, e := f.Stat()
+	if e != nil || !os.SameFile(before, opened) {
+		return false
+	}
+	m, e := mailInputAncestorMetadata(opened)
+	if e != nil || m != expected || !acl(f) {
+		return false
+	}
+	after, e := f.Stat()
+	if e != nil {
+		return false
+	}
+	m, e = mailInputAncestorMetadata(after)
+	pathAfter, e2 := os.Lstat(path)
+	if e != nil || e2 != nil || m != expected || !os.SameFile(after, pathAfter) {
+		return false
+	}
+	pathMeta, e := mailInputAncestorMetadata(pathAfter)
+	return e == nil && pathMeta == expected
+}
+
+func mailInputAncestorMetadata(info os.FileInfo) (MailInputAncestorMetadata, error) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return MailInputAncestorMetadata{}, errMailInputCustody
+	}
+	return MailInputAncestorMetadata{Device: uint64(st.Dev), Inode: uint64(st.Ino), UID: st.Uid, GID: st.Gid, Mode: info.Mode()}, nil
 }
 
 func mailInputMetadata(info os.FileInfo) (MailInputMetadata, error) {

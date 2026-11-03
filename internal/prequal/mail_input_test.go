@@ -50,7 +50,7 @@ func mailInputFixture(t *testing.T) (*os.Root, MailInputRootBinding, string, []b
 		if e != nil {
 			t.Fatal(e)
 		}
-		m, e := mailInputMetadata(info)
+		m, e := mailInputAncestorMetadata(info)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -81,9 +81,57 @@ func requireMailInputRefusal(t *testing.T, data []byte, observation MailInputCus
 	}
 }
 
+// Ancestor policy is an explicit hermetic assumption for focused file/root
+// mutation cases. Production never receives this hook. Real root/file ACLs
+// still use the kernel checker; separate tests inspect production ancestors
+// and mutate only a disposable ancestor to exercise real ancestor ACL reads.
+func assumedFixtureAncestorACL(*os.File) bool { return true }
+
+func acquireFixtureMailInput(root *os.Root, b MailInputRootBinding, name string, size int64, digest string) ([]byte, MailInputCustody, error) {
+	return acquireMailInput(root, b, name, size, digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: assumedFixtureAncestorACL})
+}
+
+func TestMailInputAncestorSiblingChurnPreservesAcquisition(t *testing.T) {
+	root, b, _, data, digest := mailInputFixture(t)
+	sibling := filepath.Join(filepath.Dir(b.CanonicalPath), "unrelated-sibling")
+	hooks := mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: assumedFixtureAncestorACL, afterRead: func() {
+		if e := os.WriteFile(sibling, []byte("unrelated"), 0600); e != nil {
+			t.Fatal(e)
+		}
+	}}
+	got, _, e := acquireMailInput(root, b, "plan.json", int64(len(data)), digest, hooks)
+	if e != nil || !bytes.Equal(got, data) {
+		t.Fatalf("unrelated ancestor entry invalidated input: %v", e)
+	}
+	if _, e := os.Stat(sibling); e != nil {
+		t.Fatal("sibling creation was not exercised")
+	}
+}
+
+func TestMailInputProductionChecksAncestorACLs(t *testing.T) {
+	root, b, _, data, digest := mailInputFixture(t)
+	unsafe := false
+	for _, a := range b.Ancestors {
+		f, e := os.OpenFile(a.CanonicalPath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if !hostpolicy.DescriptorACLSafe(f) {
+			unsafe = true
+		}
+		f.Close()
+	}
+	got, proof, e := AcquireMailInput(root, b, "plan.json", int64(len(data)), digest)
+	if unsafe {
+		requireMailInputRefusal(t, got, proof, e)
+	} else if e != nil || !bytes.Equal(got, data) {
+		t.Fatalf("ACL-free ancestor control: %v", e)
+	}
+}
+
 func TestMailInputAcquiresDescriptorBytes(t *testing.T) {
 	root, b, path, want, digest := mailInputFixture(t)
-	got, proof, e := AcquireMailInput(root, b, filepath.Base(path), int64(len(want)), digest)
+	got, proof, e := acquireFixtureMailInput(root, b, filepath.Base(path), int64(len(want)), digest)
 	if e != nil || !bytes.Equal(got, want) || proof.SHA256 != digest || proof.File.Links != 1 || proof.Root.Inode != b.Inode {
 		t.Fatalf("safe descriptor acquisition: %v", e)
 	}
@@ -99,7 +147,7 @@ func TestMailInputAcceptsReadOnlySource(t *testing.T) {
 	if e := os.Chmod(path, 0400); e != nil {
 		t.Fatal(e)
 	}
-	got, proof, e := AcquireMailInput(root, b, "plan.json", int64(len(want)), digest)
+	got, proof, e := acquireFixtureMailInput(root, b, "plan.json", int64(len(want)), digest)
 	if e != nil || !bytes.Equal(got, want) || proof.File.Mode != 0400 {
 		t.Fatalf("read-only control: %v", e)
 	}
@@ -109,7 +157,7 @@ func TestMailInputRefusesNamesBeforeOpen(t *testing.T) {
 	root, b, _, data, digest := mailInputFixture(t)
 	for _, name := range []string{"", ".", "..", "/", "plan.json/child", "../plan.json", "a\x00b"} {
 		opened := false
-		got, proof, e := acquireMailInput(root, b, name, int64(len(data)), digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe, beforeOpen: func() { opened = true }})
+		got, proof, e := acquireMailInput(root, b, name, int64(len(data)), digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: assumedFixtureAncestorACL, beforeOpen: func() { opened = true }})
 		requireMailInputRefusal(t, got, proof, e)
 		if opened {
 			t.Fatal("invalid name reached open hook")
@@ -168,17 +216,17 @@ func TestMailInputRefusesUnsafeFiles(t *testing.T) {
 			case "changed inode binding":
 				b.Inode++
 			}
-			got, proof, e := AcquireMailInput(root, b, "plan.json", size, digest)
+			got, proof, e := acquireFixtureMailInput(root, b, "plan.json", size, digest)
 			requireMailInputRefusal(t, got, proof, e)
 		})
 	}
 }
 
 func TestMailInputRefusesSubstitutionAndMutation(t *testing.T) {
-	for _, kind := range []string{"symlink before open", "fifo before open", "file replacement", "same bytes rewritten", "unsafe final mode", "root replacement", "parent replacement", "ancestor record drift", "unknown ACL", "unknown file ACL"} {
+	for _, kind := range []string{"symlink before open", "fifo before open", "file replacement", "same bytes rewritten", "unsafe final mode", "root replacement", "parent replacement", "ancestor record drift", "unknown ACL", "unknown file ACL", "unknown ancestor ACL"} {
 		t.Run(kind, func(t *testing.T) {
 			root, b, path, data, digest := mailInputFixture(t)
-			hooks := mailInputHooks{acl: hostpolicy.DescriptorACLSafe}
+			hooks := mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: assumedFixtureAncestorACL}
 			switch kind {
 			case "symlink before open":
 				hooks.beforeOpen = func() {
@@ -246,6 +294,8 @@ func TestMailInputRefusesSubstitutionAndMutation(t *testing.T) {
 				b.AncestorsSHA256 = hex.EncodeToString(h[:])
 			case "unknown ACL":
 				hooks.acl = func(*os.File) bool { return false }
+			case "unknown ancestor ACL":
+				hooks.ancestorACL = func(*os.File) bool { return false }
 			case "unknown file ACL":
 				hooks.acl = func(f *os.File) bool { info, e := f.Stat(); return e == nil && info.IsDir() }
 			}
