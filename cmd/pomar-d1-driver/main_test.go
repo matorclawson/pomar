@@ -107,3 +107,17 @@ func TestActualNonLinuxReaderRefusesWithoutPayload(t *testing.T) {
 		t.Fatal("non-Linux reader produced an observation")
 	}
 }
+
+// A complete pipe write after cancellation is retained evidence, but its exit
+// must still refuse success so the owner cannot accept it as an observation.
+type cancelOnWrite struct{ cancel context.CancelFunc }
+
+func (w cancelOnWrite) Write(p []byte) (int, error) { w.cancel(); return len(p), nil }
+func TestCancellationDuringOutputRefusesSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var diagnostic bytes.Buffer
+	if run(ctx, exactArgs, cancelOnWrite{cancel}, &diagnostic, func(context.Context, string) (prequal.ProcessSnapshot, error) { return observation("original"), nil }) != 1 || diagnostic.Len() == 0 {
+		t.Fatal("output completed after cancellation was accepted")
+	}
+}

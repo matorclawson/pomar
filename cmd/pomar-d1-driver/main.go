@@ -82,6 +82,9 @@ func run(parent context.Context, args []string, out, diagnostic io.Writer, colle
 	if err == nil && n != len(raw) {
 		err = io.ErrShortWrite
 	}
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		fmt.Fprintln(diagnostic, err)
 		return 1
