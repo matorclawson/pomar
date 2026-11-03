@@ -39,17 +39,19 @@ type MailDenialComparison struct {
 }
 
 const mailIDToken = "__POMAR_VALIDATED_INPUT_ID__"
+const MailDenialTemplateVersion = "pomar.pre-model-mail-denial/v1"
 
 // MailDenialTemplate is frozen in the reviewed host plan, not supplied by a
 // guest response. Its sole token marks the maintained wire's echoed ID slot.
 type MailDenialTemplate struct {
+	Version    string
 	CallerSeat string
 	Body       []byte
 	SHA256     string
 }
 
 func validateMailDenialTemplate(t MailDenialTemplate) error {
-	if !id.MatchString(t.CallerSeat) || len(t.Body) == 0 || len(t.Body) > 64<<10 {
+	if t.Version != MailDenialTemplateVersion || !id.MatchString(t.CallerSeat) || len(t.Body) == 0 || len(t.Body) > 64<<10 {
 		return errors.New("bounded pinned denial template and caller required")
 	}
 	h := sha256.Sum256(t.Body)
@@ -95,7 +97,8 @@ func CompareMailDenials(template MailDenialTemplate, foreignID, missingID string
 		}
 	}
 	for i, input := range []string{foreignID, missingID} {
-		want := bytes.Replace(template.Body, []byte(mailIDToken), []byte(input), 1)
+		prefix, suffix, _ := bytes.Cut(template.Body, []byte(mailIDToken))
+		want := append(append(bytes.Clone(prefix), []byte(input)...), suffix...)
 		if !bytes.Equal([]MailDenial{foreign, missing}[i].Body, want) {
 			return r, errors.New("denial differs from pinned canonical template")
 		}
@@ -122,9 +125,6 @@ func CompareMailDenials(template MailDenialTemplate, foreignID, missingID string
 	r.MissingIDCount = bytes.Count(missing.Body, []byte(missingID))
 	if r.ForeignIDCount != 1 || r.MissingIDCount != 1 {
 		return r, errors.New("one unambiguous echoed input ID required in each denial")
-	}
-	if !bytes.Equal(bytes.ReplaceAll(foreign.Body, []byte(foreignID), []byte(mailIDToken)), bytes.ReplaceAll(missing.Body, []byte(missingID), []byte(mailIDToken))) {
-		return r, errors.New("different denial bytes after exact input ID replacement")
 	}
 	return r, nil
 }

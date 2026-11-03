@@ -21,7 +21,7 @@ func fixtureDenial(id string) MailDenial {
 func fixtureTemplate() MailDenialTemplate {
 	b := fixtureDenial(mailIDToken).Body
 	h := sha256.Sum256(b)
-	return MailDenialTemplate{CallerSeat: "pomar-d1-disposable-20261102", Body: b, SHA256: hex.EncodeToString(h[:])}
+	return MailDenialTemplate{Version: MailDenialTemplateVersion, CallerSeat: "pomar-d1-disposable-20261102", Body: b, SHA256: hex.EncodeToString(h[:])}
 }
 
 func fixLength(d *MailDenial) { d.Headers[2].Value = strconv.Itoa(len(d.Body)) }
@@ -133,6 +133,7 @@ func TestMailDenialsRejectPairwiseEqualNoncanonicalBodies(t *testing.T) {
 func TestMailDenialsRejectUnpinnedOrDifferentCallerTemplate(t *testing.T) {
 	for _, change := range []func(*MailDenialTemplate){
 		func(t *MailDenialTemplate) { t.SHA256 = "" },
+		func(t *MailDenialTemplate) { t.Version = "unreviewed-version" },
 		func(t *MailDenialTemplate) { t.CallerSeat = "another-seat" },
 		func(t *MailDenialTemplate) {
 			t.Body = append(t.Body, ' ')
