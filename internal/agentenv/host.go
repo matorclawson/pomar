@@ -584,7 +584,7 @@ func (h *Host) gate(e *Environment) (err error) {
 			ln.Close()
 			return err
 		}
-		server := &http.Server{Handler: mail, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 20 * time.Second, MaxHeaderBytes: 8192}
+		server := mailHTTPServer(mail)
 		h.servers[e.Spec.Environment+"-mail"] = server
 		e.Spec.MailSocket = socket
 		go server.Serve(ln)

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -950,7 +951,8 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 // (fed to a fake `mktemp` ahead of it on PATH so the directory's path is
 // fixed and known, instead of mktemp's own randomized name), makes that
 // directory read-only BEFORE the budget's sleep could possibly elapse, then
-// restores it a few seconds later so later script steps are unaffected.
+// keeps it locked until this process ends; the parent test restores it
+// during cleanup. No timer race can reopen the path before the watchdog.
 func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWitnessCannotBeWritten(t *testing.T) {
 	repo, head := zeocoreFixture(t, "3.1.3")
 	root := t.TempDir()
@@ -992,17 +994,14 @@ func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWit
 	}
 
 	marker := filepath.Join(root, "uv-finished")
-	fakeUV := "#!/bin/sh\n" +
-		"case \"$1\" in\n" +
-		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
-		"  lock)\n" +
-		"    chmod 0500 \"$FAKE_SCRATCH_DIR\"\n" +
-		"    ( sleep 4; chmod 0700 \"$FAKE_SCRATCH_DIR\" 2>/dev/null ) &\n" +
-		"    trap '' TERM\n" +
-		"    sleep 20\n" +
-		"    : > \"$MARKER\"\n" +
-		"    ;;\n" +
-		"esac\n"
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use one TERM-ignoring process and one timer as the witness, without
+	// relying on shell wait status or inherited sleep signal behavior. The
+	// earlier intermittent failure's exact signal sequence was not captured.
+	fakeUV := "#!/bin/sh\ncase \"$1\" in\n --version) echo 'uv 0.0.0-fake' ;;\n lock) exec \"$WITNESS_TEST_BINARY\" -test.run='^TestTrack3WitnessUnwritableUVChild$' ;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -1010,11 +1009,16 @@ func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWit
 
 	env := hermeticEnvRealTools(t, fakeBin,
 		"MARKER="+marker,
+		"WITNESS_TEST_BINARY="+helper,
+		"POMAR_WITNESS_UV_HELPER=1",
 		"FAKE_SCRATCH_DIR="+scratchDir,
 		"TRACK3_UV_TIMEOUT=2")
 	start := time.Now()
 	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
+	if ready, e := os.ReadFile(marker + ".ready"); e != nil || string(ready) != "TERM_IGNORED_SCRATCH_0500" {
+		t.Fatalf("fixture did not establish its signal/permission fault: %v; %s", e, out)
+	}
 	if elapsed > 30*time.Second {
 		t.Fatalf("script took %s, want well under the fake uv's 20s sleep (the watchdog must still kill a TERM-ignoring child even when it cannot persist its own timeout witness): %s", elapsed, out)
 	}
@@ -1028,6 +1032,31 @@ func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWit
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatalf("fake uv's completion marker exists -- the watchdog never sent TERM/KILL when its own timeout-marker write failed, so a TERM-ignoring child was not force-killed")
 	}
+}
+
+// TestTrack3WitnessUnwritableUVChild is only the subprocess fixture for the
+// witness-write test. It is inert in the normal test process. No shell wait
+// or child process can turn an interrupted sleep into a completion marker.
+func TestTrack3WitnessUnwritableUVChild(t *testing.T) {
+	if os.Getenv("POMAR_WITNESS_UV_HELPER") != "1" {
+		return
+	}
+	signal.Ignore(syscall.SIGTERM)
+	dir, marker := os.Getenv("FAKE_SCRATCH_DIR"), os.Getenv("MARKER")
+	if dir == "" || marker == "" {
+		os.Exit(125)
+	}
+	if err := os.Chmod(dir, 0500); err != nil {
+		os.Exit(125)
+	}
+	if err := os.WriteFile(marker+".ready", []byte("TERM_IGNORED_SCRATCH_0500"), 0600); err != nil {
+		os.Exit(125)
+	}
+	time.Sleep(20 * time.Second)
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		os.Exit(125)
+	}
+	os.Exit(0)
 }
 
 // pomar's third, independent review (AMEND THIRD-WITNESS-CHANNEL-FAILURE-01):

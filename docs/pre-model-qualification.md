@@ -88,8 +88,8 @@ history API is a prerequisite. Null fields alone still prove nothing.
 The pre-stop owner-executed in-guest inventory carries the owning adapter's
 scope, PID, UID, full executable path and complete argv. It is not a host
 process view or a model-phase qualification. They are checked against a closed path/UID allowlist, including
-only the configured init/sleep paths, verified kernel threads, the pinned
-probe/driver, and ps. Interpreters, truncated names and unknown executables
+only the configured init/sleep paths, verified kernel threads, the exact
+root collector/relay shim, and ps. Interpreters, truncated names and unknown executables
 are rejected. Kernel status must come from the owner collector; brackets in
 guest text never confer it. Guest ps uses full arguments as a second view and
 the same executable policy. The owner-executed guest snapshot is collected before stop, so
@@ -181,3 +181,51 @@ verify the actual host end/custody against independent owner policy before
 mapping; these fields or a digest alone are not evidence that the socket
 exists or belongs to the fixed relay. Native process inventory must show
 exactly one live shim and the root collector itself before stop.
+
+After the mail Exec has completed, neither process view may contain a
+UID1000 D1 driver. Even correct mail args cannot authorize a lingering or
+extra process. Only the one UID0 collector mode is expected at inventory.
+
+The isolation probe has also completed before either pre-stop inventory.
+Any lingering or extra probe is refused in both views, independently of UID
+or arguments. The earlier source allowance is not carried into this backend
+follow-up.
+
+
+## Mail-only host endpoint source seam
+
+`agentenv.OpenMailOnlyChannel(ctx, options)` reuses the maintained mail relay,
+HTTP timeouts, four-slot process upstream budget, per-guest shares, fixed
+identity/header/body rules, retry-key namespace and revocation. It does not
+call `Host.gate`, start egress/Go proxy channels, open an agent host, register a
+seat or admit a profile. The owning phase must already have its real claim
+and must journal the call and returned binding before VM mapping.
+
+The caller supplies existing canonical private current-owner Root and
+Root/Environment directories, exact environment/incarnation/operation/seat,
+the approved upstream origin and a live owner context of at most ten minutes.
+Only Root/Environment/mail.sock is bound (0600). Occupied regular/live/dead
+socket paths refuse; no stale socket is removed to make room. Exclusive
+intent/ready/closed evidence and an owner lock preserve original identity.
+The live Binding method checks actual socket inode/mode and the privately
+created listener's still-open kernel binding; a ready JSON file is historical
+and cannot make an empty, dead or replaced pathname an endpoint.
+
+`Revoke` cancels upstream work and closes the listener/connections. `Close`
+also waits for actual handler and server drain, checks parent/socket identity,
+and unlinks only its observed original socket. A timeout retains the original
+for another Close/inspection; it does not write a positive drain terminal.
+A replaced socket/parent is retained and reported, never removed as cleanup.
+Owner context cancellation revokes the endpoint without granting a new life.
+
+The listener binding is not upstream seat authorization. In the maintained
+handler a foreign X-Zmail-Instance is refused locally before forwarding;
+it is not merely overwritten. The native driver must validate that actual
+layer, and the separate node-row/live-file prerequisites still apply. This
+source seam is not installed in release410 and provides no live D1 pathname.
+
+The root collector inventory enforces exactly one live shim and one root
+collector. A missing or duplicate instance refuses qualification. The earlier
+guest ps view must include the shim PID from that inventory and refuses any
+D1 driver: its own collector has not been invoked at that point. These are
+sequential observations, not a claim of simultaneous process snapshots.

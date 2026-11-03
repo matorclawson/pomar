@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,5 +203,70 @@ func TestNativePlanRejectsOldSchemaAndMappingDrift(t *testing.T) {
 				t.Fatal("native mapping/schema drift accepted")
 			}
 		})
+	}
+}
+
+func TestPreStopInventoryRefusesAnyLingeringMailDriver(t *testing.T) {
+	_, p := fixture(t)
+	for _, args := range [][]string{nil, {"/pomar/d1-driver", "-mode", "other"}, append([]string{"/pomar/d1-driver"}, mailArgs(p)...)} {
+		row := ProcessRow{PID: 100, UID: 1000, Exe: "/pomar/d1-driver", Args: args}
+		if allowedProcess(row) {
+			t.Fatal("lingering UID1000 driver accepted after completed mail Exec")
+		}
+		s := ProcessSnapshot{ScopeID: "scope", Kind: OwnerGuestInventoryKind, Rows: []ProcessRow{row}}
+		if validateProcesses(s, "scope") == nil {
+			t.Fatal("unexpected mail process accepted")
+		}
+	}
+}
+
+func TestPreStopInventoryRefusesLingeringIsolationProbeInBothViews(t *testing.T) {
+	for _, uid := range []int{0, 1000} {
+		row := ProcessRow{PID: 100, UID: uid, Exe: "/pomar/isolation-probe", Args: []string{"/pomar/isolation-probe", "-plan", "/pomar/probe-plan.json"}}
+		if allowedProcess(row) {
+			t.Fatal("completed probe accepted in process inventory")
+		}
+		s := ProcessSnapshot{ScopeID: "scope", Kind: OwnerGuestInventoryKind, Rows: []ProcessRow{row}}
+		if validateProcesses(s, "scope") == nil {
+			t.Fatal("probe accepted in owner-executed guest inventory")
+		}
+		if validateGuestProcesses([]byte(fmt.Sprintf("100 %d /pomar/isolation-probe -plan /pomar/probe-plan.json\n", uid)), s) == nil {
+			t.Fatal("probe accepted in ps view")
+		}
+	}
+}
+
+func TestInventoryRequiresOneShimAndCollectorInBothViews(t *testing.T) {
+	scope := "scope"
+	rows := []ProcessRow{{PID: 42, UID: 0, Exe: "/pomar/shim", Args: mailShimArgs()}, {PID: 43, UID: 0, Exe: "/pomar/d1-driver", Args: append([]string{"/pomar/d1-driver"}, collectorCommand(scope).Args...)}}
+	snapshot := func(r []ProcessRow) ProcessSnapshot {
+		return ProcessSnapshot{ScopeID: scope, Kind: OwnerGuestInventoryKind, Rows: r}
+	}
+	if err := validateProcesses(snapshot(rows), scope); err != nil {
+		t.Fatal(err)
+	}
+	good := []byte("42 0 /pomar/shim\n")
+	if err := validateGuestProcesses(good, snapshot(rows)); err != nil {
+		t.Fatal(err)
+	}
+	for i := range rows {
+		missing := []ProcessRow{rows[1-i]}
+		duplicate := append([]ProcessRow(nil), rows...)
+		extra := rows[i]
+		extra.PID = 44
+		duplicate = append(duplicate, extra)
+		for _, bad := range [][]ProcessRow{missing, duplicate} {
+			if validateProcesses(snapshot(bad), scope) == nil {
+				t.Fatal("missing/duplicate inventory infrastructure accepted", i)
+			}
+			if validateGuestProcesses(good, snapshot(bad)) == nil {
+				t.Fatal("invalid paired infrastructure accepted", i)
+			}
+		}
+	}
+	for _, bad := range []string{"43 0 /pomar/d1-driver\n", "42 0 /pomar/shim\n43 0 /pomar/d1-driver\n44 0 /pomar/shim\n"} {
+		if validateGuestProcesses([]byte(bad), snapshot(rows)) == nil {
+			t.Fatal("missing/duplicate guest infrastructure accepted", bad)
+		}
 	}
 }
