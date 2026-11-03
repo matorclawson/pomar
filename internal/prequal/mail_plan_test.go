@@ -193,3 +193,41 @@ func TestMailDenialsBindPinnedHeaderSet(t *testing.T) {
 		t.Fatal("accepted matching but unpinned headers")
 	}
 }
+
+func TestMailDenialsRejectIDAlsoInFixedTemplateText(t *testing.T) {
+	for _, collision := range []string{"inbox", "pomar-d1-disposable-20261102"} {
+		for _, foreign := range []bool{true, false} {
+			fID, mID := "msg-foreign-existing", "msg-missing"
+			if foreign {
+				fID = collision
+			} else {
+				mID = collision
+			}
+			f, m := fixtureDenial(fID), fixtureDenial(mID)
+			if bytes.Count(f.Body, []byte(fID)) == 1 && bytes.Count(m.Body, []byte(mID)) == 1 {
+				t.Fatal("collision fixture did not reach repeated fixed-text ID")
+			}
+			if _, err := CompareMailDenials(fixtureTemplate(), fID, mID, f, m); err == nil {
+				t.Fatal("accepted an ID also occurring outside the declared slot")
+			}
+		}
+	}
+}
+
+func TestMailDenialsRejectIdenticalFixedWireDrift(t *testing.T) {
+	for _, change := range []func([]byte) []byte{
+		func(b []byte) []byte {
+			return bytes.ReplaceAll(b, []byte("pomar-d1-disposable-20261102"), []byte("different-caller"))
+		},
+		func(b []byte) []byte { return bytes.ReplaceAll(b, []byte("no message"), []byte("private payload")) },
+		func(b []byte) []byte { return append(b, ' ') },
+	} {
+		f, m := fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")
+		f.Body, m.Body = change(f.Body), change(m.Body)
+		fixLength(&f)
+		fixLength(&m)
+		if _, err := CompareMailDenials(fixtureTemplate(), "msg-foreign-existing", "msg-missing", f, m); err == nil {
+			t.Fatal("accepted matching fixed-wire drift on both responses")
+		}
+	}
+}

@@ -28,7 +28,7 @@ type MailDenial struct {
 	Body    []byte
 }
 
-// MailDenialComparison retains raw body digests and exact replacement counts.
+// MailDenialComparison retains raw body digests and exact input-ID counts.
 // This partial GET comparison never grants full D1 acceptance or execution.
 type MailDenialComparison struct {
 	TemplateSHA256        string `json:"template_sha256"`
