@@ -49,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "one fixed operation required: self-test-public, probe, generate, public")
+		fmt.Fprintln(os.Stderr, "one fixed operation required: self-test-public, probe, generate, public, generate-rehearsal, public-rehearsal, issue-current, issue-rehearsal, publish-trust")
 		os.Exit(2)
 	}
 	c := config{custodyHome, "ENG-UK-0006", custodyKeyID, 530, 530, rand.Reader}
@@ -81,7 +81,8 @@ func run(c config, operation string, output io.Writer) error {
 		_, err := fmt.Fprintln(output, "PUBLIC_SELF_TEST_PASS no_private_key_access=true")
 		return err
 	}
-	if operation != "probe" && operation != "generate" && operation != "public" {
+	rehearsal := operation == "generate-rehearsal" || operation == "public-rehearsal" || operation == "issue-rehearsal"
+	if operation != "probe" && operation != "generate" && operation != "public" && operation != "issue-current" && operation != "publish-trust" && !rehearsal {
 		return errors.New("unknown fixed operation")
 	}
 	if os.Geteuid() != c.uid || os.Getegid() != c.gid || c.uid == 0 {
@@ -93,6 +94,34 @@ func run(c config, operation string, output io.Writer) error {
 	if err := checkHome(c); err != nil {
 		return err
 	}
+	if rehearsal {
+		// Architect A1: a separate key never adopted by production trust.
+		// The only extra path is this fixed child of the checked custody home.
+		if operation == "generate-rehearsal" {
+			if err := os.Mkdir(c.home+"/rehearsal", 0700); err != nil {
+				return errors.New("rehearsal custody directory exists or unavailable; reconcile")
+			}
+			parent, err := os.Open(c.home)
+			if err != nil {
+				return errors.New("rehearsal parent sync unavailable")
+			}
+			err = parent.Sync()
+			closeErr := parent.Close()
+			if err != nil || closeErr != nil {
+				return errors.New("rehearsal parent sync failed; preserve state")
+			}
+		}
+		c.home += "/rehearsal"
+		c.keyID = "pomar-feed-rehearsal-a-202611"
+		if err := checkHome(c); err != nil {
+			return err
+		}
+		if operation == "generate-rehearsal" {
+			operation = "generate"
+		} else if operation == "public-rehearsal" {
+			operation = "public"
+		}
+	}
 	root, err := os.OpenRoot(c.home)
 	if err != nil {
 		return errors.New("custody home unavailable")
@@ -100,6 +129,16 @@ func run(c config, operation string, output io.Writer) error {
 	defer root.Close()
 	if operation == "generate" {
 		return generate(c, root, output)
+	}
+	if operation == "publish-trust" {
+		return publishTrust(c, root, "/Users/Shared/pomar-feed", output)
+	}
+	if operation == "issue-current" || operation == "issue-rehearsal" {
+		policy := "/Library/Application Support/pomar-feed-policy/current.json"
+		if operation == "issue-rehearsal" {
+			policy = "/Library/Application Support/pomar-feed-policy/rehearsal.json"
+		}
+		return issue(c, root, policy, "/Users/Shared/pomar-feed", output)
 	}
 	return public(c, root, output)
 }
@@ -215,14 +254,25 @@ func privateSeed(c config, root *os.Root) ([]byte, error) {
 }
 
 func public(c config, root *os.Root, output io.Writer) error {
+	before, err := root.Lstat("public-key.json")
+	if err != nil || !before.Mode().IsRegular() {
+		return errors.New("public completion must be a regular leaf")
+	}
 	f, err := root.OpenFile("public-key.json", os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return errors.New("public completion unavailable; preserve state")
 	}
 	defer f.Close()
 	s, err := f.Stat()
-	if err != nil || !s.Mode().IsRegular() || s.Size() > 8192 {
+	if err != nil || !os.SameFile(before, s) || !s.Mode().IsRegular() || s.Mode().Perm() != 0600 || s.Size() > 8192 {
 		return errors.New("public completion invalid")
+	}
+	st, ok := s.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != c.uid || int(st.Gid) != c.gid || st.Nlink != 1 {
+		return errors.New("public completion identity mismatch")
+	}
+	if err := noACL(c.home + "/public-key.json"); err != nil {
+		return err
 	}
 	var record publicRecord
 	dec := json.NewDecoder(io.LimitReader(f, 8193))

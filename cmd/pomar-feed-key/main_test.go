@@ -147,3 +147,31 @@ func TestMissingDriftAndRedirectRefusePublicReadback(t *testing.T) {
 		})
 	}
 }
+
+func TestRehearsalHasSeparateCustodyAndIdentity(t *testing.T) {
+	c := testConfig(t)
+	var prod, rehearsal bytes.Buffer
+	if e := run(c, "generate", &prod); e != nil {
+		t.Fatal(e)
+	}
+	// Separate entropy fixture: the production key must not be reused.
+	c.entropy = bytes.NewReader(bytes.Repeat([]byte{7}, 32))
+	if e := run(c, "generate-rehearsal", &rehearsal); e != nil {
+		t.Fatal(e)
+	}
+	var p, r publicRecord
+	if json.Unmarshal(prod.Bytes(), &p) != nil || json.Unmarshal(rehearsal.Bytes(), &r) != nil || r.KeyID != "pomar-feed-rehearsal-a-202611" || r.PublicKey == p.PublicKey {
+		t.Fatal("rehearsal shares production identity")
+	}
+	rehearsal.Reset()
+	if e := run(c, "public-rehearsal", &rehearsal); e != nil {
+		t.Fatal(e)
+	}
+	if e := run(c, "generate-rehearsal", &rehearsal); e == nil {
+		t.Fatal("rehearsal replay allowed")
+	}
+	var reread bytes.Buffer
+	if e := run(c, "public", &reread); e != nil || !bytes.Equal(prod.Bytes(), reread.Bytes()) {
+		t.Fatal("production custody changed")
+	}
+}
