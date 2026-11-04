@@ -1,0 +1,32 @@
+{
+  "repository": "rodriveracom/zeoconnect",
+  "commit": "5beb6146e8ff32d05faacbef591bdb494db54939",
+  "path": "contract/fixtures/pomar-release-entry-1/cases",
+  "test_only": true,
+  "files": [
+    {
+      "path": "accepted-release-1/attestation.bin",
+      "sha256": "d222a8275b040f824686e6d685e0f7900f0a5a53bdabdaefdb6ba5a502d6aea0"
+    },
+    {
+      "path": "accepted-release-1/release.json",
+      "sha256": "1fdd9491d73602b90bc7f817a3f578ebf9ea810e04c0c11ec7e6ac2d382cd576"
+    },
+    {
+      "path": "accepted-release-2-one-wheel/attestation.bin",
+      "sha256": "fd020cbbb5db66678b40864db06a8f617bfdb0eae6b3b4faf2be700c0e445c82"
+    },
+    {
+      "path": "accepted-release-2-one-wheel/release.json",
+      "sha256": "6e826bca16668259019c3f1a7d5cf5bf0a8982358699b71fe4373d9a63e26083"
+    },
+    {
+      "path": "accepted-release-2-four-wheels/attestation.bin",
+      "sha256": "53ffa3fd1a639add6aea46d95d8e806f2fd370fa65f2ce9883dc43beae9ae0e6"
+    },
+    {
+      "path": "accepted-release-2-four-wheels/release.json",
+      "sha256": "4e8d25e730facf51c4979d3756b893b6f02dedb4c11e862af61906bfd183038e"
+    }
+  ]
+}
