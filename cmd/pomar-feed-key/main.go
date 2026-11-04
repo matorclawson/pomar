@@ -26,6 +26,7 @@ const custodyKeyID = "pomar-feed-a-202611"
 
 type config struct {
 	home, host, keyID string
+	publicBase        string
 	uid, gid          int
 	entropy           io.Reader
 }
@@ -52,7 +53,24 @@ func main() {
 		fmt.Fprintln(os.Stderr, "one fixed operation required: self-test-public, probe, generate, public, generate-rehearsal, public-rehearsal, issue-current, issue-rehearsal, publish-trust")
 		os.Exit(2)
 	}
-	c := config{custodyHome, "ENG-UK-0006", custodyKeyID, 530, 530, rand.Reader}
+	if os.Args[1] == "self-test-public" {
+		if err := publicSelfTest(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stdout, "PUBLIC_SELF_TEST_PASS no_private_key_access=true")
+		return
+	}
+	if os.Geteuid() != 530 || os.Getegid() != 530 {
+		fmt.Fprintln(os.Stderr, "dedicated custodian UID530 GID530 required")
+		os.Exit(1)
+	}
+	binding, err := loadSiteBinding()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	c := config{home: custodyHome, host: binding.Hostname, keyID: custodyKeyID, publicBase: binding.PublicBase, uid: 530, gid: 530, entropy: rand.Reader}
 	if err := run(c, os.Args[1], os.Stdout); err != nil {
 		// Errors are fixed words/metadata, never seed bytes or key objects.
 		fmt.Fprintln(os.Stderr, err)
@@ -131,14 +149,14 @@ func run(c config, operation string, output io.Writer) error {
 		return generate(c, root, output)
 	}
 	if operation == "publish-trust" {
-		return publishTrust(c, root, "/Users/Shared/pomar-feed", output)
+		return publishTrust(c, root, c.publicBase, output)
 	}
 	if operation == "issue-current" || operation == "issue-rehearsal" {
 		policy := "/Library/Application Support/pomar-feed-policy/current.json"
 		if operation == "issue-rehearsal" {
 			policy = "/Library/Application Support/pomar-feed-policy/rehearsal.json"
 		}
-		return issue(c, root, policy, "/Users/Shared/pomar-feed", output)
+		return issue(c, root, policy, c.publicBase, output)
 	}
 	return public(c, root, output)
 }

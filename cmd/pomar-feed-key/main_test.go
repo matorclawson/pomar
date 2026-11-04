@@ -23,7 +23,7 @@ func testConfig(t *testing.T) config {
 		t.Fatal(err)
 	}
 	// Public deterministic TEST-ONLY bytes. Never an operational custodian key.
-	return config{home, host, "test-feed-key", os.Geteuid(), os.Getegid(), bytes.NewReader(bytes.Repeat([]byte{9}, 32))}
+	return config{home: home, host: host, keyID: "test-feed-key", uid: os.Geteuid(), gid: os.Getegid(), entropy: bytes.NewReader(bytes.Repeat([]byte{9}, 32))}
 }
 
 func TestPublicCryptoAndWrongRoleHaveNoCustodyEffects(t *testing.T) {
