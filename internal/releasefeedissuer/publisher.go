@@ -105,6 +105,11 @@ func Publish(base string, uid int, b Bundle) error {
 	if e := root.Mkdir(stage, 0755); e != nil {
 		return fmt.Errorf("pending issue exists or unavailable; reconcile")
 	}
+	// The custodian may inherit umask077. Publication modes are explicit,
+	// independent of its private-key creation mask.
+	if e := root.Chmod(stage, 0755); e != nil {
+		return e
+	}
 	if e := syncDirectory(root); e != nil {
 		return e
 	}

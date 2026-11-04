@@ -8,6 +8,7 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/releasefeedwire"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -146,5 +147,30 @@ func TestA3ModesSymlinksAndUnknownPredecessorRefused(t *testing.T) {
 				t.Fatal("unsafe publication allowed")
 			}
 		})
+	}
+}
+
+func TestPublicEntryReadableUnderPrivateUmask(t *testing.T) {
+	p, r, f, k, n := fixture(t)
+	b, e := Build(p, r, f, k, n)
+	if e != nil {
+		t.Fatal(e)
+	}
+	base := publicRoot(t)
+	old := syscall.Umask(0077)
+	defer syscall.Umask(old)
+	if e := Publish(base, os.Getuid(), b); e != nil {
+		t.Fatal(e)
+	}
+	dir := filepath.Join(base, "rehearsal", b.EntryID)
+	info, e := os.Stat(dir)
+	if e != nil || info.Mode().Perm() != 0755 {
+		t.Fatal("private umask made public entry unreadable", e)
+	}
+	for name := range b.Files {
+		info, e := os.Stat(filepath.Join(dir, name))
+		if e != nil || info.Mode().Perm() != 0644 {
+			t.Fatal("public file mode differs", e)
+		}
 	}
 }
