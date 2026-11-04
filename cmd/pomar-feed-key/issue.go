@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/zeroemployeeorg/pomar/internal/releasefeedinput"
 	"github.com/zeroemployeeorg/pomar/internal/releasefeedissuer"
 	"io"
 	"os"
@@ -61,11 +62,23 @@ func protectedPolicy(path string) ([]byte, error) {
 	}
 	return raw, nil
 }
+
+type artifactRoot interface {
+	releasefeedinput.Root
+	Close() error
+}
+
 func readIssueInputs(in issuanceInput) (map[string][]byte, []byte, error) {
+	return readIssueInputsUsingRoot(in, func(path string) (artifactRoot, error) { return os.OpenRoot(path) })
+}
+
+// The factory is internal dependency injection for descriptor-boundary tests,
+// never a command argument or a configurable privileged operation.
+func readIssueInputsUsingRoot(in issuanceInput, openRoot func(string) (artifactRoot, error)) (map[string][]byte, []byte, error) {
 	if !filepath.IsAbs(in.InputsDirectory) || len(in.Policy.Files) > 18 {
 		return nil, nil, fmt.Errorf("input inventory invalid")
 	}
-	root, e := os.OpenRoot(in.InputsDirectory)
+	root, e := openRoot(in.InputsDirectory)
 	if e != nil {
 		return nil, nil, e
 	}
@@ -80,23 +93,18 @@ func readIssueInputs(in issuanceInput) (map[string][]byte, []byte, error) {
 		if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,199}$`).MatchString(n) {
 			return nil, nil, fmt.Errorf("input filename invalid")
 		}
-		before, e := root.Lstat(n)
-		if e != nil || !before.Mode().IsRegular() || before.Size() > 32<<20 {
-			return nil, nil, fmt.Errorf("input leaf invalid")
+		limit := releasefeedinput.MaxBytes
+		switch n {
+		case "release.json":
+			limit = 131072
+		case "receipt.json":
+			limit = 1048576
+		case "SHA256SUMS":
+			limit = 16384
 		}
-		f, e := root.Open(n)
+		raw, e := releasefeedinput.ReadRegular(root, n, limit)
 		if e != nil {
 			return nil, nil, e
-		}
-		actual, e := f.Stat()
-		if e != nil || !os.SameFile(before, actual) {
-			f.Close()
-			return nil, nil, fmt.Errorf("input changed")
-		}
-		raw, e := io.ReadAll(io.LimitReader(f, 32<<20+1))
-		ce := f.Close()
-		if e != nil || ce != nil || len(raw) > 32<<20 {
-			return nil, nil, fmt.Errorf("input read incomplete")
 		}
 		if n == "receipt.json" {
 			receipt = raw
@@ -106,6 +114,7 @@ func readIssueInputs(in issuanceInput) (map[string][]byte, []byte, error) {
 	}
 	return files, receipt, nil
 }
+
 func issue(c config, root *os.Root, policyPath, publicBase string, out io.Writer) error {
 	raw, e := protectedPolicy(policyPath)
 	if e != nil {

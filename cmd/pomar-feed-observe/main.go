@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/zeroemployeeorg/pomar/internal/releasefeedinput"
 	"github.com/zeroemployeeorg/pomar/internal/releasefeedobserver"
 	"io"
 	"os"
@@ -18,7 +19,17 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+type artifactRoot interface {
+	releasefeedinput.Root
+	Open(string) (*os.File, error)
+	Close() error
+}
+
 func run(args []string, out io.Writer) error {
+	return runUsingRoot(args, out, func(path string) (artifactRoot, error) { return os.OpenRoot(path) })
+}
+func runUsingRoot(args []string, out io.Writer, openRoot func(string) (artifactRoot, error)) error {
 	f := flag.NewFlagSet("pomar-feed-observe", flag.ContinueOnError)
 	dir := f.String("inputs", "", "received artifact directory")
 	head := f.String("head", "", "independently received full source commit")
@@ -34,7 +45,7 @@ func run(args []string, out io.Writer) error {
 	if e != nil || !before.IsDir() {
 		return fmt.Errorf("real input directory required")
 	}
-	root, e := os.OpenRoot(*dir)
+	root, e := openRoot(*dir)
 	if e != nil {
 		return e
 	}
@@ -58,23 +69,16 @@ func run(args []string, out io.Writer) error {
 	files := map[string][]byte{}
 	for _, entry := range entries {
 		name := entry.Name()
-		info, e := root.Lstat(name)
-		if e != nil || !info.Mode().IsRegular() || info.Size() > releasefeedobserver.MaxArtifactBytes {
-			return fmt.Errorf("input leaf invalid")
+		limit := releasefeedinput.MaxBytes
+		switch name {
+		case "release.json":
+			limit = 131072
+		case "SHA256SUMS":
+			limit = 16384
 		}
-		file, e := root.Open(name)
+		raw, e := releasefeedinput.ReadRegular(root, name, limit)
 		if e != nil {
 			return e
-		}
-		actual, e := file.Stat()
-		if e != nil || !os.SameFile(info, actual) {
-			file.Close()
-			return fmt.Errorf("input changed")
-		}
-		raw, e := io.ReadAll(io.LimitReader(file, releasefeedobserver.MaxArtifactBytes+1))
-		closeErr := file.Close()
-		if e != nil || closeErr != nil || len(raw) > releasefeedobserver.MaxArtifactBytes {
-			return fmt.Errorf("input read incomplete")
 		}
 		files[name] = raw
 	}
