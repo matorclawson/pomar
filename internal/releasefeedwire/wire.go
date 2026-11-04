@@ -146,12 +146,17 @@ func Prepare(c Claims, manifest, receipt []byte) (Prepared, error) {
 	if len(raw) > MaxHeaderBytes || 8+len(raw)+64 > MaxAttestationBytes {
 		return Prepared{}, fmt.Errorf("constructed header exceeds wire bounds")
 	}
+	return Prepared{header: raw, signingInput: signatureInput(raw, manifest), entryID: entryID}, nil
+}
+
+// signatureInput preserves the exact header bytes; reserializing would change
+// the signed transcript. It is internal to the typed producer and vector tests.
+func signatureInput(raw, manifest []byte) []byte {
 	input := append([]byte(Domain), 0)
 	input = binary.BigEndian.AppendUint32(input, uint32(len(raw)))
 	input = append(input, raw...)
 	input = binary.BigEndian.AppendUint64(input, uint64(len(manifest)))
-	input = append(input, manifest...)
-	return Prepared{header: raw, signingInput: input, entryID: entryID}, nil
+	return append(input, manifest...)
 }
 
 func (p Prepared) HeaderBytes() []byte  { return bytes.Clone(p.header) }
