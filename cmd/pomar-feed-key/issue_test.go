@@ -37,6 +37,9 @@ func TestFixedIssuerDurableIntentAndSeparateRehearsal(t *testing.T) {
 		if e := os.Mkdir(filepath.Join(base, lane), 0755); e != nil {
 			t.Fatal(e)
 		}
+		if e := os.Chmod(filepath.Join(base, lane), 0755); e != nil {
+			t.Fatal(e)
+		}
 	}
 	input := t.TempDir()
 	now := time.Now().UTC().Truncate(time.Second)

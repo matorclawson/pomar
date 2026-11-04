@@ -88,6 +88,9 @@ func publicRoot(t *testing.T) string {
 		if e := os.Mkdir(filepath.Join(d, lane), 0755); e != nil {
 			t.Fatal(e)
 		}
+		if e := os.Chmod(filepath.Join(d, lane), 0755); e != nil {
+			t.Fatal(e)
+		}
 	}
 	return d
 }
