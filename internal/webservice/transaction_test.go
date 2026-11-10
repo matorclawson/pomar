@@ -3,6 +3,7 @@ package webservice
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -284,5 +285,149 @@ func TestFailedTransitionCommitDoesNotPublishIntent(t *testing.T) {
 	op, err := (Engine{Store: m}).Begin(r)
 	if err != nil || op.Phase != Prepared || m.s.Revision != 1 {
 		t.Fatal("failed commit exposed a future effect intent")
+	}
+}
+
+func candidateAt(t *testing.T, e Engine, r Request, phase Phase) Operation {
+	t.Helper()
+	op, err := e.Begin(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []EventKind{RequestMaintenance, MaintenanceClosed, PreviousDeparted, RequestAPI, APIHealthy, WebHealthy} {
+		op = advance(t, e, op, kind)
+		if op.Phase == phase {
+			return op
+		}
+	}
+	t.Fatalf("unreachable fixture phase %s", phase)
+	return Operation{}
+}
+
+func TestKnownCandidateFailureRequiresDepartureAndPreviousHealth(t *testing.T) {
+	for _, failureAt := range []Phase{APIStartIntent, WebStartIntent, ReopenIntent} {
+		t.Run(string(failureAt), func(t *testing.T) {
+			m, r := fixture()
+			e := Engine{Store: m}
+			op := candidateAt(t, e, r, failureAt)
+			op = advance(t, e, op, CandidateFailed)
+			// Even a known failure cannot skip re-closing public routing.
+			if _, err := e.Advance(Event{ID: r.ID, Epoch: r.Epoch, From: op.Phase, Kind: CandidateDeparted, Evidence: hash("e")}); err == nil {
+				t.Fatal("candidate departure bypassed maintenance observation")
+			}
+			op = advance(t, e, op, RollbackMaintenanceClosed)
+			if _, err := e.Advance(Event{ID: r.ID, Epoch: r.Epoch, From: op.Phase, Kind: PreviousAPIHealthy, Evidence: hash("e")}); err == nil {
+				t.Fatal("previous writer admitted before candidate departure")
+			}
+			for _, kind := range []EventKind{CandidateDeparted, PreviousAPIHealthy, PreviousWebHealthy, PreviousRouteHealthy} {
+				op = advance(t, e, op, kind)
+				s, _ := m.Load()
+				if s.Database != r.Database || s.Current != r.ExpectedPrevious {
+					t.Fatal("rollback changed database identity or restored wrong code")
+				}
+				if kind != PreviousRouteHealthy && s.Active != r.ID {
+					t.Fatal("rollback released fence before previous route healthy")
+				}
+			}
+			got, err := (Engine{Store: m}).Begin(r)
+			if err != nil || got.Phase != RolledBack || m.s.Active != "" {
+				t.Fatalf("original rollback result not retained: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestUnknownDuringRecoveryKeepsFenceAtEveryBoundary(t *testing.T) {
+	steps := []EventKind{RollbackMaintenanceClosed, CandidateDeparted, PreviousAPIHealthy, PreviousWebHealthy}
+	for n := 0; n <= len(steps); n++ {
+		m, r := fixture()
+		e := Engine{Store: m}
+		op := candidateAt(t, e, r, ReopenIntent)
+		op = advance(t, e, op, CandidateFailed)
+		for _, kind := range steps[:n] {
+			op = advance(t, e, op, kind)
+		}
+		op = advance(t, e, op, OutcomeUnknown)
+		r.ID = "replacement"
+		if _, err := (Engine{Store: m}).Begin(r); !errors.Is(err, ErrHeld) {
+			t.Fatal("unknown recovery allowed a competing writer")
+		}
+		if m.s.Active != op.Request.ID || m.s.Current != hash("a") || m.s.Database != hash("d") {
+			t.Fatal("unknown recovery lost retained custody")
+		}
+	}
+}
+
+func completedOperation(r Request) Operation {
+	op := Operation{Request: r, Hash: r.hash(), Phase: Prepared}
+	for _, kind := range []EventKind{RequestMaintenance, MaintenanceClosed, PreviousDeparted, RequestAPI, APIHealthy, WebHealthy, RouteHealthy} {
+		v := Event{ID: r.ID, Epoch: r.Epoch, From: op.Phase, Kind: kind}
+		if kind != RequestMaintenance && kind != RequestAPI {
+			v.Evidence = hash("e")
+		}
+		op.Phase, _ = transition(op.Phase, kind)
+		op.History = append(op.History, v)
+	}
+	return op
+}
+
+func TestBoundedReceiptsRefuseAdmissionWithoutEviction(t *testing.T) {
+	m, r := fixture()
+	m.s.Operations = make(map[string]Operation)
+	for i := range MaxOperations {
+		x := r
+		x.ID = fmt.Sprintf("retained-%d", i)
+		m.s.Operations[x.ID] = completedOperation(x)
+	}
+	m.s.Current = r.Release
+	e := Engine{Store: m}
+	x := r
+	x.ID = "new"
+	x.ExpectedPrevious, x.Release = r.Release, r.ExpectedPrevious
+	if _, err := e.Begin(x); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("full store admitted new operation: %v", err)
+	}
+	r.ID = "retained-0"
+	if got, err := e.Begin(r); err != nil || got.Phase != Complete {
+		t.Fatalf("full store lost original receipt: %+v %v", got, err)
+	}
+	if len(m.s.Operations) != MaxOperations || m.s.Revision != 0 {
+		t.Fatal("capacity refusal evicted or rewrote history")
+	}
+	x.ID = "over-cap"
+	m.s.Operations[x.ID] = completedOperation(x)
+	if _, err := e.Begin(r); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("oversized store was traversed/accepted: %v", err)
+	}
+}
+
+func TestEpochBelongsToIdleCustodyOwnerNotTransitions(t *testing.T) {
+	m, r := fixture()
+	m.s.Operations = map[string]Operation{r.ID: completedOperation(r)}
+	m.s.Current = r.Release
+	// Simulated administrator-provisioned idle handoff, not an Engine API.
+	m.s.Epoch++
+	m.s.Revision++
+	e := Engine{Store: m}
+	if got, err := e.Begin(r); err != nil || got.Phase != Complete {
+		t.Fatal("idle handoff lost historical original-ID readback")
+	}
+	x := r
+	x.ID = "after-handoff"
+	x.ExpectedPrevious, x.Release = r.Release, r.ExpectedPrevious
+	if _, err := e.Begin(x); !errors.Is(err, ErrConflict) {
+		t.Fatal("stale epoch admitted new operation")
+	}
+	x.Epoch++
+	if _, err := e.Begin(x); err != nil {
+		t.Fatal(err)
+	}
+	// Epoch rotation while active cannot clear or bypass the retained fence.
+	m.s.Epoch++
+	if _, err := e.Begin(x); err == nil {
+		t.Fatal("active custody epoch was silently replaced")
+	}
+	if m.s.Active != x.ID {
+		t.Fatal("bad custody handoff cleared the active fence")
 	}
 }

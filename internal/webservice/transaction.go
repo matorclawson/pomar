@@ -16,8 +16,16 @@ import (
 var (
 	ErrConflict = errors.New("webservice conflict")
 	ErrHeld     = errors.New("webservice operation held")
+	ErrCapacity = errors.New("webservice receipt capacity reached")
 	idPattern   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$`)
 )
+
+// Receipt capacity is deliberately finite. Admission refuses when full; it must
+// never evict an original operation to make space or silently permit ID reuse.
+// Production archival/index design remains outside this model.
+const MaxOperations = 256
+
+const maxHistory = 16
 
 // Request binds admitted inputs by digest, without accepting executable paths,
 // arbitrary commands, credentials, or unit names. Policy admission and native
@@ -67,28 +75,40 @@ func (r Request) hash() string {
 type Phase string
 
 const (
-	Prepared          Phase = "prepared"
-	MaintenanceIntent Phase = "maintenance_intent"
-	StopIntent        Phase = "stop_previous_intent"
-	PreviousGone      Phase = "previous_departure_observed"
-	APIStartIntent    Phase = "start_api_intent"
-	WebStartIntent    Phase = "start_web_intent"
-	ReopenIntent      Phase = "reopen_route_intent"
-	Complete          Phase = "complete"
-	Held              Phase = "held_unknown"
+	Prepared                  Phase = "prepared"
+	MaintenanceIntent         Phase = "maintenance_intent"
+	StopIntent                Phase = "stop_previous_intent"
+	PreviousGone              Phase = "previous_departure_observed"
+	APIStartIntent            Phase = "start_api_intent"
+	WebStartIntent            Phase = "start_web_intent"
+	ReopenIntent              Phase = "reopen_route_intent"
+	Complete                  Phase = "complete"
+	Held                      Phase = "held_unknown"
+	RollbackMaintenanceIntent Phase = "rollback_maintenance_intent"
+	CandidateStopIntent       Phase = "stop_candidate_intent"
+	PreviousAPIStartIntent    Phase = "restart_previous_api_intent"
+	PreviousWebStartIntent    Phase = "restart_previous_web_intent"
+	RollbackReopenIntent      Phase = "rollback_reopen_route_intent"
+	RolledBack                Phase = "rolled_back"
 )
 
 type EventKind string
 
 const (
-	RequestMaintenance EventKind = "request_maintenance"
-	MaintenanceClosed  EventKind = "maintenance_closed"
-	PreviousDeparted   EventKind = "previous_departed"
-	RequestAPI         EventKind = "request_api"
-	APIHealthy         EventKind = "api_healthy"
-	WebHealthy         EventKind = "web_healthy"
-	RouteHealthy       EventKind = "route_healthy"
-	OutcomeUnknown     EventKind = "outcome_unknown"
+	RequestMaintenance        EventKind = "request_maintenance"
+	MaintenanceClosed         EventKind = "maintenance_closed"
+	PreviousDeparted          EventKind = "previous_departed"
+	RequestAPI                EventKind = "request_api"
+	APIHealthy                EventKind = "api_healthy"
+	WebHealthy                EventKind = "web_healthy"
+	RouteHealthy              EventKind = "route_healthy"
+	OutcomeUnknown            EventKind = "outcome_unknown"
+	CandidateFailed           EventKind = "candidate_failed"
+	RollbackMaintenanceClosed EventKind = "rollback_maintenance_closed"
+	CandidateDeparted         EventKind = "candidate_departed"
+	PreviousAPIHealthy        EventKind = "previous_api_healthy"
+	PreviousWebHealthy        EventKind = "previous_web_healthy"
+	PreviousRouteHealthy      EventKind = "previous_route_healthy"
 )
 
 // Event must name the retained operation, epoch, and expected phase. Revision
@@ -113,6 +133,12 @@ type Operation struct {
 // State is one atomic custody record. A nonempty Active holds the fence even
 // after an unknown outcome. Database is the admitted persistent database identity
 // and never changes during cutover. Ordinary code cutover never restores it.
+// The administrator-provisioned Store custody owner establishes Epoch before
+// first admission. It may advance it only at a reviewed, idle custody handoff
+// with no Active operation and complete native departure reconciliation. The
+// Engine never advances it per transition. Changing it under an active fence
+// invalidates that state; it is not a way to clear unknown custody. A production
+// owner/handoff adapter is not supplied here.
 type State struct {
 	Revision   uint64
 	Epoch      uint64
@@ -127,6 +153,8 @@ type State struct {
 // intact, and return ErrConflict on a revision mismatch. An ambiguous commit is
 // an error: inspect the same operation before retrying. This package supplies no
 // production store, lock namespace, or host adapter.
+// Load must bound input bytes before decoding; the model additionally refuses
+// oversized operation/history collections before iterating them.
 type Store interface {
 	Load() (State, error)
 	CompareAndSwap(revision uint64, next State) error
@@ -138,9 +166,15 @@ func validateState(s State) error {
 	if s.Epoch == 0 || s.Revision == ^uint64(0) || !digest(s.Current) || !digest(s.Database) {
 		return errors.New("invalid retained custody state")
 	}
+	if len(s.Operations) > MaxOperations {
+		return ErrCapacity
+	}
 	for id, op := range s.Operations {
 		if id != op.Request.ID || op.Request.validate() != nil || op.Hash != op.Request.hash() {
 			return errors.New("invalid retained operation binding")
+		}
+		if len(op.History) > maxHistory {
+			return errors.New("retained history exceeds model capacity")
 		}
 		phase := Prepared
 		for _, v := range op.History {
@@ -150,13 +184,13 @@ func validateState(s State) error {
 			}
 			phase = next
 		}
-		if op.Phase != phase || (phase != Complete && id != s.Active) {
+		if op.Phase != phase || (!terminal(phase) && id != s.Active) {
 			return errors.New("invalid retained phase or fence")
 		}
 	}
 	if s.Active != "" {
 		op, ok := s.Operations[s.Active]
-		if !ok || op.Phase == Complete || op.Request.Epoch != s.Epoch || op.Request.ExpectedPrevious != s.Current || op.Request.Database != s.Database {
+		if !ok || terminal(op.Phase) || op.Request.Epoch != s.Epoch || op.Request.ExpectedPrevious != s.Current || op.Request.Database != s.Database {
 			return errors.New("invalid active fence")
 		}
 	}
@@ -195,6 +229,9 @@ func (e Engine) Begin(r Request) (Operation, error) {
 	if r.Epoch != s.Epoch || r.ExpectedPrevious != s.Current || r.Database != s.Database {
 		return Operation{}, ErrConflict
 	}
+	if len(s.Operations) >= MaxOperations {
+		return Operation{}, ErrCapacity
+	}
 	op := Operation{Request: r, Hash: r.hash(), Phase: Prepared}
 	if s.Operations == nil {
 		s.Operations = make(map[string]Operation)
@@ -209,7 +246,7 @@ func (e Engine) Begin(r Request) (Operation, error) {
 }
 
 func transition(p Phase, k EventKind) (Phase, bool) {
-	if k == OutcomeUnknown && p != Complete && p != Held {
+	if k == OutcomeUnknown && !terminal(p) && p != Held {
 		return Held, true
 	}
 	switch {
@@ -227,9 +264,23 @@ func transition(p Phase, k EventKind) (Phase, bool) {
 		return ReopenIntent, true
 	case p == ReopenIntent && k == RouteHealthy:
 		return Complete, true
+	case (p == APIStartIntent || p == WebStartIntent || p == ReopenIntent) && k == CandidateFailed:
+		return RollbackMaintenanceIntent, true
+	case p == RollbackMaintenanceIntent && k == RollbackMaintenanceClosed:
+		return CandidateStopIntent, true
+	case p == CandidateStopIntent && k == CandidateDeparted:
+		return PreviousAPIStartIntent, true
+	case p == PreviousAPIStartIntent && k == PreviousAPIHealthy:
+		return PreviousWebStartIntent, true
+	case p == PreviousWebStartIntent && k == PreviousWebHealthy:
+		return RollbackReopenIntent, true
+	case p == RollbackReopenIntent && k == PreviousRouteHealthy:
+		return RolledBack, true
 	}
 	return "", false
 }
+
+func terminal(p Phase) bool { return p == Complete || p == RolledBack }
 
 // Advance persists a model transition. It performs no native effect. Held
 // outcomes deliberately have no generic clear/retry path: native reconciliation
@@ -261,6 +312,9 @@ func (e Engine) Advance(v Event) (Operation, error) {
 	s.Operations[v.ID] = op
 	if next == Complete {
 		s.Current, s.Active = op.Request.Release, ""
+	} else if next == RolledBack {
+		// Previous remains Current, and the same Database identity is retained.
+		s.Active = ""
 	}
 	rev := s.Revision
 	s.Revision++

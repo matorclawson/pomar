@@ -43,3 +43,29 @@ boundary; it does not qualify filesystem durability, actual isolation or native
 single-writer custody. Exact control policy, resource limits, egress endpoints,
 actuator lock/fence namespace and native reconciliation require owning review
 before effects are implemented.
+
+Epoch belongs to the administrator-provisioned Store custody owner. It is
+established before initial admission and may advance only during a reviewed idle
+custody handoff, with no active operation and native departure reconciliation.
+The Engine does not bump it per transition and supplies no owner-handoff API.
+Historical same-ID reads still return their retained result after an idle epoch
+change, but new operations need the current epoch. Changing the epoch while an
+operation is active invalidates custody; it cannot clear a held operation.
+
+Known candidate failure has a separate modeled recovery path. From API-start,
+web-start or route-reopen intent it first persists rollback-maintenance intent.
+A fresh maintenance-closed observation permits candidate-stop intent. Only
+candidate-departure observation permits previous-API start intent; previous API,
+web and route health must follow in that order. Only previous-route health
+completes the modeled rollback and releases the fence. The previous release and
+same database identity remain retained throughout; no restore method exists.
+Unknown outcomes at any recovery boundary go to Held and retain the fence. The
+observations remain external trusted inputs, not native proof supplied by this
+model. This path models the contract; it executes no stop, restart or rollback.
+
+The model retains at most 256 operations, each with at most 16 history events.
+New admission refuses at capacity without evicting receipts or permitting ID
+reuse; original-ID readback remains available at capacity. Oversized retained
+collections refuse before traversal. A production Store must additionally bound
+input bytes before decoding and design durable indexing/archival separately.
+There is no receipt-expiry or unreviewed compaction API in this slice.
