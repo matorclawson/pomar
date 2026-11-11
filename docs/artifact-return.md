@@ -27,8 +27,8 @@ This does not protect against a hostile process with that same host UID.
 
 Success is the function's **nil error return**, after all files and staging
 metadata have been checked and synced. The returned confined staging path
-can then be committed by the integrating consumer. No directory name or
-READY file is a discoverable acceptance API. Consumers must not scan staged
+can then be committed by the integrating consumer. No on-disk success marker is written, and no directory name is a
+discoverable acceptance API. Consumers must not scan staged
 paths to infer success. Any transfer, cap, digest, disk-write, sync or timeout
 failure returns no accepted path; partial bytes stay fenced, with a failure
 marker where writing one is possible. The same attempt cannot create its

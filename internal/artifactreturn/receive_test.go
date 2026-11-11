@@ -78,9 +78,8 @@ func TestReceiveCompleteAndNoReplay(t *testing.T) {
 			t.Fatalf("unsafe mode %v", info.Mode())
 		}
 	}
-	receipt, err := stage.ReadFile("READY.json")
-	if err != nil || !bytes.Contains(receipt, []byte(`"count":2`)) {
-		t.Fatalf("receipt %s %v", receipt, err)
+	if _, err := stage.Stat("READY.json"); !os.IsNotExist(err) {
+		t.Fatal("success marker must not be written")
 	}
 	if _, err := Receive(context.Background(), parent, reply, pub, want, fetchBytes(files), enough); err == nil {
 		t.Fatal("replayed accepted attempt")
@@ -291,5 +290,46 @@ func TestConcurrentSameAttemptOnlyOneFetches(t *testing.T) {
 	}
 	if err := <-first; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Cancel after all payload bytes arrived but before completion checks. There
+// must be no success marker to misread even though every output is present.
+type cancelOnClose struct {
+	io.Reader
+	cancel context.CancelFunc
+}
+
+func (r cancelOnClose) Close() error { r.cancel(); return nil }
+func TestCancellationAfterLastFileNeverLeavesSuccessMarker(t *testing.T) {
+	doc, want, pub, priv := fixture(t)
+	parent := root(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fetch := func(_ context.Context, name string) (io.ReadCloser, error) {
+		if name == "manifest.json" {
+			return cancelOnClose{strings.NewReader("{}"), cancel}, nil
+		}
+		return io.NopCloser(strings.NewReader("tar")), nil
+	}
+	accepted, err := Receive(ctx, parent, signed(t, doc, priv), pub, want, fetch, enough)
+	if !errors.Is(err, context.Canceled) || accepted != "" {
+		t.Fatalf("accepted late cancellation: %q %v", accepted, err)
+	}
+	stage, e := parent.OpenRoot(".partial-" + want.Attempt)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer stage.Close()
+	for _, name := range []string{"release.tar", "manifest.json"} {
+		if _, e := stage.Stat(name); e != nil {
+			t.Fatal("fixture did not finish payload", e)
+		}
+	}
+	if _, e := stage.Stat("READY.json"); !os.IsNotExist(e) {
+		t.Fatal("late failure left success marker")
+	}
+	if _, e := stage.Stat("FAILED.json"); e != nil {
+		t.Fatal("late failure not fenced", e)
 	}
 }

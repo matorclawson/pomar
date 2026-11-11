@@ -262,8 +262,9 @@ func writeNew(root *os.Root, name string, data []byte) error {
 
 // Receive returns a confined staging path ONLY after every named byte has
 // passed signed length/hash checks and every file/directory has been synced.
-// A failed directory is fenced and is never returned as accepted. No pathname
-// or READY file is a discoverable success API: the integrating caller must
+// A failed directory is fenced and is never returned as accepted. No on-disk
+// success marker is written, and no pathname
+// is a discoverable success API: the integrating caller must
 // publish success only after this function returns nil, and must reconcile a
 // lost acknowledgement without rerunning this one-use attempt. The parent is
 // the receiver's private trust boundary, not protection from hostile same-UID
@@ -395,17 +396,6 @@ func Receive(ctx context.Context, parent *os.Root, reply []byte, key ed25519.Pub
 		return "", fmt.Errorf("artifact: aggregate mismatch")
 	}
 	if err = ctx.Err(); err != nil {
-		return "", err
-	}
-	receipt, _ := json.Marshal(struct {
-		State        string   `json:"state"`
-		Attempt      string   `json:"attempt"`
-		ResultSHA256 string   `json:"result_sha256"`
-		Count        int      `json:"count"`
-		Bytes        int64    `json:"bytes"`
-		Outputs      []Output `json:"outputs"`
-	}{"COMPLETE", want.Attempt, v.ResultSHA256, len(v.Outputs), total, v.Outputs})
-	if err = writeNew(stage, "READY.json", receipt); err != nil {
 		return "", err
 	}
 	folder, e := stage.Open(".")
