@@ -227,6 +227,14 @@ func Open(cfg Config) (*Manager, error) {
 		if !validID.MatchString(jc.Class.Name) || seen[jc.Class.Name] {
 			return nil, fmt.Errorf("manager: job classes need distinct names of lower-case letters, digits and dashes, like attempt ids (%q)", jc.Class.Name)
 		}
+		if p := jc.Class.ArtifactOutput; p != nil {
+			if err := p.Validate(jc.Class.OutputCapBytes); err != nil {
+				return nil, err
+			}
+			if !jc.JobUser || len(jc.Command) == 0 || jc.SourceRef == "" || len(jc.SourceMirrors) == 0 {
+				return nil, fmt.Errorf("manager: artifact class requires a fixed nonroot source workload")
+			}
+		}
 		if err := checkNPMLockPath(jc); err != nil {
 			return nil, err
 		}
@@ -548,6 +556,36 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 	// Claim-time admission, under the lock so that two starts cannot both
 	// take the last slot. Nothing is created before it passes.
 	class := jc.Class
+	if class.ArtifactOutput != nil {
+		if m.cfg.ShimBin == "" {
+			return Entry{}, fmt.Errorf("manager: artifact class requires the release-pinned static shim")
+		}
+		if len(inputs) != 0 {
+			return Entry{}, fmt.Errorf("manager: artifact class uses pinned image/source, not per-run inputs")
+		}
+		policy := *class.ArtifactOutput
+		policy.Names = append([]string(nil), policy.Names...)
+		class.ArtifactOutput = &policy
+		if err := policy.Validate(class.OutputCapBytes); err != nil {
+			return Entry{}, err
+		}
+		if src == nil || !src.Git || !jc.JobUser {
+			return Entry{}, fmt.Errorf("manager: artifact class requires source Git and nonroot job")
+		}
+		if len(outputs) != len(policy.Names) {
+			return Entry{}, fmt.Errorf("manager: artifact outputs must match protected class")
+		}
+		named := map[string]bool{}
+		for _, n := range policy.Names {
+			named[n] = true
+		}
+		for _, n := range outputs {
+			if !named[n] {
+				return Entry{}, fmt.Errorf("manager: artifact outputs must match protected class")
+			}
+			delete(named, n)
+		}
+	}
 	if err := m.drainRefusal(id); err != nil {
 		return Entry{}, err
 	}
@@ -577,6 +615,11 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 	pins, err := m.pinsFor(command, jc.Guest)
 	if err != nil {
 		return Entry{}, err
+	}
+	if class.ArtifactOutput != nil {
+		if pins.ArtifactShim, err = fileSHA256(m.cfg.ShimBin); err != nil {
+			return Entry{}, fmt.Errorf("manager: artifact shim pin: %w", err)
+		}
 	}
 	if basePath != "" {
 		if pins.RootfsSHA256, err = base.RecordedSHA256(basePath); err != nil {
@@ -634,7 +677,7 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 	}
 
 	g := jc.Guest
-	args := []string{"helper", "--attempt", id, "--state-dir", rec,
+	args := []string{classHelperVerb(class), "--attempt", id, "--state-dir", rec,
 		"--store", filepath.Join(v.Root(), storeDir), "--kernel", g.Kernel,
 		"--init", g.InitRef, "--init-digest", g.InitDigest,
 		"--image", g.ImageRef, "--image-digest", g.ImageDigest,
@@ -649,7 +692,7 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 		if len(inputs) > 0 {
 			args = append(args, "--inputs", filepath.Join(rec, inputsDir))
 		}
-		args = append(args, outputArgs(rec, outputs, class.OutputCapBytes)...)
+		args = append(args, classOutputArgs(rec, outputs, class)...)
 		args = append(args, "--pins", pinsPath)
 	}
 	args = append(args, accessArgs(src, jc)...)
@@ -672,6 +715,9 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 		if !withProxy {
 			args = append(args, "--shim", m.cfg.ShimBin)
 		}
+	}
+	if class.ArtifactOutput != nil && !withProxy && npmLock == nil {
+		args = append(args, "--shim", m.cfg.ShimBin)
 	}
 	args = append(append(args, "--"), command...)
 	logf, err := os.OpenFile(filepath.Join(rec, "helper.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
@@ -1141,7 +1187,20 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 	e.State, e.Reason, e.ExitCode, e.Ended = st, reason, code, time.Now().UTC()
 	e.Log = recordLog(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.claimClass().LogCapBytes)
 	if len(e.OutputNames) > 0 {
-		e.Outputs = collectOutputs(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.OutputNames, e.claimClass().OutputCapBytes)
+		if policy := e.claimClass().ArtifactOutput; policy != nil {
+			e.Outputs = collectArtifactOutputs(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.OutputNames, e.claimClass())
+			if st != StateExited || code == nil || *code != 0 || !artifactOutputsComplete(e.Outputs, policy.Names) {
+				for i := range e.Outputs {
+					e.Outputs[i].Status = "artifact-incomplete"
+				}
+				if st == StateExited && code != nil && *code == 0 {
+					st, reason = StateFailed, "artifact-output-incomplete"
+					e.State, e.Reason = st, reason
+				}
+			}
+		} else {
+			e.Outputs = collectOutputs(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.OutputNames, e.claimClass().OutputCapBytes)
+		}
 	}
 	m.closeProxy(id)
 	m.closeNPM(id)

@@ -47,15 +47,16 @@ type catalogueFlag struct {
 
 func catalogueFlags() map[string][]catalogueFlag {
 	return map[string][]catalogueFlag{
-		"actor-switch":      {{"root", "path", "Owner host data root"}, {"environment", "string", "Retained environment ID"}, {"session", "string", "Stable seat session ID"}, {"incarnation", "string", "Original actor incarnation"}, {"id", "string", "Durable original replacement operation ID"}, {"profile", "string", "Owner-configured target harness profile"}, {"status", "bool", "Inspect original operation without dispatch"}},
-		"manager_selection": {{"socket", "path", "Explicit approved manager socket; POMAR_SOCKET is the environment fallback"}, {"root", "path", "Explicit local owner's root; not another seat's data"}},
-		"doctor":            {{"json", "bool", "Emit the diagnostic array instead of text"}},
-		"health":            {{"json", "bool", "Emit pomar.health/v1 instead of text"}, {"expected-key-id", "hex", "Independent SHA256 of manager result public key"}, {"timeout", "duration", "Total read deadline; default8s, range100ms..30s"}},
-		"run":               {{"id", "string", "Required unique original attempt identity"}, {"class", "string", "Configured class authorized to this caller"}, {"wait", "bool", "Wait after admission"}, {"timeout", "duration", "Client observation deadline; never stops the job"}, {"mirror", "string", "Owner-configured source mirror"}, {"ref", "string", "Reachability reference"}, {"sha", "hex", "Exact40-digit source commit"}, {"input", "repeatable string", "NAME=PATH immutable input"}, {"output", "repeatable string", "Named copied-out output"}},
-		"wait":              {{"id", "string", "Original attempt to observe"}, {"timeout", "duration", "Observation deadline; exit75 leaves execution alone"}},
-		"attempt_reads":     {{"id", "string", "Original authorized attempt identity"}},
-		"logs":              {{"id", "string", "Terminal attempt"}, {"public-key", "base64", "Independent result public key"}, {"o", "path", "Output destination instead of stdout"}},
-		"attempt output":    {{"id", "string", "Terminal attempt"}, {"name", "string", "Named output bound in the result"}, {"o", "path", "Required destination"}},
-		"result verify":     {{"reply", "path", "Original signed reply file"}, {"public-key", "base64", "Independently retained Ed25519 public key"}},
+		"actor-switch":         {{"root", "path", "Owner host data root"}, {"environment", "string", "Retained environment ID"}, {"session", "string", "Stable agent session ID"}, {"incarnation", "string", "Original actor incarnation"}, {"id", "string", "Durable original replacement operation ID"}, {"profile", "string", "Owner-configured target harness profile"}, {"status", "bool", "Inspect original operation without dispatch"}},
+		"manager_selection":    {{"socket", "path", "Explicit approved manager socket; POMAR_SOCKET is the environment fallback"}, {"root", "path", "Explicit local owner's root; not another agent's data"}},
+		"doctor":               {{"json", "bool", "Emit the diagnostic array instead of text"}},
+		"health":               {{"json", "bool", "Emit pomar.health/v1 instead of text"}, {"expected-key-id", "hex", "Independent SHA256 of manager result public key"}, {"timeout", "duration", "Total read deadline; default8s, range100ms..30s"}},
+		"run":                  {{"id", "string", "Required unique original attempt identity"}, {"class", "string", "Configured class authorized to this caller"}, {"wait", "bool", "Wait after admission"}, {"timeout", "duration", "Client observation deadline; never stops the job"}, {"mirror", "string", "Owner-configured source mirror"}, {"ref", "string", "Reachability reference"}, {"sha", "hex", "Exact40-digit source commit"}, {"input", "repeatable string", "NAME=PATH immutable input"}, {"output", "repeatable string", "Named copied-out output"}},
+		"wait":                 {{"id", "string", "Original attempt to observe"}, {"timeout", "duration", "Observation deadline; exit75 leaves execution alone"}},
+		"attempt_reads":        {{"id", "string", "Original authorized attempt identity"}},
+		"logs":                 {{"id", "string", "Terminal attempt"}, {"public-key", "base64", "Independent result public key"}, {"o", "path", "Output destination instead of stdout"}},
+		"attempt artifact-set": {{"id", "string", "Original attempt"}, {"binding", "path", "Independent expected tuple"}, {"public-key", "string", "Independent Ed25519 key"}, {"out-dir", "path", "Existing private parent"}},
+		"attempt output":       {{"id", "string", "Terminal attempt"}, {"name", "string", "Named output bound in the result"}, {"o", "path", "Required destination"}},
+		"result verify":        {{"reply", "path", "Original signed reply file"}, {"public-key", "base64", "Independently retained Ed25519 public key"}},
 	}
 }

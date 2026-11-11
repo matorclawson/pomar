@@ -29,9 +29,12 @@ type Finding struct {
 
 // helperAttempt reports whether args is a helper started from hostBin, and
 // for which attempt. The executable must be exactly hostBin and the first
-// argument exactly "helper".
+// argument exactly "helper" or "artifact-helper-v1".
 func helperAttempt(args, hostBin string) (string, bool) {
 	rest, ok := strings.CutPrefix(args, hostBin+" helper ")
+	if !ok {
+		rest, ok = strings.CutPrefix(args, hostBin+" artifact-helper-v1 ")
+	}
 	if !ok {
 		return "", false
 	}
@@ -50,7 +53,7 @@ func helperAttempt(args, hostBin string) (string, bool) {
 // Reconcile compares the table's live entries with the live processes.
 //
 // A process is a candidate helper only if it runs as uid, its executable is
-// hostBin and its first argument is "helper". Nothing else is ever reported
+// hostBin and its first argument is a recognized helper verb. Nothing else is ever reported
 // as an orphan, so nothing else is ever signalled.
 //
 // An entry is adopted only if its pid is alive, the process start time equals

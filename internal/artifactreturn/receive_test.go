@@ -474,3 +474,81 @@ func TestPersistentNamespaceFailureNeverFetches(t *testing.T) {
 		t.Fatal("persistent namespace failure accepted", e)
 	}
 }
+
+func TestUnknownCallerCannotAliasExplicitRootCaller(t *testing.T) {
+	doc, want, pub, priv := fixture(t)
+	want.CallerUID = 0
+	delete(doc, "started_by_uid")
+	if _, err := Verify(signed(t, doc, priv), pub, want); err == nil {
+		t.Fatal("absent caller treated as explicit root")
+	}
+	doc["started_by_uid"] = 0
+	if _, err := Verify(signed(t, doc, priv), pub, want); err != nil {
+		t.Fatal("explicit original root binding rejected", err)
+	}
+}
+
+func TestArtifactResultCannotAddUnboundPerRunInputs(t *testing.T) {
+	doc, want, pub, priv := fixture(t)
+	doc["inputs"] = []map[string]any{{"name": "extra", "sha256": "ignored"}}
+	if _, err := Verify(signed(t, doc, priv), pub, want); err == nil {
+		t.Fatal("unbound per-run input accepted")
+	}
+}
+
+// Closing a cancelled stream can still return buffered bytes with any read error.
+// None of those bytes may start a payload write after Read observes cancellation.
+type cancelDuringRead struct {
+	cancel  context.CancelFunc
+	readErr error
+}
+
+func (r cancelDuringRead) Read(p []byte) (int, error) {
+	r.cancel()
+	return copy(p, []byte("tar")), r.readErr
+}
+func (r cancelDuringRead) Close() error { return nil }
+
+func TestCancellationDuringReadWritesNoPayloadAndKeepsClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		readErr error
+	}{
+		{"buffered", nil}, {"bytes-and-eof", io.EOF}, {"bytes-and-error", io.ErrClosedPipe},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, want, pub, priv := fixture(t)
+			reply := signed(t, doc, priv)
+			parent := root(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			fetch := func(context.Context, string) (io.ReadCloser, error) {
+				calls++
+				return cancelDuringRead{cancel: cancel, readErr: tc.readErr}, nil
+			}
+			accepted, err := Receive(ctx, parent, reply, pub, want, fetch, enough)
+			if accepted != "" || !errors.Is(err, context.Canceled) || calls != 1 {
+				t.Fatalf("cancelled read accepted or fetched again: %q %v calls=%d", accepted, err, calls)
+			}
+			stage, err := parent.OpenRoot(".partial-" + want.Attempt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stage.Close()
+			data, err := stage.ReadFile("release.tar")
+			if err != nil || len(data) != 0 {
+				t.Fatalf("post-cancellation payload written: %q %v", data, err)
+			}
+			if original, err := stage.ReadFile("ORIGINAL-RESULT.json"); err != nil || !bytes.Equal(original, reply) {
+				t.Fatal("original evidence lost", err)
+			}
+			if _, err := stage.Stat("FAILED.json"); err != nil {
+				t.Fatal("failed claim not retained", err)
+			}
+			if _, err := Receive(context.Background(), parent, reply, pub, want, fetch, enough); err == nil || calls != 1 {
+				t.Fatalf("cancelled claim replayed: %v calls=%d", err, calls)
+			}
+		})
+	}
+}

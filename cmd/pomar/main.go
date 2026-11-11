@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -102,6 +103,7 @@ const usage = `usage:
   pomar attempt pins [-root DIR | -socket PATH] -id ID
                                     the pins document, the same bytes the guest reads at /pomar/pins.json
   pomar attempt output [-root DIR | -socket PATH] -id ID -name NAME -o PATH
+  pomar attempt artifact-set [-root DIR | -socket PATH] -id ID -binding FILE -public-key BASE64 -out-dir PRIVATE_DIR
                                     write a copied-out output to PATH, checked against its recorded sha256
   pomar attempt signing-key [-root DIR | -socket PATH]
                                     the public key the manager signs results with
@@ -620,6 +622,8 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	})
 	outName := fs.String("name", "", "the output to fetch (output)")
 	outPath := fs.String("o", "", "the file to write the output to; it must not exist (output)")
+	bindingFile := fs.String("binding", "", "independent expected binding JSON (artifact-set)")
+	artifactDir := fs.String("out-dir", "", "existing private destination parent (artifact-set)")
 	var inputs []manager.Input
 	fs.Func("input", "NAME=PATH: send a file, copied into the guest at /pomar/inputs/NAME (start; repeatable)", func(v string) error {
 		name, path, ok := strings.Cut(v, "=")
@@ -791,6 +795,54 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		}
 		stdout.Write(b)
 		return 0
+	case "artifact-set":
+		if *id == "" || *bindingFile == "" || *artifactDir == "" || *logKey == "" || len(fs.Args()) != 0 {
+			fmt.Fprintln(stderr, "attempt artifact-set: -id, -binding, -public-key and -out-dir are required")
+			return 2
+		}
+		key, kerr := base64.StdEncoding.Strict().DecodeString(*logKey)
+		if kerr != nil || len(key) != ed25519.PublicKeySize {
+			fmt.Fprintln(stderr, "attempt artifact-set: public key must be base64 Ed25519")
+			return 2
+		}
+		binding, berr := readArtifactBinding(*bindingFile)
+		if berr != nil {
+			fmt.Fprintln(stderr, berr)
+			return 1
+		}
+		before, berr := os.Lstat(*artifactDir)
+		if berr != nil || !before.IsDir() {
+			fmt.Fprintln(stderr, "attempt artifact-set: destination must be an existing nonsymlink directory")
+			return 1
+		}
+		parent, perr := os.OpenRoot(*artifactDir)
+		if perr != nil {
+			fmt.Fprintln(stderr, perr)
+			return 1
+		}
+		defer parent.Close()
+		handle, perr := parent.Open(".")
+		if perr != nil {
+			fmt.Fprintln(stderr, perr)
+			return 1
+		}
+		opened, perr := handle.Stat()
+		handle.Close()
+		if perr != nil || !os.SameFile(before, opened) {
+			fmt.Fprintln(stderr, "attempt artifact-set: destination changed")
+			return 1
+		}
+		staged, aerr := c.ReceiveArtifacts(context.Background(), parent, *id, ed25519.PublicKey(key), binding)
+		if aerr != nil {
+			fmt.Fprintln(stderr, aerr)
+			return 1
+		}
+		after, aerr := os.Lstat(*artifactDir)
+		if aerr != nil || !os.SameFile(opened, after) {
+			fmt.Fprintln(stderr, "attempt artifact-set: destination identity changed; retain original claim")
+			return 1
+		}
+		out = map[string]string{"state": "complete", "attempt": *id, "path": filepath.Join(*artifactDir, staged)}
 	case "output":
 		if *outName == "" || *outPath == "" {
 			fmt.Fprintln(stderr, "attempt output: -name and -o are required")

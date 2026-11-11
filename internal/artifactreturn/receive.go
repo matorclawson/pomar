@@ -25,30 +25,31 @@ type Output struct {
 }
 
 type signedResult struct {
-	Schema        string `json:"schema"`
-	Mirror        string `json:"mirror"`
-	Ref           string `json:"ref"`
-	Git           bool   `json:"git"`
-	ReadOnly      bool   `json:"readonly_source"`
-	Attempt       string `json:"attempt"`
-	State         string `json:"state"`
-	ExitCode      *int   `json:"exit_code"`
-	HostCondition string `json:"host_condition"`
-	Reason        string `json:"reason"`
-	Host          string `json:"host"`
-	SHA           string `json:"sha"`
-	Image         string `json:"image_digest"`
-	PackageSet    string `json:"package_set"`
-	Rootfs        string `json:"rootfs_sha256"`
-	Command       string `json:"command_sha256"`
-	Caller        uint32 `json:"started_by_uid"`
+	Schema        string  `json:"schema"`
+	Mirror        string  `json:"mirror"`
+	Ref           string  `json:"ref"`
+	Git           bool    `json:"git"`
+	ReadOnly      bool    `json:"readonly_source"`
+	Attempt       string  `json:"attempt"`
+	State         string  `json:"state"`
+	ExitCode      *int    `json:"exit_code"`
+	HostCondition string  `json:"host_condition"`
+	Reason        string  `json:"reason"`
+	Host          string  `json:"host"`
+	SHA           string  `json:"sha"`
+	Image         string  `json:"image_digest"`
+	PackageSet    string  `json:"package_set"`
+	Rootfs        string  `json:"rootfs_sha256"`
+	Command       string  `json:"command_sha256"`
+	Caller        *uint32 `json:"started_by_uid"`
 	Class         struct {
 		Name      string  `json:"name"`
 		OutputCap int64   `json:"output_cap_bytes"`
 		Artifact  *Policy `json:"artifact_output,omitempty"`
 	} `json:"class"`
-	Count   int      `json:"artifact_output_count"`
-	Outputs []Output `json:"outputs"`
+	Count   int               `json:"artifact_output_count"`
+	Outputs []Output          `json:"outputs"`
+	Inputs  []json.RawMessage `json:"inputs"`
 }
 
 // Expected comes from the receiving owner's reviewed request, not the reply.
@@ -186,9 +187,12 @@ func Verify(reply []byte, key ed25519.PublicKey, want Expected) (Verified, error
 	if err := json.Unmarshal(envelope.Result, &result); err != nil {
 		return out, err
 	}
+	if len(result.Inputs) != 0 {
+		return out, fmt.Errorf("artifact: per-run inputs are outside the pinned image/source binding")
+	}
 	if result.Mirror != want.Mirror || result.Ref != want.Ref || result.Git != want.SourceGit || result.ReadOnly != want.ReadOnlySource || result.Schema != "pomar.result/v1" || result.Attempt != want.Attempt || result.Class.Name != want.Class ||
 		result.PackageSet != want.PackageSet || result.Rootfs != want.RootfsSHA256 || result.SHA != want.SourceSHA || result.Image != want.ImageDigest || result.Command != want.CommandSHA256 ||
-		result.Host != want.KeyID || result.Caller != want.CallerUID || result.State != "exited" ||
+		result.Host != want.KeyID || result.Caller == nil || *result.Caller != want.CallerUID || result.State != "exited" ||
 		result.ExitCode == nil || *result.ExitCode != 0 || result.HostCondition != "" || result.Reason != "" {
 		return out, fmt.Errorf("artifact: result identity or execution not accepted")
 	}
@@ -371,6 +375,11 @@ func receive(ctx context.Context, parent *os.Root, reply []byte, key ed25519.Pub
 			var n int
 			var readErr error
 			n, readErr = source.Read(buffer[:int(readSize)])
+			// Cancellation may unblock Read with buffered bytes, even alongside
+			// EOF or another error. Refuse that fragment before any write.
+			if err = ctx.Err(); err != nil {
+				break
+			}
 			// An overrun byte is never written, even temporarily.
 			if int64(n) > left || int64(n) > v.Policy.PerFileBytes-count || int64(n) > v.Aggregate-total {
 				err = fmt.Errorf("artifact: stream overrun")

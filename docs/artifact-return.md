@@ -1,53 +1,95 @@
-# Artifact receiving component — source work in progress
+# Explicit artifact output and verified receiving
 
-The internal `artifactreturn` package implements the receiving component of
-an explicit protected-class artifact return. It is not wired to manager
-admission, guest copy-out, the HTTP client or a command. The historical 64 MiB
-report limit and 32 MiB/16-file input limits remain unchanged. This document
-must not be used as an installed command or class specification.
+An artifact class is an explicit protected configuration. Ordinary reports keep
+their historical 64 MiB ceiling and inputs keep their 32 MiB/16-file limits.
+No default class gains artifact permission. An opted-in class specifies
+`artifact_output` with `per_file_bytes`, `max_files`, `transfer_seconds`, a
+closed `names` list, and provisional or measured sizing. The aggregate is
+`output_cap_bytes`, at most 1 GiB; count is at most16 and transfer time600s.
+The JSON profile file must be root-owned, regular, single-link and not writable
+by group or others. It also fixes a nonroot job, command, source mirror/ref;
+artifact starts require an explicit Git source and the exact output-name set.
+This initial mode uses only the pinned image and source; per-run input files
+are refused rather than accepted without an independent input binding.
+These settings do not grant permission to install, adopt a class or start a job.
 
-A reviewed receiver supplies the independent signing key, caller, original
-attempt, class, source mirror/ref/commit/Git and access mode, base image,
-derived package-set/rootfs hashes, command hash, and policy digest. The exact
-original Ed25519 result bytes must bind those values, successful execution,
-closed output names/count, individual lengths/hashes, and the protected
-class's explicit per-file/count/aggregate/transfer-time ceilings. Signatures
-never grant admission. The initial aggregate ceiling cannot exceed 1 GiB;
-measured sizing records original attempt/result, actual bytes and the chosen
-margin. Existing default results without the explicit policy are refused.
+Provisional limits cannot claim a measurement. A measured policy records
+`measured_bytes`, `margin_bytes`, `measurement_attempt` and
+`measurement_result_sha256`; measured bytes plus margin must equal the chosen
+aggregate. The retained class and signed result bind the actual limits and
+output count, not caller-selected limits.
 
-The private receiving parent must persist across process restarts. `Receive`
-syncs the original-result file, then the staging directory, then the parent
-directory before the first fetch. A failure refuses transfer and retains the
-uncertain claim. Failures after fetching retain that durable claim for
-reconciliation, never unlink it to allow a replay.
+The helper uses a separate framed regular-file export. It never invokes the
+library's archive-aware copy-out for artifact mode. The release-pinned static Go shim
+opens an anchored, nonsymlink, single-link job-owned regular leaf and hashes
+bounded bytes twice. The host verifies the fixed name, length, SHA256 and
+completion frame, with exclusive files and one shared deadline/aggregate.
+Writer errors are retained and explicitly checked because the pinned library
+can log them without propagating them. Deadline checks bound writes and
+acceptance; stop/delete acknowledgement remains necessary even after an export
+failure, and dependency teardown can outlive that deadline. Failure retains
+private partial evidence. The manager records a failed artifact set and serves
+none of its files unless the original job and every declared artifact succeed.
 
-`Receive` checks free space against the entire class ceiling, then fetches
-named files with one shared deadline. Acquisition must honor its context;
-closing each returned stream must unblock its read. Each file uses an
-exclusive create inside a fresh private `os.Root`. Lengths and hashes are
-checked while streaming; an overrun byte is never written. Symlinks, paths,
-case aliases, duplicate names and reserved metadata names are not outputs.
-A receiving parent belongs to the consumer and is not supplied by a guest.
-This does not protect against a hostile process with that same host UID.
+## Receiving a whole set
 
-Success is the function's **nil error return**, after all files and staging
-metadata have been checked and synced. The returned confined staging path
-can then be committed by the integrating consumer. No on-disk success marker is written, and no directory name is a
-discoverable acceptance API. Consumers must not scan staged
-paths to infer success. Any transfer, cap, digest, disk-write, sync or timeout
-failure returns no accepted path; partial bytes stay fenced, with a failure
-marker where writing one is possible. The same attempt cannot create its
-staging directory twice, even after failure or a lost acknowledgement.
-Reconcile original retained state instead of choosing another attempt name.
-A free-space preflight is not a reservation; subsequent ENOSPC still fails
-without accepting partial artifacts.
+`pomar attempt artifact-set -id ID -binding FILE -public-key BASE64 -out-dir DIR`
+uses the existing selected manager socket. `DIR` must already be a private
+receiving directory belonging to the invoking user, with no group/other
+permissions. It is not created or chmodded automatically. The binding file
+is bounded to64 KiB, regular, single-link, owner-controlled and not writable
+by group/others. It is a closed flat JSON object with **every** field explicit:
 
-Remaining integration: protected class validation and signed policy/count;
-bounded guest-to-manager transport rather than the existing unbounded
-library copy-out; manager all-or-nothing result publication; context-bound
-HTTP fetching and consumer acceptance; pinned offline layer/catalogue and
-fixed build entry through the adopted protected base-build path. Those need
-exact committed-tree `make verify`, independent source reviews, release and
-one reviewed operator adoption before actual App qualification. This component
-and its isolated race tests prove none of those receiving effects.
+- `schema`: `pomar.artifact-binding/v1`;
+- `attempt`, `class`, `caller_uid`, `mirror`, `ref`, `source_sha`;
+- `source_git`, `readonly_source`;
+- `image_digest`, `package_set`, `rootfs_sha256`;
+- `command_sha256`, `policy_sha256`, `key_id`.
+
+Pins and public key come independently from the reviewed request/handoff,
+never from the returned result being checked. `policy_sha256` is the exported
+`artifactreturn.PolicyDigest` of the expected policy and aggregate. Unknown,
+case-alias, duplicate, missing or null binding fields are refused. A missing
+signed caller is unknown and cannot alias an explicit root caller.
+
+The client fetches original result bytes with a60s control bound and2 MiB size
+ceiling, checks the original Ed25519 signature and independent tuple, then
+fetches only the signed closed set. Redirects and mismatched response lengths
+or hashes are refused. The legacy `attempt output` remains separate and is not
+independent acceptance of a whole artifact set. Argument errors return2,
+operational/verification failures1, and only full successful receiving returns0
+with a JSON receipt containing the original attempt and staged path.
+
+`Receive` checks free space against the full class ceiling, creates a one-use
+private stage and syncs the original-result file, staging namespace and parent
+namespace **before** any fetch. Sync failure refuses transfer and retains the
+uncertain claim. Later failures preserve that durable claim, never unlink it
+to make the same attempt reusable. Each fragment is checked before disk writes.
+Only a nil return after all hashes/files/directories/final deadline checks is
+acceptance; no on-disk success marker exists. Never scan staged paths to infer
+success. Reconcile a lost acknowledgement against retained original state.
+The receiving parent must persist across restarts; preserve the claim through
+the eventual consuming transaction. Free-space preflight is not a reservation.
+Private ownership does not protect against a hostile process with the same UID.
+
+## Qualification boundary
+
+Source/unit checks do not establish an adopted image/class or successful native
+transfer. The release-pinned static Linux ARM64 shim is required for the
+fixed exporter, and its digest is recorded in admission and result pins. Actual guest export, loader/tool
+availability, full App build, measured sizing, source release and privileged
+adoption remain separate checks. A catalogue entry, offline layer and fixed App
+build entry are not supplied by this transport change. It switches no serving
+application and changes no credentials or permanent service automatically.
+
+Artifact helpers use the versioned `artifact-helper-v1` command. An older helper
+refuses that unknown command before starting a VM instead of ignoring new limit
+flags. The current helper requires artifact limits for that command and refuses
+artifact mode under the legacy `helper` command. Reconciliation recognizes both
+verbs; ordinary classes keep the legacy transport. Adopt the manager, helper and
+static shim together through the release path.
+
+The receiver checks cancellation again immediately after every payload read,
+before writing a returned fragment. Bytes returned by a cancellation-unblocked
+reader are discarded, including bytes accompanied by EOF or another error;
+the original attempt claim and evidence remain retained for reconciliation.
