@@ -27,6 +27,7 @@ let usage = """
                              --init REF --init-digest D --image REF --image-digest D [--base ROOTFS] [--source FILE [--source-kind tar|bundle --source-sha SHA] [--inputs DIR]] \\
                              [--goproxy-socket SOCK --shim BIN] [--npm-socket SOCK] [--outputs NAME,NAME... --outputs-dir DIR --outputs-max BYTES] [--readonly-source yes] [--job-user yes] [--pins FILE] \\
                              [--cpus N] [--memory-bytes N] -- CMD...
+           pomar-host artifact-helper-v1 (helper flags plus required artifact output limits)
            pomar-host build-base --store S --image REF --image-digest D --out ROOTFS --size-bytes N \\
                                  [--extra-layers PATH,PATH...]
            pomar-host load-image --store S --layout DIR --manifest D --reference REPO:TAG
@@ -89,7 +90,7 @@ case "boot-smoke":
     } catch {
         fail("boot-smoke: \(error)")
     }
-case "helper":
+case "helper", "artifact-helper-v1":
     let rest = args.dropFirst()
     guard let sep = rest.firstIndex(of: "--"), sep < rest.endIndex - 1,
         let f = flags(rest[rest.startIndex..<sep]),
@@ -114,6 +115,7 @@ case "helper":
         fail("helper: --outputs, --outputs-dir and --outputs-max go together; names are letters, digits, dot, dash and underscore", code: 2)
     }
     guard let artifact = Helper.artifactLimits(perFile: f["artifact-output-per-file"], seconds: f["artifact-output-timeout"], aggregate: outs.max),
+          ((args.first == "artifact-helper-v1") == (artifact.perFile > 0)),
           artifact.perFile == 0 || (f["source"] != nil && kind.sha != nil && f["shim"] != nil && jobUser && Helper.artifactNamesValid(outs.names))
     else { fail("helper: artifact output requires bounded limits, source bundle and nonroot job", code: 2) }
     let command = Array(rest[(sep + 1)...])

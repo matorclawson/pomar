@@ -92,6 +92,9 @@ func TestHelperAttempt(t *testing.T) {
 		ok   bool
 	}{
 		{helperArgs("a1"), "a1", true},
+		{hostBin + " artifact-helper-v1 --attempt artifact-1 -- /bin/true", "artifact-1", true},
+		{hostBin + " artifact-helper-v2 --attempt future", "", false},
+		{hostBin + " artifact-helper-v1 -- /bin/sh --attempt fake", "", false},
 		{hostBin + " helper --state-dir d -- /bin/sh --attempt fake", "", false},
 		{hostBin + "x helper --attempt a1", "", false},
 		{"/bin/echo " + hostBin + " helper --attempt a1", "", false},
@@ -101,5 +104,17 @@ func TestHelperAttempt(t *testing.T) {
 		if got != c.want || ok != c.ok {
 			t.Errorf("%q: got %q %v, want %q %v", c.args, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+func TestReconcileArtifactHelper(t *testing.T) {
+	entries := []Entry{{Attempt: "artifact-1", PID: 100, Start: "T1", State: StateRunning}}
+	ps := []proc.Process{
+		{PID: 100, UID: me, Start: "T1", Args: hostBin + " artifact-helper-v1 --attempt artifact-1 -- /bin/true"},
+		{PID: 101, UID: me, Start: "T1", Args: hostBin + " artifact-helper-v1 --attempt artifact-orphan -- /bin/true"},
+	}
+	fs := Reconcile(entries, ps, me, hostBin)
+	if len(fs) != 2 || fs[0].Decision != Adopted || fs[1].Decision != Orphan {
+		t.Fatalf("artifact helper custody lost: %+v", fs)
 	}
 }

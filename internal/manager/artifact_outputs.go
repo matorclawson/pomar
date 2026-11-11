@@ -14,6 +14,14 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 )
 
+// A distinct verb prevents older helpers from silently ignoring artifact bounds.
+func classHelperVerb(class capacity.Class) string {
+	if class.ArtifactOutput != nil {
+		return "artifact-helper-v1"
+	}
+	return "helper"
+}
+
 func classOutputArgs(rec string, names []string, class capacity.Class) []string {
 	p := class.ArtifactOutput
 	if p == nil {

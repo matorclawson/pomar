@@ -21,6 +21,9 @@ func artifactClassForTest() capacity.Class {
 func TestArtifactHelperArgsDoNotExpandLegacyDefaults(t *testing.T) {
 	old := capacity.CI
 	old.OutputCapBytes = 0
+	if classHelperVerb(old) != "helper" || classHelperVerb(artifactClassForTest()) != "artifact-helper-v1" {
+		t.Fatal("artifact mode must not use the legacy helper verb")
+	}
 	if !reflect.DeepEqual(classOutputArgs("/rec", []string{"one"}, old), outputArgs("/rec", []string{"one"}, 0)) {
 		t.Fatal("legacy transport changed")
 	}

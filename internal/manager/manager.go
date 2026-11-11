@@ -677,7 +677,7 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 	}
 
 	g := jc.Guest
-	args := []string{"helper", "--attempt", id, "--state-dir", rec,
+	args := []string{classHelperVerb(class), "--attempt", id, "--state-dir", rec,
 		"--store", filepath.Join(v.Root(), storeDir), "--kernel", g.Kernel,
 		"--init", g.InitRef, "--init-digest", g.InitDigest,
 		"--image", g.ImageRef, "--image-digest", g.ImageDigest,

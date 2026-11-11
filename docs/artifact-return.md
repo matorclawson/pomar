@@ -81,3 +81,10 @@ availability, full App build, measured sizing, source release and privileged
 adoption remain separate checks. A catalogue entry, offline layer and fixed App
 build entry are not supplied by this transport change. It switches no serving
 application and changes no credentials or permanent service automatically.
+
+Artifact helpers use the versioned `artifact-helper-v1` command. An older helper
+refuses that unknown command before starting a VM instead of ignoring new limit
+flags. The current helper requires artifact limits for that command and refuses
+artifact mode under the legacy `helper` command. Reconciliation recognizes both
+verbs; ordinary classes keep the legacy transport. Adopt the manager, helper and
+static shim together through the release path.
