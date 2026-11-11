@@ -88,3 +88,8 @@ flags. The current helper requires artifact limits for that command and refuses
 artifact mode under the legacy `helper` command. Reconciliation recognizes both
 verbs; ordinary classes keep the legacy transport. Adopt the manager, helper and
 static shim together through the release path.
+
+The receiver checks cancellation again immediately after every payload read,
+before writing a returned fragment. Bytes returned by a cancellation-unblocked
+reader are discarded, including bytes accompanied by EOF or another error;
+the original attempt claim and evidence remain retained for reconciliation.

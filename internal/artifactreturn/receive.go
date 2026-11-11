@@ -375,6 +375,11 @@ func receive(ctx context.Context, parent *os.Root, reply []byte, key ed25519.Pub
 			var n int
 			var readErr error
 			n, readErr = source.Read(buffer[:int(readSize)])
+			// Cancellation may unblock Read with buffered bytes, even alongside
+			// EOF or another error. Refuse that fragment before any write.
+			if err = ctx.Err(); err != nil {
+				break
+			}
 			// An overrun byte is never written, even temporarily.
 			if int64(n) > left || int64(n) > v.Policy.PerFileBytes-count || int64(n) > v.Aggregate-total {
 				err = fmt.Errorf("artifact: stream overrun")
