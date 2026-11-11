@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
 	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
 )
 
@@ -67,6 +68,8 @@ type Class struct {
 	// Zero preserves the manager's historical 64 MiB limit. The admitted
 	// value is retained with the attempt, including across manager restarts.
 	OutputCapBytes int64 `json:"output_cap_bytes,omitempty"`
+	// ArtifactOutput is an explicit owner opt-in; nil preserves legacy limits.
+	ArtifactOutput *artifactreturn.Policy `json:"artifact_output,omitempty"`
 }
 
 // VMOverhead is the per-guest memory the host pays above the cap: measured
@@ -88,8 +91,13 @@ func (c Class) MemoryClaim() int64 { return c.MemoryBytes + c.VMOverheadBytes }
 func (c Class) Claim() int64 { return c.DiskPeakBytes + HeadroomBytes }
 
 func (c Class) validate() error {
-	if c.Name == "" || c.VCPU < 1 || int64(c.VCPU) > math.MaxInt64/1000 || c.MemoryBytes < 1 || c.VMOverheadBytes < 0 || c.MemoryBytes > math.MaxInt64-c.VMOverheadBytes || c.DiskPeakBytes < 0 || c.DiskPeakBytes > math.MaxInt64-HeadroomBytes || c.Concurrency < 0 || c.TimeLimitSeconds < 0 || c.LogCapBytes < 0 || c.OutputCapBytes < 0 || c.OutputCapBytes > 64<<20 {
+	if c.Name == "" || c.VCPU < 1 || int64(c.VCPU) > math.MaxInt64/1000 || c.MemoryBytes < 1 || c.VMOverheadBytes < 0 || c.MemoryBytes > math.MaxInt64-c.VMOverheadBytes || c.DiskPeakBytes < 0 || c.DiskPeakBytes > math.MaxInt64-HeadroomBytes || c.Concurrency < 0 || c.TimeLimitSeconds < 0 || c.LogCapBytes < 0 || c.OutputCapBytes < 0 || (c.ArtifactOutput == nil && c.OutputCapBytes > 64<<20) {
 		return fmt.Errorf("capacity: invalid class %+v", c)
+	}
+	if c.ArtifactOutput != nil {
+		if err := c.ArtifactOutput.Validate(c.OutputCapBytes); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -35,6 +35,8 @@ public enum Helper {
         public var outputs: [String]
         public var outputsDir: String?
         public var outputsMax: Int64
+        public var artifactPerFile: Int64
+        public var artifactSeconds: Int64
         /// Leave /work root-owned and not writable, instead of the job's.
         public var readonlySource: Bool
         /// With no source, run the command as the job user anyway (a class
@@ -55,6 +57,7 @@ public enum Helper {
             command: [String], base: String? = nil, source: String? = nil,
             proxySocket: String? = nil, shim: String? = nil, sourceBundleSHA: String? = nil, inputs: String? = nil,
             outputs: [String] = [], outputsDir: String? = nil, outputsMax: Int64 = 0,
+            artifactPerFile: Int64 = 0, artifactSeconds: Int64 = 0,
             readonlySource: Bool = false, jobUser: Bool = false, pins: String? = nil, npmSocket: String? = nil,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
@@ -67,6 +70,8 @@ public enum Helper {
             self.outputs = outputs
             self.outputsDir = outputsDir
             self.outputsMax = outputsMax
+            self.artifactPerFile = artifactPerFile
+            self.artifactSeconds = artifactSeconds
             self.readonlySource = readonlySource
             self.jobUser = jobUser
             self.pins = pins
@@ -520,6 +525,10 @@ public enum Helper {
                         ready: npmReady, copy: !withProxy)
                     metrics["npm_registry"] = "http://" + npmListen
                 }
+                if o.artifactPerFile > 0, !withProxy, !withNPM {
+                    guard let shim = o.shim else { throw ArtifactSinkError.identity }
+                    try await container.copyIn(from: URL(fileURLWithPath: shim), to: URL(fileURLWithPath: shimInGuest), mode: 0o755)
+                }
                 if let pins = o.pins {
                     // Root-owned and read-only in the guest: the job reads
                     // what it runs with, and cannot change it.
@@ -589,8 +598,14 @@ public enum Helper {
         let stopped = exitCode == nil
         // The command exited, and with it the shim's staging: copy the staged
         // outputs out while the guest is still up. A stopped attempt has none.
+        var artifactFailure = false
         if !stopped, !o.outputs.isEmpty, let dir = o.outputsDir {
-            metrics["outputs_copied"] = String(await copyOutputs(container, names: o.outputs, to: dir))
+            if o.artifactPerFile > 0 {
+                do {
+                    metrics["outputs_copied"] = String(try await copyArtifactOutputs(container, names: o.outputs, to: dir,
+                        maximum: o.outputsMax, perFile: o.artifactPerFile, seconds: o.artifactSeconds))
+                } catch { artifactFailure = true; metrics["artifact_output_error"] = "incomplete-or-refused" }
+            } else { metrics["outputs_copied"] = String(await copyOutputs(container, names: o.outputs, to: dir)) }
         }
         // Keep execution outcome independent of acknowledged cleanup. Failed
         // stop/delete stays visible; it must never become a signed "closed" fact.
@@ -607,6 +622,10 @@ public enum Helper {
                 try manager.delete(o.attempt)
             })
         metrics.merge(cleanup) { _, b in b }
+        if artifactFailure {
+            writeStatus(o.stateDir, ["phase": "failed", "attempt": o.attempt, "error": "artifact-output-incomplete", "exit_code": String(exitCode!)].merging(metrics) { a, _ in a })
+            return 1
+        }
         if stopped {
             writeStatus(o.stateDir, ["phase": "stopped", "attempt": o.attempt].merging(metrics) { a, _ in a })
             return 143

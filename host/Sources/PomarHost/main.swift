@@ -113,6 +113,9 @@ case "helper":
     guard let outs = Helper.outputsFlags(f["outputs"], dir: f["outputs-dir"], max: f["outputs-max"]) else {
         fail("helper: --outputs, --outputs-dir and --outputs-max go together; names are letters, digits, dot, dash and underscore", code: 2)
     }
+    guard let artifact = Helper.artifactLimits(perFile: f["artifact-output-per-file"], seconds: f["artifact-output-timeout"], aggregate: outs.max),
+          artifact.perFile == 0 || (f["source"] != nil && kind.sha != nil && f["shim"] != nil && jobUser && Helper.artifactNamesValid(outs.names))
+    else { fail("helper: artifact output requires bounded limits, source bundle and nonroot job", code: 2) }
     let command = Array(rest[(sep + 1)...])
     let code = await Helper.run(
         .init(
@@ -120,6 +123,7 @@ case "helper":
             imageRef: mr, imageDigest: md, command: command, base: f["base"], source: f["source"],
             proxySocket: f["goproxy-socket"], shim: f["shim"], sourceBundleSHA: kind.sha, inputs: f["inputs"],
             outputs: outs.names, outputsDir: outs.dir, outputsMax: outs.max,
+            artifactPerFile: artifact.perFile, artifactSeconds: artifact.seconds,
             readonlySource: readonlySource, jobUser: jobUser, pins: f["pins"], npmSocket: f["npm-socket"],
             cpus: caps.cpus, memoryBytes: caps.memoryBytes))
     exit(code)

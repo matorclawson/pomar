@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
 	"io"
 	"math"
 	"os"
 	"regexp"
+	"syscall"
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/base"
@@ -19,23 +21,24 @@ import (
 const classesSchema = "pomar.manager-classes/v1"
 
 type classProfile struct {
-	Name           string   `json:"name"`
-	Image          string   `json:"image"`
-	VCPU           int      `json:"vcpu"`
-	MemoryMiB      int64    `json:"memory_mib"`
-	DiskPeakGiB    int64    `json:"disk_peak_gib"`
-	Concurrency    int      `json:"concurrency"`
-	TimeLimitS     int64    `json:"time_limit_s"`
-	LogCapBytes    int64    `json:"log_cap_bytes"`
-	OutputCapBytes int64    `json:"output_cap_bytes"`
-	Callers        []string `json:"callers"`
-	SourceMirrors  []string `json:"source_mirrors"`
-	SourceRef      string   `json:"source_ref,omitempty"`
-	Command        []string `json:"command,omitempty"`
-	JobUser        bool     `json:"job_user"`
-	GoProxy        bool     `json:"go_proxy"`
-	NPM            bool     `json:"npm"`
-	NPMLock        string   `json:"npm_lock,omitempty"`
+	Name           string                 `json:"name"`
+	Image          string                 `json:"image"`
+	VCPU           int                    `json:"vcpu"`
+	MemoryMiB      int64                  `json:"memory_mib"`
+	DiskPeakGiB    int64                  `json:"disk_peak_gib"`
+	Concurrency    int                    `json:"concurrency"`
+	TimeLimitS     int64                  `json:"time_limit_s"`
+	LogCapBytes    int64                  `json:"log_cap_bytes"`
+	OutputCapBytes int64                  `json:"output_cap_bytes"`
+	ArtifactOutput *artifactreturn.Policy `json:"artifact_output,omitempty"`
+	Callers        []string               `json:"callers"`
+	SourceMirrors  []string               `json:"source_mirrors"`
+	SourceRef      string                 `json:"source_ref,omitempty"`
+	Command        []string               `json:"command,omitempty"`
+	JobUser        bool                   `json:"job_user"`
+	GoProxy        bool                   `json:"go_proxy"`
+	NPM            bool                   `json:"npm"`
+	NPMLock        string                 `json:"npm_lock,omitempty"`
 }
 
 // Read this owner-supplied configuration before opening a venue or creating a
@@ -103,8 +106,20 @@ func readClassProfiles(file string, lookup func(string) (uint32, error)) ([]clas
 		if c.OutputCapBytes == 0 {
 			c.OutputCapBytes = manager.MaxOutputsBytes - c.LogCapBytes
 		}
-		if c.OutputCapBytes <= 0 || c.OutputCapBytes > manager.MaxOutputsBytes-c.LogCapBytes {
+		if c.ArtifactOutput == nil && (c.OutputCapBytes <= 0 || c.OutputCapBytes > manager.MaxOutputsBytes-c.LogCapBytes) {
 			return nil, nil, fmt.Errorf("class %q output and log caps must fit within 64 MiB", c.Name)
+		}
+		if c.ArtifactOutput != nil {
+			owner, ok := opened.Sys().(*syscall.Stat_t)
+			if !ok || owner.Uid != 0 || owner.Nlink != 1 {
+				return nil, nil, fmt.Errorf("artifact class requires a root-owned single-link configuration file")
+			}
+			if err := c.ArtifactOutput.Validate(c.OutputCapBytes); err != nil {
+				return nil, nil, err
+			}
+			if !c.JobUser || len(c.Command) == 0 || c.SourceRef == "" {
+				return nil, nil, fmt.Errorf("artifact class requires nonroot job, fixed command and source ref")
+			}
 		}
 		if len(c.Callers) == 0 || len(c.SourceMirrors) == 0 {
 			return nil, nil, fmt.Errorf("class %q requires explicit callers and source mirrors", c.Name)
@@ -137,6 +152,7 @@ func configuredClasses(profiles []classProfile, e *smoke.Env, hostBin, kernelSHA
 		c := ciClass(p.Name, p.VCPU, p.MemoryMiB, p.DiskPeakGiB, p.Concurrency, time.Duration(p.TimeLimitS)*time.Second)
 		c.LogCapBytes = p.LogCapBytes
 		c.OutputCapBytes = p.OutputCapBytes
+		c.ArtifactOutput = p.ArtifactOutput
 		classes = append(classes, manager.JobClass{
 			Class: c, Guest: manager.Guest{Kernel: e.KernelPath(), KernelSHA256: kernelSHA,
 				InitRef: smoke.InitRepo + "@" + smoke.InitDigest, InitDigest: smoke.InitDigest,

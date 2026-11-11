@@ -141,6 +141,11 @@ func (m *Manager) OutputPath(id, name string) (OutputRecord, string, error) {
 	if e == nil {
 		return OutputRecord{}, "", fmt.Errorf("manager: no attempt %s", id)
 	}
+	if p := e.claimClass().ArtifactOutput; p != nil {
+		if e.State != StateExited || e.ExitCode == nil || *e.ExitCode != 0 || !artifactOutputsComplete(e.Outputs, p.Names) {
+			return OutputRecord{}, "", fmt.Errorf("manager: artifact set is not complete")
+		}
+	}
 	for _, o := range e.Outputs {
 		if o.Name == name && o.Status == OutputOK {
 			return o, filepath.Join(m.cfg.Venue.Root(), attemptsDir, id, outputsDir, name), nil

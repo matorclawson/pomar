@@ -474,3 +474,24 @@ func TestPersistentNamespaceFailureNeverFetches(t *testing.T) {
 		t.Fatal("persistent namespace failure accepted", e)
 	}
 }
+
+func TestUnknownCallerCannotAliasExplicitRootCaller(t *testing.T) {
+	doc, want, pub, priv := fixture(t)
+	want.CallerUID = 0
+	delete(doc, "started_by_uid")
+	if _, err := Verify(signed(t, doc, priv), pub, want); err == nil {
+		t.Fatal("absent caller treated as explicit root")
+	}
+	doc["started_by_uid"] = 0
+	if _, err := Verify(signed(t, doc, priv), pub, want); err != nil {
+		t.Fatal("explicit original root binding rejected", err)
+	}
+}
+
+func TestArtifactResultCannotAddUnboundPerRunInputs(t *testing.T) {
+	doc, want, pub, priv := fixture(t)
+	doc["inputs"] = []map[string]any{{"name": "extra", "sha256": "ignored"}}
+	if _, err := Verify(signed(t, doc, priv), pub, want); err == nil {
+		t.Fatal("unbound per-run input accepted")
+	}
+}

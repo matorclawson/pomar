@@ -79,6 +79,15 @@ pomar result verify -reply result.json -public-key "$OWNER_KEY"
 pomar logs -id build-1 -public-key "$OWNER_KEY"   # the log, checked against the verified result
 ```
 
+For an explicitly configured artifact class, use `pomar attempt artifact-set
+-id ID -binding FILE -public-key BASE64 -out-dir PRIVATE_DIR` to receive a whole
+verified set. Get the binding and key independently; the manager response is not
+its own trust anchor. Preserve the one-use receiving claim after success or
+failure, including through the consuming transaction. No staged pathname or file
+is a success signal; only the complete command receipt is. This requires an
+adopted artifact-capable manager/class, not just a client build. See
+[artifact receiving](docs/artifact-return.md). It never starts or retries a job.
+
 ## 5. Seats: interactive environments
 
 A development seat is a long-lived environment for an agent, whose terminal

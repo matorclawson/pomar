@@ -148,6 +148,7 @@ func helpCatalogue() map[string]any {
 			{"attempt result", "The original result and signature reply", "pomar attempt result -id ID", "JSON reply containing original signed document bytes and signature", []string{"verify it with the owner's independently retained public key"}},
 			{"result verify", "Verify original signed bytes against an independent public key", "pomar result verify -reply FILE -public-key BASE64", "text", []string{"offline; no manager required", "exit 0 only when the signature verifies; input/binding acceptance is the consumer's separate check"}},
 			{"attempt output", "Retrieve a named terminal artifact with size and digest checks", "pomar attempt output -id ID -name NAME -o PATH", "JSON receipt; artifact bytes written to PATH", []string{"expected source/class/input/tool/output bindings and signature remain consumer checks"}},
+			{"attempt artifact-set", "Receive an independently bound signed artifact set", "pomar attempt artifact-set -id ID -binding FILE -public-key BASE64 -out-dir PRIVATE_DIR", "JSON complete receipt only after all named files verify", []string{"explicit protected class only; no same-ID retry; retain original claim; existing private directory required"}},
 			{"attempt pins", "Read the admitted tool and environment pins", "pomar attempt pins -id ID", "JSON", nil},
 			{"attempt signing-key", "Read the manager public key", "pomar attempt signing-key", "JSON", []string{"this response is not its own independent trust anchor"}},
 			{"attempt stop", "Stop a running job", "pomar attempt stop -id ID", "JSON", nil},

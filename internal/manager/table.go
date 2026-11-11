@@ -244,14 +244,15 @@ func tablePath(managerDir string) string { return filepath.Join(managerDir, "tab
 // Pins are an attempt's inputs other than its source: the guest's pinned
 // artifacts, the Pomar build, and the command's hash.
 type Pins struct {
-	Kernel      string `json:"kernel_sha256"`
-	Init        string `json:"vminit_digest"`
-	Image       string `json:"image_digest"`
-	ImageArm64  string `json:"image_arm64"`
-	PackageSet  string `json:"package_set,omitempty"`
-	Pomar       string `json:"pomar_version"`
-	HostBin     string `json:"host_bin_sha256"`
-	CommandHash string `json:"command_sha256"`
+	ArtifactShim string `json:"artifact_shim_sha256,omitempty"`
+	Kernel       string `json:"kernel_sha256"`
+	Init         string `json:"vminit_digest"`
+	Image        string `json:"image_digest"`
+	ImageArm64   string `json:"image_arm64"`
+	PackageSet   string `json:"package_set,omitempty"`
+	Pomar        string `json:"pomar_version"`
+	HostBin      string `json:"host_bin_sha256"`
+	CommandHash  string `json:"command_sha256"`
 	// RootfsSHA256 is the cloned base's sha256, recorded when the base was
 	// built (never rehashed per start); empty when the image was unpacked.
 	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`

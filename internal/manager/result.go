@@ -69,6 +69,9 @@ func (m *Manager) resultDocWithRepository(e Entry, repository string) map[string
 		doc["kernel_sha256"] = p.Kernel
 		doc["vminit_digest"] = p.Init
 		doc["host_bin_sha256"] = p.HostBin
+		if p.ArtifactShim != "" {
+			doc["artifact_shim_sha256"] = p.ArtifactShim
+		}
 		if p.RootfsSHA256 != "" {
 			doc["rootfs_sha256"] = p.RootfsSHA256
 		}
@@ -117,6 +120,9 @@ func (m *Manager) resultDocWithRepository(e Entry, repository string) map[string
 	}
 	if len(e.OutputNames) > 0 {
 		doc["outputs"] = e.Outputs
+	}
+	if e.claimClass().ArtifactOutput != nil {
+		doc["artifact_output_count"] = len(e.Outputs)
 	}
 	return doc
 }
