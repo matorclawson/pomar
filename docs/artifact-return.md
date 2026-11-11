@@ -16,6 +16,12 @@ never grant admission. The initial aggregate ceiling cannot exceed 1 GiB;
 measured sizing records original attempt/result, actual bytes and the chosen
 margin. Existing default results without the explicit policy are refused.
 
+The private receiving parent must persist across process restarts. `Receive`
+syncs the original-result file, then the staging directory, then the parent
+directory before the first fetch. A failure refuses transfer and retains the
+uncertain claim. Failures after fetching retain that durable claim for
+reconciliation, never unlink it to allow a replay.
+
 `Receive` checks free space against the entire class ceiling, then fetches
 named files with one shared deadline. Acquisition must honor its context;
 closing each returned stream must unblock its read. Each file uses an

@@ -333,3 +333,144 @@ func TestCancellationAfterLastFileNeverLeavesSuccessMarker(t *testing.T) {
 		t.Fatal("late failure not fenced", e)
 	}
 }
+
+type waitForDeadlineClose struct {
+	io.Reader
+	ctx context.Context
+}
+
+func (r waitForDeadlineClose) Close() error { <-r.ctx.Done(); return nil }
+func TestDeadlineAfterLastFileNeverLeavesSuccessMarker(t *testing.T) {
+	doc, want, pub, priv := fixture(t)
+	parent := root(t)
+	fetch := func(ctx context.Context, name string) (io.ReadCloser, error) {
+		if name == "manifest.json" {
+			return waitForDeadlineClose{strings.NewReader("{}"), ctx}, nil
+		}
+		return io.NopCloser(strings.NewReader("tar")), nil
+	}
+	accepted, err := Receive(context.Background(), parent, signed(t, doc, priv), pub, want, fetch, enough)
+	if !errors.Is(err, context.DeadlineExceeded) || accepted != "" {
+		t.Fatalf("accepted late deadline: %q %v", accepted, err)
+	}
+	stage, e := parent.OpenRoot(".partial-" + want.Attempt)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer stage.Close()
+	for _, name := range []string{"release.tar", "manifest.json"} {
+		if _, e := stage.Stat(name); e != nil {
+			t.Fatal("fixture did not finish payload", e)
+		}
+	}
+	if _, e := stage.Stat("READY.json"); !os.IsNotExist(e) {
+		t.Fatal("late deadline left success marker")
+	}
+	if _, e := stage.Stat("FAILED.json"); e != nil {
+		t.Fatal("late deadline not fenced", e)
+	}
+}
+
+func TestClaimAndOriginalNamespaceSyncBeforeFetch(t *testing.T) {
+	doc, want, pub, priv := fixture(t)
+	parent := root(t)
+	reply := signed(t, doc, priv)
+	var events []string
+	syncDir := func(r *os.Root) error {
+		kind := "parent"
+		if strings.HasSuffix(r.Name(), ".partial-"+want.Attempt) {
+			kind = "stage"
+			raw, e := r.ReadFile("ORIGINAL-RESULT.json")
+			if e != nil || !bytes.Equal(raw, reply) {
+				t.Fatal("sync before original evidence", e)
+			}
+		}
+		if e := syncDirectory(r); e != nil {
+			return e
+		}
+		events = append(events, kind)
+		return nil
+	}
+	fetch := func(ctx context.Context, name string) (io.ReadCloser, error) {
+		if len(events) < 2 || events[0] != "stage" || events[1] != "parent" {
+			t.Fatalf("fetch before durable claim/evidence: %v", events)
+		}
+		return fetchBytes(map[string]string{"release.tar": "tar", "manifest.json": "{}"})(ctx, name)
+	}
+	if _, e := receive(context.Background(), parent, reply, pub, want, fetch, enough, syncDir); e != nil {
+		t.Fatal(e)
+	}
+	if strings.Join(events, ",") != "stage,parent,stage,parent" {
+		t.Fatal("unexpected persistence order", events)
+	}
+}
+
+func TestNamespaceSyncFailureRefusesAndRetainsOriginalClaim(t *testing.T) {
+	// Deterministic failure at each pre/post transfer directory-sync boundary.
+	// Reopening the root drops all receiver memory; it is not a power-cut test.
+	for failAt := 1; failAt <= 4; failAt++ {
+		t.Run(string(rune('0'+failAt)), func(t *testing.T) {
+			doc, want, pub, priv := fixture(t)
+			parent := root(t)
+			reply := signed(t, doc, priv)
+			syncs, fetches := 0, 0
+			sentinel := errors.New("injected directory sync failure")
+			syncDir := func(r *os.Root) error {
+				syncs++
+				if syncs == failAt {
+					return sentinel
+				}
+				return syncDirectory(r)
+			}
+			fetch := func(ctx context.Context, name string) (io.ReadCloser, error) {
+				fetches++
+				return fetchBytes(map[string]string{"release.tar": "tar", "manifest.json": "{}"})(ctx, name)
+			}
+			accepted, e := receive(context.Background(), parent, reply, pub, want, fetch, enough, syncDir)
+			if !errors.Is(e, sentinel) || accepted != "" {
+				t.Fatalf("sync failure accepted: %q %v", accepted, e)
+			}
+			if failAt <= 2 && fetches != 0 {
+				t.Fatal("fetch before claim durability")
+			}
+			if failAt > 2 && fetches != 2 {
+				t.Fatal("post-transfer fixture incomplete")
+			}
+			fresh, e := os.OpenRoot(parent.Name())
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer fresh.Close()
+			before := fetches
+			accepted, e = Receive(context.Background(), fresh, reply, pub, want, fetch, enough)
+			if e == nil || accepted != "" || fetches != before {
+				t.Fatal("reopened receiver replayed original claim")
+			}
+			staged, e := fresh.OpenRoot(".partial-" + want.Attempt)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer staged.Close()
+			original, e := staged.ReadFile("ORIGINAL-RESULT.json")
+			if e != nil || !bytes.Equal(original, reply) {
+				t.Fatal("original evidence lost", e)
+			}
+			if _, e := staged.Stat("READY.json"); !os.IsNotExist(e) {
+				t.Fatal("sync failure left success marker")
+			}
+		})
+	}
+}
+
+func TestPersistentNamespaceFailureNeverFetches(t *testing.T) {
+	doc, want, pub, priv := fixture(t)
+	parent := root(t)
+	sentinel := errors.New("namespace unavailable")
+	accepted, e := receive(context.Background(), parent, signed(t, doc, priv), pub, want, func(context.Context, string) (io.ReadCloser, error) {
+		t.Fatal("fetch despite persistent sync failure")
+		return nil, nil
+	}, enough, func(*os.Root) error { return sentinel })
+	if accepted != "" || !errors.Is(e, sentinel) {
+		t.Fatal("persistent namespace failure accepted", e)
+	}
+}

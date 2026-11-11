@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -271,6 +272,23 @@ func writeNew(root *os.Root, name string, data []byte) error {
 // processes. A free-space check is a preflight, not a filesystem reservation.
 func Receive(ctx context.Context, parent *os.Root, reply []byte, key ed25519.PublicKey, want Expected,
 	fetch Fetch, available FreeBytes) (ready string, err error) {
+	return receive(ctx, parent, reply, key, want, fetch, available, syncDirectory)
+}
+
+// The sync operation is passed internally so ordering and filesystem refusal
+// can be tested deterministically; production always uses real directory Sync.
+func syncDirectory(root *os.Root) error {
+	folder, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	err = folder.Sync()
+	closeErr := folder.Close()
+	return errors.Join(err, closeErr)
+}
+
+func receive(ctx context.Context, parent *os.Root, reply []byte, key ed25519.PublicKey, want Expected,
+	fetch Fetch, available FreeBytes, syncDir func(*os.Root) error) (ready string, err error) {
 	if fetch == nil {
 		return "", fmt.Errorf("artifact: missing bounded fetch implementation")
 	}
@@ -301,10 +319,23 @@ func Receive(ctx context.Context, parent *os.Root, reply []byte, key ed25519.Pub
 	defer stage.Close()
 	defer func() {
 		if err != nil {
-			_ = writeNew(stage, "FAILED.json", []byte("{\"state\":\"FAILED_NO_REPLAY\"}\n"))
+			markerErr := writeNew(stage, "FAILED.json", []byte("{\"state\":\"FAILED_NO_REPLAY\"}\n"))
+			err = errors.Join(err, markerErr, syncDir(stage), syncDir(parent))
 		}
 	}()
 	if err = writeNew(stage, "ORIGINAL-RESULT.json", v.RawReply); err != nil {
+		return "", err
+	}
+
+	// Persist both original evidence and the one-use attempt claim BEFORE any
+	// fetch. A failed sync refuses transfer; never unlink an uncertain claim.
+	if err = syncDir(stage); err != nil {
+		return "", err
+	}
+	if err = syncDir(parent); err != nil {
+		return "", err
+	}
+	if err = ctx.Err(); err != nil {
 		return "", err
 	}
 	var total int64
@@ -398,25 +429,13 @@ func Receive(ctx context.Context, parent *os.Root, reply []byte, key ed25519.Pub
 	if err = ctx.Err(); err != nil {
 		return "", err
 	}
-	folder, e := stage.Open(".")
-	if e != nil {
-		return "", e
-	}
-	err = folder.Sync()
-	_ = folder.Close()
-	if err != nil {
+	if err = syncDir(stage); err != nil {
 		return "", err
 	}
 	if err = ctx.Err(); err != nil {
 		return "", err
 	}
-	folder, e = parent.Open(".")
-	if e != nil {
-		return "", e
-	}
-	err = folder.Sync()
-	_ = folder.Close()
-	if err != nil {
+	if err = syncDir(parent); err != nil {
 		return "", err
 	}
 	if err = ctx.Err(); err != nil {
