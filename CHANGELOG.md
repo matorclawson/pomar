@@ -22,9 +22,9 @@ manager and command-line tools with a Swift virtualization helper.
   Linux collection tools and the web deployment transaction model do not supply
   a Linux VM host or a working web deployment controller. Source integration of
   harness switching does not establish a qualified live provider round trip.
-- **Check it yourself:** start with `make help`; `make verify` is the full source
-  gate on a supported Apple silicon builder. This changelog update does not
-  establish a new gate result or successful deployment.
+- **Check it yourself:** `make verify` is the full source gate on a supported
+  Apple silicon builder; see CONTRIBUTING.md for its prerequisites. This
+  changelog update does not establish a new gate result or successful deployment.
 
 ## 2026-11
 
