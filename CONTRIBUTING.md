@@ -145,7 +145,10 @@ checkout access and the installed main-push guard. It probes dependency-source
 HTTPS with a two-second connect timeout and a five-second total timeout. This
 does not fetch packages or establish Git authentication or job admission.
 
-Environment checks print names and status, never values:
+Pomar's diagnostic prints names and status for the environment inputs below.
+GNU Make can print an invalid temporary directory path during startup, before
+any recipe runs. To diagnose a private or invalid temporary directory without
+GNU Make's startup output, use `sh tools/doctor.sh` from the repository root.
 
 | Variable | Purpose |
 | --- | --- |

@@ -16,7 +16,9 @@ cp host/Package.swift host/Package.resolved host/pomar-host.entitlements "$fixtu
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
 export HYGIENE_REQUIRE=0 HYGIENE_DENYLIST= POMAR_SOCKET= POMAR_DEV_ROOT= POMAR_KERNEL_SHA256= VERSION= RELEASE_OUT=
-export TMPDIR="$scratch"
+# GNU Make checks its own temp directory before reading the Makefile. Keep
+# that directory valid while testing what doctor reports for invalid TMPDIR.
+export MAKE_TMPDIR="$scratch" TMPDIR="$scratch"
 git -C "$fixture" init -q
 fail() { printf 'FAIL makefile-check: %s\n' "$1" >&2; exit 1; }
 
@@ -103,7 +105,7 @@ if HYGIENE_REQUIRE=1 HYGIENE_DENYLIST="$scratch/$secret_marker" POMAR_SOCKET="$s
     POMAR_DEV_ROOT="$scratch/$secret_marker" POMAR_KERNEL_SHA256="$secret_marker" \
     TMPDIR="$scratch/$secret_marker" VERSION="$secret_marker" RELEASE_OUT="$secret_marker" \
     fixture_make doctor > "$scratch/private.log" 2>&1; then fail 'invalid private inputs accepted'; fi
-if grep -q "$secret_marker" "$scratch/private.log"; then fail 'doctor printed an environment value'; fi
+if grep -q "$secret_marker" "$scratch/private.log"; then fail 'make doctor exposed a private fixture value'; fi
 grep -q 'FIX  TMPDIR:' "$scratch/private.log" || fail 'doctor missed unavailable temporary storage'
 grep -q 'FIX  VERSION:' "$scratch/private.log" || fail 'doctor missed an invalid candidate version'
 grep -q 'FIX  RELEASE_OUT:' "$scratch/private.log" || fail 'doctor missed an invalid candidate output'
