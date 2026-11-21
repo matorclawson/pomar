@@ -85,7 +85,10 @@ See [development ownership](docs/operations.md#development-manager).
 ## Develop Pomar
 
 Contributors build from source on Apple silicon with the pinned Go and Swift
-requirements. `make verify` is the native merge gate. This is separate from
+requirements. Start with `make help`, or `make help-all` for every documented
+target. `make doctor` diagnoses prerequisites without changing the environment;
+see [the source development guide](CONTRIBUTING.md#9-source-development-entry-points). `make verify` is the
+native merge gate. This is separate from
 using an installed release. See [CONTRIBUTING.md](CONTRIBUTING.md),
 [release preparation](docs/releases.md), [manager classes](docs/manager-classes.md)
 and [agent environments](docs/agent-environments.md).

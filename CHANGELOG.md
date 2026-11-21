@@ -26,6 +26,24 @@ manager and command-line tools with a Swift virtualization helper.
   Apple silicon builder; see CONTRIBUTING.md for its prerequisites. This
   changelog update does not establish a new gate result or successful deployment.
 
+## [Unreleased]
+
+### Added
+
+- A documented Makefile guide, complete target listing, read-only prerequisite
+  checks, and explicit setup/build/run/cleanup entry points help contributors
+  discover the supported source workflow.
+- A lightweight pre-push guard refuses updates and deletions of the main branch
+  without starting a build. Full verification remains a separate required step
+  on the admitted builder.
+
+### Changed
+
+- Distribution preparation moves to `make release-candidate` with an explicit
+  release-candidate version. `make release` now refuses until the reviewed
+  same-byte publication route is configured, preventing an implicit rebuild
+  from being mistaken for promotion of an accepted candidate.
+
 ## 2026-11
 
 ### Added
