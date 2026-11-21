@@ -77,7 +77,7 @@ cat > "$fake/curl" <<'STUB'
 #!/bin/sh
 [ "${POMAR_FIXTURE_NETWORK:-up}" = up ]
 STUB
-for tool in gofmt codesign shasum file; do
+for tool in gofmt codesign shasum file strip; do
     printf '#!/bin/sh\nexit 0\n' > "$fake/$tool"
 done
 chmod +x "$fake/"*
