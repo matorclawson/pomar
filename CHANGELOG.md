@@ -33,16 +33,15 @@ manager and command-line tools with a Swift virtualization helper.
 - A documented Makefile guide, complete target listing, read-only prerequisite
   checks, and explicit setup/build/run/cleanup entry points help contributors
   discover the supported source workflow.
-- A lightweight pre-push guard refuses updates and deletions of the main branch
-  without starting a build. Full verification remains a separate required step
-  on the admitted builder.
+- Candidate preparation has a `make release-candidate` entry point with explicit
+  release-candidate versions. Final publication remains unconfigured;
+  `make release` refuses rather than rebuilding accepted candidate bytes.
 
 ### Changed
 
-- Distribution preparation moves to `make release-candidate` with an explicit
-  release-candidate version. `make release` now refuses until the reviewed
-  same-byte publication route is configured, preventing an implicit rebuild
-  from being mistaken for promotion of an accepted candidate.
+- The pre-push hook refuses updates and deletions of the main branch without
+  starting a build. Full verification remains a separate required step on the
+  admitted builder.
 
 ## 2026-11
 
