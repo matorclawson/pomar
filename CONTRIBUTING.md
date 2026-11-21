@@ -154,7 +154,8 @@ Environment checks print names and status, never values:
 | `POMAR_DEV_ROOT` | Explicit private root for prepare/kernel/run; no volume is assumed |
 | `POMAR_KERNEL_SHA256` | Actual prepared kernel digest; required by run |
 | `POMAR_SOCKET` | Optional owner-provided manager socket; an installed client checks it if set |
-| `VERSION`, `RELEASE_OUT` | Explicit release version and new absolute candidate output directory |
+| `TMPDIR` | Optional existing writable temporary-storage binding; values are withheld |
+| `VERSION`, `RELEASE_OUT` | Explicit candidate version and new absolute output; checked as a pair if either is set |
 
 No private root, removable volume or service is a prerequisite for reading the
 source. Optional runtime checks say SKIP when their binding is unset. A set but

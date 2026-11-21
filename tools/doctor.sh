@@ -9,7 +9,7 @@ skip() { printf 'SKIP %s: %s\n' "$1" "$2"; }
 has() { command -v "$1" >/dev/null 2>&1; }
 
 printf '%s\n' 'Pomar source prerequisites (read-only; no environment values printed)'
-for tool in git make awk sed grep find cmp mktemp sh go gofmt swift xcode-select codesign shasum file curl tar; do
+for tool in git make awk sed grep find cmp mktemp sh uname dirname cp rm mkdir chmod ln cksum sort strip go gofmt swift xcode-select codesign shasum file curl tar; do
     if has "$tool"; then pass "$tool" 'available'; else fix "$tool" 'provide the documented toolchain through your host owner; no automatic install'; fi
 done
 
@@ -82,6 +82,21 @@ elif [ "${HYGIENE_REQUIRE:-0}" = 1 ]; then
     fix HYGIENE_DENYLIST 'required but unset; obtain the private input from its owner'
 else
     skip HYGIENE_DENYLIST 'unset; generic contributor checks apply; maintainers require the private input'
+fi
+if [ -n "${TMPDIR:-}" ]; then
+    if [ -d "$TMPDIR" ] && [ -w "$TMPDIR" ]; then pass TMPDIR 'set to an existing writable directory (value withheld)'; else fix TMPDIR 'set but not an existing writable directory; obtain the approved temporary-storage binding'; fi
+else
+    skip TMPDIR 'unset; system temporary storage applies, subject to the owner storage policy'
+fi
+if [ -n "${VERSION:-}" ] || [ -n "${RELEASE_OUT:-}" ]; then
+    if printf '%s\n' "${VERSION:-}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'; then pass VERSION 'explicit candidate version set (value withheld)'; else fix VERSION 'release-candidate requires an explicit vMAJOR.MINOR.PATCH-rc.N version'; fi
+    case "${RELEASE_OUT:-}" in
+        /*) if [ ! -e "$RELEASE_OUT" ] && [ ! -L "$RELEASE_OUT" ] && [ -d "$(dirname "$RELEASE_OUT")" ] && [ -w "$(dirname "$RELEASE_OUT")" ]; then pass RELEASE_OUT 'new absolute output with a writable existing parent (value withheld)'; else fix RELEASE_OUT 'use a new absolute output beneath an existing writable approved parent'; fi ;;
+        *) fix RELEASE_OUT 'release-candidate requires a new explicit absolute output directory' ;;
+    esac
+else
+    skip VERSION 'unset; required only for release-candidate'
+    skip RELEASE_OUT 'unset; required only for release-candidate'
 fi
 if [ -n "${POMAR_DEV_ROOT:-}" ]; then
     case "$POMAR_DEV_ROOT" in

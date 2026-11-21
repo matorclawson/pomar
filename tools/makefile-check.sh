@@ -15,6 +15,8 @@ cp go.mod "$fixture/go.mod"
 cp host/Package.swift host/Package.resolved host/pomar-host.entitlements "$fixture/host/"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+export HYGIENE_REQUIRE=0 HYGIENE_DENYLIST= POMAR_SOCKET= POMAR_DEV_ROOT= POMAR_KERNEL_SHA256= VERSION= RELEASE_OUT=
+export TMPDIR="$scratch"
 git -C "$fixture" init -q
 fail() { printf 'FAIL makefile-check: %s\n' "$1" >&2; exit 1; }
 
@@ -81,7 +83,7 @@ done
 chmod +x "$fake/"*
 snapshot() { find "$fixture" -type f -exec cksum {} \; | sort; }
 snapshot > "$scratch/before"
-HYGIENE_DENYLIST= HYGIENE_REQUIRE=0 POMAR_SOCKET= POMAR_DEV_ROOT= POMAR_KERNEL_SHA256= \
+HYGIENE_DENYLIST= HYGIENE_REQUIRE=0 POMAR_SOCKET= POMAR_DEV_ROOT= POMAR_KERNEL_SHA256= VERSION= RELEASE_OUT= \
     fixture_make doctor > "$scratch/doctor.log" 2>&1 || { cat "$scratch/doctor.log"; fail 'healthy fixture doctor failed'; }
 snapshot > "$scratch/after"
 cmp "$scratch/before" "$scratch/after" >/dev/null || fail 'doctor changed checkout or Git files'
@@ -99,8 +101,12 @@ grep -q 'FIX  network:' "$scratch/network.log" || fail 'network refusal lacks re
 secret_marker=DO_NOT_PRINT_PRIVATE_ENV_VALUE
 if HYGIENE_REQUIRE=1 HYGIENE_DENYLIST="$scratch/$secret_marker" POMAR_SOCKET="$scratch/$secret_marker" \
     POMAR_DEV_ROOT="$scratch/$secret_marker" POMAR_KERNEL_SHA256="$secret_marker" \
+    TMPDIR="$scratch/$secret_marker" VERSION="$secret_marker" RELEASE_OUT="$secret_marker" \
     fixture_make doctor > "$scratch/private.log" 2>&1; then fail 'invalid private inputs accepted'; fi
 if grep -q "$secret_marker" "$scratch/private.log"; then fail 'doctor printed an environment value'; fi
+grep -q 'FIX  TMPDIR:' "$scratch/private.log" || fail 'doctor missed unavailable temporary storage'
+grep -q 'FIX  VERSION:' "$scratch/private.log" || fail 'doctor missed an invalid candidate version'
+grep -q 'FIX  RELEASE_OUT:' "$scratch/private.log" || fail 'doctor missed an invalid candidate output'
 git -C "$fixture" config --local --unset core.hooksPath
 if fixture_make doctor > "$scratch/missing-hook.log" 2>&1; then fail 'missing hook ignored'; fi
 grep -q 'FIX  hooks:' "$scratch/missing-hook.log" || fail 'missing hook lacks repair guidance'
