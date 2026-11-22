@@ -39,6 +39,7 @@ type Native struct {
 	SHA, Bundle, ArchivePath string
 	rollback                 bool
 	fenced                   bool
+	stopIssued               bool
 	beforeRecord             []byte
 	original                 Journal
 	Progress                 io.Writer
@@ -661,8 +662,11 @@ func (n *Native) Archive(ctx context.Context, before Observation) (string, error
 		return path, err
 	}
 	if n.M.migrating() {
-		oldPath := n.launchPlists().path(legacyLabel)
-		old, mode, err := n.originalPlist(oldPath)
+		installed, err := n.launchPlists().current()
+		if err != nil || installed.label != legacyLabel {
+			return path, fmt.Errorf("original legacy plist is not installed")
+		}
+		old, mode, err := n.originalPlist(installed.path)
 		if err != nil {
 			return path, err
 		}
@@ -698,24 +702,22 @@ func (n *Native) Save(j Journal) error {
 func (n *Native) Fence(ctx context.Context) error {
 	// Drain is atomic with admission. Existing clients cannot race an admitted
 	// start past it; filesystem fencing follows only once the manager is idle.
-	if _, err := n.currentService(ctx); err != nil {
-		if !n.rollback {
+	if n.rollback {
+		job, _, err := n.recoveryService(ctx)
+		if err != nil {
 			return err
 		}
-		if err := n.absent(ctx); err != nil {
+		if job.pid == 0 {
+			return n.closeControl()
+		}
+	} else {
+		if _, err := n.currentService(ctx); err != nil {
 			return err
 		}
-		return n.closeControl()
 	}
 	b, err := owner(ctx, "drain")
 	if err != nil {
-		if !n.rollback {
-			return err
-		}
-		if err = n.absent(ctx); err != nil {
-			return err
-		}
-		return n.closeControl()
+		return err
 	}
 	var c manager.Capacity
 	if json.Unmarshal(b, &c) != nil || !c.Draining || c.Live != 0 {
@@ -731,14 +733,25 @@ func (n *Native) closeControl() error {
 	return controlDirectoryMode(runDir, n.M.OwnerUID, 0700)
 }
 func (n *Native) noWriters(ctx context.Context, pid int) error {
+	return n.checkWriters(ctx, pid, false)
+}
+
+func (n *Native) checkWriters(ctx context.Context, pid int, strict bool) error {
 	b, err := command(ctx, nil, "/bin/ps", "-axww", "-o", "pid=,ppid=,uid=,comm=")
 	if err != nil {
 		return err
 	}
-	return writerInventory(b, pid, n.M.OwnerUID)
+	return checkWriterInventory(b, pid, n.M.OwnerUID, strict)
 }
 
 func writerInventory(b []byte, pid int, ownerUID uint32) error {
+	return checkWriterInventory(b, pid, ownerUID, false)
+}
+
+func checkWriterInventory(b []byte, pid int, ownerUID uint32, strict bool) error {
+	if len(bytes.TrimSpace(b)) == 0 {
+		return fmt.Errorf("empty process inventory")
+	}
 	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 {
@@ -755,12 +768,16 @@ func writerInventory(b []byte, pid int, ownerUID uint32) error {
 		if e != nil {
 			return fmt.Errorf("process inventory malformed")
 		}
+		uid, e := strconv.ParseUint(f[2], 10, 32)
+		if e != nil {
+			return fmt.Errorf("process inventory user malformed")
+		}
 		name := strings.Join(f[3:], " ")
 		base := filepath.Base(name)
 		// A pre-drain source sync can survive its parent's exit. Prove those
 		// writers absent too; do not signal them or treat PID1 as safe custody.
 		writer := name == bindir+"/pomar" || base == "pomar-host" || strings.Contains(name, "Virtualization") || base == "git" || strings.HasPrefix(base, "git-") || base == "ssh"
-		if (pid > 0 && pp == pid) || (f[2] == strconv.FormatUint(uint64(ownerUID), 10) && p != pid && writer) {
+		if (pid > 0 && pp == pid) || (uid == uint64(ownerUID) && p != pid && (writer || strict)) {
 			return fmt.Errorf("service has surviving or unaccounted writers; no process was signalled")
 		}
 	}
@@ -797,9 +814,15 @@ func (n *Native) Stop(ctx context.Context, before Observation) error {
 	if err != nil || pid != before.PID || birth != before.Birth {
 		return fmt.Errorf("process identity changed at stop")
 	}
+	n.stopIssued = true
 	if _, err = command(ctx, nil, "/bin/launchctl", "bootout", "system/"+label); err != nil {
 		return err
 	}
+	return n.waitAbsent(ctx)
+}
+
+func (n *Native) waitAbsent(ctx context.Context) error {
+	var err error
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if err = n.absent(ctx); err == nil {
@@ -831,11 +854,11 @@ func (n *Native) absent(ctx context.Context) error {
 	return nil
 }
 func serviceAbsentFromTable(raw []byte) error {
-	label, err := loadedService(raw)
+	job, err := loadedService(raw)
 	if err != nil {
 		return err
 	}
-	if label != "" {
+	if job.label != "" {
 		return fmt.Errorf("service is still loaded")
 	}
 	return nil
@@ -899,11 +922,6 @@ func (n *Native) Replace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if n.M.migrating() {
-		if err := p.remove(); err != nil {
-			return err
-		}
-	}
 	if err = durableWrite(recordPath, pending, 0644); err != nil {
 		return err
 	}
@@ -952,11 +970,11 @@ func (n *Native) Start(ctx context.Context) error {
 		return err
 	}
 	label := n.expectedLabel()
-	p := n.launchPlists()
-	if err := p.require(label); err != nil {
-		return err
+	installed, err := n.launchPlists().current()
+	if err != nil || installed.label != label {
+		return fmt.Errorf("expected startup plist is not installed")
 	}
-	if _, err := command(ctx, nil, "/bin/launchctl", "bootstrap", "system", p.path(label)); err != nil {
+	if _, err := command(ctx, nil, "/bin/launchctl", "bootstrap", "system", installed.path); err != nil {
 		return err
 	}
 	ready, cancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -1106,7 +1124,11 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 			}
 		}
 	}
-	if pid, birth, err := n.process(ctx); err == nil {
+	job, birth, err := n.recoveryService(ctx)
+	if err != nil {
+		return err
+	}
+	if job.pid != 0 {
 		b, err := owner(ctx, "list")
 		if err != nil {
 			return err
@@ -1115,19 +1137,19 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 		if err != nil || h != j.Before.History {
 			return fmt.Errorf("history changed since upgrade; rollback refused")
 		}
-		if err = n.Stop(ctx, Observation{PID: pid, Birth: birth}); err != nil {
+		if err = n.Stop(ctx, Observation{PID: job.pid, Birth: birth}); err != nil {
 			return err
 		}
-	} else if err = n.absent(ctx); err != nil {
+	} else if job.label != "" {
+		if err := n.unloadStopped(ctx, job); err != nil {
+			return err
+		}
+	}
+	if err := n.absent(ctx); err != nil {
 		return err
 	}
 	if err := n.retainedCheck(); err != nil {
 		return err
-	}
-	if n.M.migrating() {
-		if err := p.remove(); err != nil {
-			return err
-		}
 	}
 	for _, name := range binaries {
 		current, err := readFile(bindir+"/"+name, 512<<20, 0)
@@ -1205,15 +1227,15 @@ func (n *Native) LoadRollback(path string) (Journal, error) {
 }
 
 func (n *Native) recoveryObservation(ctx context.Context, j Journal) (any, error) {
-	pid, birth, err := n.process(ctx)
+	job, birth, err := n.recoveryService(ctx)
 	if err != nil {
-		if err = n.absent(ctx); err != nil {
-			return nil, err
-		}
-		return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "absent", "journal": j}, nil
-	}
-	if err = n.noWriters(ctx, pid); err != nil {
 		return nil, err
+	}
+	if job.pid == 0 {
+		if job.label == "" {
+			return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "absent", "journal": j}, nil
+		}
+		return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "loaded_without_process", "label": job.label, "journal": j}, nil
 	}
 	b, err := owner(ctx, "list")
 	if err != nil {
@@ -1238,15 +1260,15 @@ func (n *Native) recoveryObservation(ctx context.Context, j Journal) (any, error
 	if err != nil || cap != j.Before.OwnerCapacity {
 		return nil, fmt.Errorf("owner class/budget changed since original operation")
 	}
-	end, endBirth, err := n.process(ctx)
-	if err != nil || pid != end || birth != endBirth {
+	end, endBirth, err := n.recoveryService(ctx)
+	if err != nil || job != end || birth != endBirth {
 		return nil, fmt.Errorf("service changed during recovery check")
 	}
 	var cp manager.Capacity
 	if json.Unmarshal(b, &cp) != nil {
 		return nil, fmt.Errorf("capacity malformed")
 	}
-	return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "running", "pid": pid, "birth": birth, "draining": cp.Draining, "history_preserved": true, "key_preserved": true, "owner_capacity_preserved": true, "caller_readback_performed": false, "journal": j}, nil
+	return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "running", "pid": job.pid, "birth": birth, "draining": cp.Draining, "history_preserved": true, "key_preserved": true, "owner_capacity_preserved": true, "caller_readback_performed": false, "journal": j}, nil
 }
 
 // Stage converts only the frozen payload files into a private root-owned

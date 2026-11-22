@@ -148,3 +148,62 @@ func TestJournalRetainsSigningPolicyAndRollbackRefusesAnotherPolicy(t *testing.T
 		t.Fatal("rollback policy mismatch allowed effects", f.events, err)
 	}
 }
+
+func TestMigrationRecoversOriginalServiceAtEachPostStopFailure(t *testing.T) {
+	for _, point := range []string{
+		"save:stopping", "stop", "save:installing", "replace", "save:starting", "start",
+		"save:verifying", "verify", "save:opening", "open", "save:complete",
+	} {
+		t.Run(point, func(t *testing.T) {
+			var recovery fakeDriver
+			forward := &fakeDriver{fail: point}
+			j, err := apply(context.Background(), forward, "frozen", func(ctx context.Context, failed Journal) (Journal, error) {
+				if failed.Archive != forward.j.Archive || failed.Before != forward.j.Before {
+					t.Fatal("recovery lost the original archive")
+				}
+				return Rollback(ctx, &recovery, failed, "frozen")
+			})
+			want := []string{"check", "save:rolling-back", "fence", "restore", "start", "verify", "open", "save:rolled-back"}
+			if err == nil || !strings.Contains(err.Error(), "original service restored and verified") ||
+				j.Phase != "rolled-back" || !reflect.DeepEqual(recovery.events, want) {
+				t.Fatalf("failure %s did not restore and verify the legacy service: %v, %v, %v", point, j, err, recovery.events)
+			}
+		})
+	}
+}
+
+type canceledMigration struct {
+	fakeDriver
+	cancel context.CancelFunc
+}
+
+func (f *canceledMigration) Replace(ctx context.Context) error {
+	f.cancel()
+	return ctx.Err()
+}
+
+func TestMigrationRecoveryHasItsOwnDeadlineAndRetainsBothErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	forward := &canceledMigration{cancel: cancel}
+	unproven := errors.New("writer custody unproven")
+	j, err := apply(ctx, forward, "frozen", func(recovery context.Context, failed Journal) (Journal, error) {
+		if _, ok := recovery.Deadline(); !ok || recovery.Err() != nil {
+			t.Fatal("recovery inherited cancellation or has no deadline")
+		}
+		return failed, unproven
+	})
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, unproven) || j.Phase != "installing" {
+		t.Fatalf("failed recovery lost the outcomes: %v, %v", j, err)
+	}
+}
+
+func TestMigrationDoesNotRecoverBeforeStoppingPhase(t *testing.T) {
+	f := &fakeDriver{fail: "fence"}
+	if _, err := apply(context.Background(), f, "frozen", func(context.Context, Journal) (Journal, error) {
+		t.Fatal("recovery attempted before stopping phase")
+		return Journal{}, nil
+	}); err == nil {
+		t.Fatal("pre-stop failure was hidden")
+	}
+}

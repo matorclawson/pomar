@@ -4,7 +4,9 @@ package serviceupgrade
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 )
 
 type Observation struct {
@@ -54,9 +56,11 @@ func Inspect(ctx context.Context, d Driver) (Observation, error) {
 	return d.Observe(ctx)
 }
 
-// Apply does not reopen admission after a failed verification. Recovery is an
-// explicit product rollback using the retained archive and frozen manifest.
 func Apply(ctx context.Context, d Driver, manifestSHA string) (Journal, error) {
+	return apply(ctx, d, manifestSHA, nil)
+}
+
+func apply(ctx context.Context, d Driver, manifestSHA string, recover func(context.Context, Journal) (Journal, error)) (Journal, error) {
 	before, err := Inspect(ctx, d)
 	if err != nil {
 		return Journal{}, err
@@ -66,9 +70,25 @@ func Apply(ctx context.Context, d Driver, manifestSHA string) (Journal, error) {
 		return Journal{}, err
 	}
 	j := Journal{Schema: "pomar.service-upgrade-journal/v1", ManifestSHA: manifestSHA, Phase: "prepared", Before: before, Archive: archive, SigningPolicy: d.SigningPolicy()}
+	stopping := false
+	fail := func(cause error) (Journal, error) {
+		failure := fmt.Errorf("upgrade incomplete at %s; retained archive %s: %w", j.Phase, j.Archive, cause)
+		if recover == nil || !stopping {
+			return j, fmt.Errorf("%w; admission must be reconciled", failure)
+		}
+		// Do not inherit cancellation from the failed forward operation.
+		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+		defer cancel()
+		recovered, recoveryErr := recover(recoveryCtx, j)
+		if recoveryErr != nil {
+			return recovered, errors.Join(failure, fmt.Errorf("automatic recovery incomplete; reconcile the original archive: %w", recoveryErr))
+		}
+		return recovered, fmt.Errorf("%w; original service restored and verified", failure)
+	}
 	step := func(phase string, act func() error) error {
 		// Retain intent before its effect: a crash cannot look like no change.
 		j.Phase = phase
+		stopping = stopping || phase == "stopping"
 		if err := d.Save(j); err != nil {
 			return err
 		}
@@ -96,12 +116,15 @@ func Apply(ctx context.Context, d Driver, manifestSHA string) (Journal, error) {
 	}
 	for _, op := range operations {
 		if err = step(op.phase, op.act); err != nil {
-			return j, fmt.Errorf("upgrade incomplete at %s; retained archive %s; admission must be reconciled: %w", j.Phase, j.Archive, err)
+			return fail(err)
 		}
 	}
 	j.Phase = "complete"
 	err = d.Save(j)
 	if err != nil {
+		if recover != nil {
+			return fail(fmt.Errorf("admission reopened before completion journal failed: %w", err))
+		}
 		return j, fmt.Errorf("admission reopened but completion journal failed; inspect retained archive before recovery: %w", err)
 	}
 	return j, err

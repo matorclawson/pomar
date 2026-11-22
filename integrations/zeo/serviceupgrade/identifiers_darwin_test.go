@@ -3,6 +3,7 @@ package serviceupgrade
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,21 +45,11 @@ func TestMigrationChangesOnlyLabelAndRestoresOriginalPlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := p.publish(neutralLabel, next, 0644); err == nil {
-		t.Fatal("could publish a second startup plist")
-	}
-	if err := p.remove(); err != nil {
-		t.Fatal(err)
-	}
-	// Reopen the directory after an interrupted switch.
-	if err := p.require(""); err != nil {
-		t.Fatal(err)
-	}
 	if err := p.publish(neutralLabel, next, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.remove(); err != nil {
-		t.Fatal(err)
+	if _, err := os.Lstat(p.path(legacyLabel)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the old startup filename still exists: %v", err)
 	}
 	if err := p.publish(legacyLabel, saved, 0640); err != nil {
 		t.Fatal(err)
@@ -110,6 +101,156 @@ func TestMigrationChecksSignedBinaryIdentityInBothDirections(t *testing.T) {
 			}
 			if err := n.signature(ctx, path, "pomar", !target); err == nil {
 				t.Fatal("the opposite role accepted a real signed binary")
+			}
+		})
+	}
+}
+
+func TestRecoverySeparatesLoadedWithoutProcessFromAbsentOrRunning(t *testing.T) {
+	const header = "PID Status Label\n"
+	for _, tc := range []struct {
+		name, row string
+		label     string
+		pid       int
+		bindErr   error
+		writers   string
+		allow     bool
+		wantErr   bool
+	}{
+		{name: "absent", writers: "1 0 0 /sbin/launchd", allow: true},
+		{name: "pinned stopped", row: "- 0 " + neutralLabel, label: neutralLabel, writers: "1 0 0 /sbin/launchd", allow: true},
+		{name: "running", row: "901 0 " + neutralLabel, label: neutralLabel, pid: 901, writers: "901 1 410 /usr/local/libexec/pomar/pomar", allow: true},
+		{name: "unbound stopped", row: "- 0 " + neutralLabel, label: neutralLabel, bindErr: errors.New("unknown generation"), allow: true, wantErr: true},
+		{name: "unknown owner process", row: "- 0 " + neutralLabel, label: neutralLabel, writers: "905 1 410 /path/unknown", allow: true, wantErr: true},
+		{name: "running child", row: "901 0 " + neutralLabel, label: neutralLabel, pid: 901, writers: "902 901 410 /path/unknown", allow: true, wantErr: true},
+		{name: "v1 stopped", row: "- 0 " + legacyLabel, label: legacyLabel, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job, err := loadedService([]byte(header + tc.row))
+			if err != nil || job.label != tc.label || job.pid != tc.pid {
+				t.Fatalf("unexpected launchd state: %+v, %v", job, err)
+			}
+			err = checkRecoveryJob(job, tc.allow, func(label string) error {
+				if label == "" || label != tc.label {
+					t.Fatalf("unexpected generation binding: %q", label)
+				}
+				return tc.bindErr
+			}, func(pid int) error {
+				return checkWriterInventory([]byte(tc.writers), pid, 410, pid == 0)
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("unexpected recovery classification: %v", err)
+			}
+		})
+	}
+	for _, badPID := range []string{"0", "1", "?", "overflow-999999999"} {
+		if _, err := loadedService([]byte(header + badPID + " 0 " + neutralLabel)); err == nil {
+			t.Fatalf("invalid PID %q treated as stopped", badPID)
+		}
+	}
+}
+
+type plistMigrationFixture struct {
+	fakeDriver
+	plists    launchPlists
+	archive   []byte
+	target    []byte
+	active    string
+	restoring bool
+	interrupt string
+}
+
+func (f *plistMigrationFixture) Archive(context.Context, Observation) (string, error) {
+	data, err := pinnedOwnedFile(f.plists.path(legacyLabel), f.plists.manifest.Retained["plist"], f.plists.uid)
+	f.archive = data
+	return "original-archive", err
+}
+
+func (f *plistMigrationFixture) Stop(context.Context, Observation) error {
+	f.active = ""
+	return nil
+}
+
+func (f *plistMigrationFixture) Replace(context.Context) error {
+	switch f.interrupt {
+	case "before-publication":
+		return errors.New("injected interruption between binary replacement and plist publication")
+	case "after-atomic-replacement":
+		if err := durableWriteOwned(f.plists.path(legacyLabel), f.target, 0644, f.plists.uid); err != nil {
+			return err
+		}
+		return errors.New("injected interruption after plist replacement and before rename")
+	}
+	return f.plists.publish(neutralLabel, f.target, 0644)
+}
+
+func (f *plistMigrationFixture) Restore(context.Context, Journal) error {
+	f.restoring = true
+	f.active = ""
+	return f.plists.publish(legacyLabel, f.archive, 0640)
+}
+
+func (f *plistMigrationFixture) Start(context.Context) error {
+	if f.active != "" {
+		return errors.New("a supervisor is still active")
+	}
+	label := neutralLabel
+	if f.restoring {
+		label = legacyLabel
+	}
+	if err := f.plists.require(label); err != nil {
+		return err
+	}
+	f.active = label
+	return nil
+}
+
+func (f *plistMigrationFixture) Verify(context.Context, Observation) error {
+	return f.plists.require(f.active)
+}
+
+func TestMigrationTransactionKeepsStartupPlistAndSupportsRollback(t *testing.T) {
+	ctx := context.Background()
+	old := fixturePlist(legacyLabel, "serve")
+	next := fixturePlist(neutralLabel, "serve")
+	for _, interrupt := range []string{"complete", "before-publication", "after-atomic-replacement"} {
+		t.Run(interrupt, func(t *testing.T) {
+			m := fixtureManifest()
+			m.Retained["plist"] = FilePin{digest(old), int64(len(old))}
+			m.Identifiers = &Identifiers{Mode: "legacy_to_neutral", TargetPlist: &FilePin{digest(next), int64(len(next))}}
+			f := &plistMigrationFixture{
+				plists: launchPlists{dir: t.TempDir(), uid: uint32(os.Getuid()), manifest: m},
+				active: legacyLabel, target: next, interrupt: interrupt,
+			}
+			if err := os.WriteFile(f.plists.path(legacyLabel), old, 0640); err != nil {
+				t.Fatal(err)
+			}
+			recover := func(ctx context.Context, failed Journal) (Journal, error) {
+				installed, err := f.plists.current()
+				want := legacyLabel
+				if interrupt == "after-atomic-replacement" {
+					want = neutralLabel
+				}
+				if err != nil || f.active != "" || installed.label != want || installed.path != f.plists.path(legacyLabel) {
+					t.Fatalf("interruption did not leave exactly one pinned startup file: %+v, %v", installed, err)
+				}
+				return Rollback(ctx, f, failed, "frozen")
+			}
+			j, err := apply(ctx, f, "frozen", recover)
+			if interrupt != "complete" {
+				if err == nil || j.Phase != "rolled-back" {
+					t.Fatalf("expected forward error with verified recovery: %+v, %v", j, err)
+				}
+			} else {
+				if err != nil || j.Phase != "complete" || f.active != neutralLabel {
+					t.Fatalf("expected neutral service after successful migration: %+v, %v", j, err)
+				}
+				if j, err = Rollback(ctx, f, j, "frozen"); err != nil || j.Phase != "rolled-back" {
+					t.Fatalf("explicit rollback: %+v, %v", j, err)
+				}
+			}
+			if f.active != legacyLabel || f.plists.require(legacyLabel) != nil {
+				t.Fatal("original service and exact plist were not restored")
 			}
 		})
 	}

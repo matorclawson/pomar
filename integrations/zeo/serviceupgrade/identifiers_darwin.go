@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
@@ -25,35 +26,54 @@ func (p launchPlists) path(label string) string {
 	return filepath.Join(p.dir, label+".plist")
 }
 
-// current refuses unknown bytes, unsafe custody and a pair that could both
-// auto-load on reboot. An empty result is a recoverable interrupted migration.
-func (p launchPlists) current() (string, error) {
+type installedPlist struct {
+	label string
+	path  string
+}
+
+// current binds a single installed file to its pinned contents. Migration
+// allows either filename while an atomic label publication is in progress.
+func (p launchPlists) current() (installedPlist, error) {
 	if err := directory(p.dir, p.uid, 0); err != nil {
-		return "", err
+		return installedPlist{}, err
 	}
-	var current string
-	for _, label := range []string{legacyLabel, neutralLabel} {
-		_, err := os.Lstat(p.path(label))
+	var current installedPlist
+	baseline := p.manifest.serviceLabel(false)
+	for _, filename := range []string{legacyLabel, neutralLabel} {
+		path := p.path(filename)
+		_, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return "", err
+			return installedPlist{}, err
 		}
-		if current != "" {
-			return "", fmt.Errorf("both service plists are installed")
+		if current.path != "" {
+			return installedPlist{}, fmt.Errorf("both service plists are installed")
 		}
-		pin := p.manifest.Retained["plist"]
-		if label != p.manifest.serviceLabel(false) {
-			if !p.manifest.migrating() {
-				return "", fmt.Errorf("unexpected service plist")
+		if !p.manifest.migrating() {
+			if filename != baseline {
+				return installedPlist{}, fmt.Errorf("unexpected service plist")
 			}
-			pin = *p.manifest.Identifiers.TargetPlist
+			if _, err := pinnedOwnedFile(path, p.manifest.Retained["plist"], p.uid); err != nil {
+				return installedPlist{}, err
+			}
+			current = installedPlist{label: baseline, path: path}
+			continue
 		}
-		if _, err := pinnedOwnedFile(p.path(label), pin, p.uid); err != nil {
-			return "", fmt.Errorf("installed %s plist binding differs: %w", label, err)
+		data, err := readFile(path, 64<<10, p.uid)
+		if err != nil {
+			return installedPlist{}, err
 		}
-		current = label
+		pin := FilePin{SHA256: digest(data), Bytes: int64(len(data))}
+		switch pin {
+		case p.manifest.Retained["plist"]:
+			current = installedPlist{label: legacyLabel, path: path}
+		case *p.manifest.Identifiers.TargetPlist:
+			current = installedPlist{label: neutralLabel, path: path}
+		default:
+			return installedPlist{}, fmt.Errorf("installed service plist binding differs")
+		}
 	}
 	return current, nil
 }
@@ -63,31 +83,21 @@ func (p launchPlists) require(label string) error {
 	if err != nil {
 		return err
 	}
-	if current != label {
+	if current.label != label {
 		return fmt.Errorf("installed service plist differs from %s", label)
 	}
 	return nil
 }
 
-// The caller proves both launchd labels absent before changing either file.
-// Remove the installed plist before touching binaries and publish the
-// replacement only after the new binary/record set is complete.
-func (p launchPlists) remove() error {
-	current, err := p.current()
-	if err != nil || current == "" {
-		return err
-	}
-	if err := os.Remove(p.path(current)); err != nil {
-		return err
-	}
-	return syncDirectory(p.dir)
-}
-
+// The caller proves both labels absent from launchd and holds the upgrade
+// lock. Swap the contents at the existing filename, then rename the single
+// file. A crash between those effects leaves one complete startup plist.
 func (p launchPlists) publish(label string, data []byte, mode os.FileMode) error {
 	if !p.manifest.migrating() || (label != legacyLabel && label != neutralLabel) {
 		return fmt.Errorf("unsupported launch plist publication")
 	}
-	if err := p.require(""); err != nil {
+	current, err := p.current()
+	if err != nil {
 		return err
 	}
 	pin := p.manifest.Retained["plist"]
@@ -97,8 +107,22 @@ func (p launchPlists) publish(label string, data []byte, mode os.FileMode) error
 	if digest(data) != pin.SHA256 || int64(len(data)) != pin.Bytes {
 		return fmt.Errorf("replacement service plist bytes differ")
 	}
-	if err := durableWriteOwned(p.path(label), data, mode, p.uid); err != nil {
+	target := p.path(label)
+	slot := current.path
+	if slot == "" {
+		// Older interrupted migrations can leave neither file installed.
+		slot = target
+	}
+	if err := durableWriteOwned(slot, data, mode, p.uid); err != nil {
 		return err
+	}
+	if slot != target {
+		if err := os.Rename(slot, target); err != nil {
+			return err
+		}
+		if err := syncDirectory(p.dir); err != nil {
+			return err
+		}
 	}
 	return p.require(label)
 }
@@ -137,11 +161,12 @@ func (n *Native) checkTransitionPlists(ctx context.Context) error {
 	if !n.M.migrating() {
 		return nil
 	}
-	oldPath := p.path(legacyLabel)
+	current, err := p.current()
+	if err != nil {
+		return err
+	}
+	oldPath := current.path
 	if n.rollback {
-		if _, err := p.current(); err != nil {
-			return err
-		}
 		oldPath = filepath.Join(n.ArchivePath, originalPlistName)
 	}
 	old, _, err := n.originalPlist(oldPath)
@@ -185,41 +210,159 @@ func comparePlists(ctx context.Context, old, next []byte) error {
 	return nil
 }
 
-func (n *Native) currentService(ctx context.Context) (string, error) {
-	raw, err := command(ctx, nil, "/bin/launchctl", "list")
-	if err != nil {
-		return "", err
-	}
-	label, err := loadedService(raw)
-	if err != nil {
-		return "", err
-	}
-	if label == "" {
-		return "", fmt.Errorf("service is not loaded")
-	}
-	if err := n.launchPlists().require(label); err != nil {
-		return "", err
-	}
-	return label, nil
+type launchJob struct {
+	label string
+	pid   int // Zero identifies a registered job without a process.
 }
 
-func loadedService(raw []byte) (string, error) {
+func (n *Native) launchJob(ctx context.Context) (launchJob, error) {
+	raw, err := command(ctx, nil, "/bin/launchctl", "list")
+	if err != nil {
+		return launchJob{}, err
+	}
+	return loadedService(raw)
+}
+
+func (n *Native) currentService(ctx context.Context) (string, error) {
+	job, err := n.launchJob(ctx)
+	if err != nil {
+		return "", err
+	}
+	if job.label == "" {
+		return "", fmt.Errorf("service is not loaded")
+	}
+	if err := n.launchPlists().require(job.label); err != nil {
+		return "", err
+	}
+	return job.label, nil
+}
+
+func loadedService(raw []byte) (launchJob, error) {
 	rows := strings.Split(strings.TrimSpace(string(raw)), "\n")
 	if strings.Join(strings.Fields(rows[0]), " ") != "PID Status Label" {
-		return "", fmt.Errorf("launchd inventory incomplete")
+		return launchJob{}, fmt.Errorf("launchd inventory incomplete")
 	}
-	var label string
+	var job launchJob
 	for _, row := range rows[1:] {
 		f := strings.Fields(row)
 		if len(f) != 3 {
-			return "", fmt.Errorf("launchd inventory malformed")
+			return launchJob{}, fmt.Errorf("launchd inventory malformed")
 		}
 		if f[2] == legacyLabel || f[2] == neutralLabel {
-			if label != "" {
-				return "", fmt.Errorf("multiple Pomar services loaded")
+			if job.label != "" {
+				return launchJob{}, fmt.Errorf("multiple Pomar services loaded")
 			}
-			label = f[2]
+			if _, err := strconv.Atoi(f[1]); err != nil {
+				return launchJob{}, fmt.Errorf("invalid service status in launchd inventory")
+			}
+			job.label = f[2]
+			if f[0] != "-" {
+				pid, err := strconv.Atoi(f[0])
+				if err != nil || pid <= 1 {
+					return launchJob{}, fmt.Errorf("invalid service PID in launchd inventory")
+				}
+				job.pid = pid
+			}
 		}
 	}
-	return label, nil
+	return job, nil
+}
+
+func (n *Native) recoverMigration(ctx context.Context, failed Journal) (Journal, error) {
+	if !n.stopIssued {
+		now, err := n.Observe(ctx)
+		if err != nil || now != failed.Before {
+			return failed, fmt.Errorf("legacy identity changed before bootout; recovery refused")
+		}
+	}
+	original, err := n.LoadRollback(failed.Archive)
+	if err != nil {
+		return failed, err
+	}
+	if original.Before != failed.Before {
+		return failed, fmt.Errorf("original journal observation differs")
+	}
+	return Rollback(ctx, n, original, failed.ManifestSHA)
+}
+
+// recoveryService distinguishes absence, a registered job without a process,
+// and a running job. A failed running-process lookup cannot prove absence.
+func (n *Native) recoveryService(ctx context.Context) (launchJob, string, error) {
+	job, err := n.launchJob(ctx)
+	if err != nil {
+		return launchJob{}, "", err
+	}
+	bind := func(label string) error {
+		if err := n.launchPlists().require(label); err != nil {
+			return err
+		}
+		if n.M.migrating() {
+			return n.checkInstalledGeneration(label)
+		}
+		return nil
+	}
+	if err := checkRecoveryJob(job, n.M.migrating(), bind, func(pid int) error {
+		return n.checkWriters(ctx, pid, n.M.migrating() && pid == 0)
+	}); err != nil {
+		return launchJob{}, "", err
+	}
+	if job.pid == 0 {
+		return job, "", nil
+	}
+	pid, birth, err := n.processForLabel(ctx, job.label)
+	if err != nil || pid != job.pid {
+		return launchJob{}, "", fmt.Errorf("running service identity changed during recovery check")
+	}
+	return job, birth, nil
+}
+
+func checkRecoveryJob(job launchJob, allowStopped bool, bind func(string) error, noWriters func(int) error) error {
+	if job.label != "" {
+		if job.pid == 0 && !allowStopped {
+			return fmt.Errorf("registered service has no identified process")
+		}
+		if err := bind(job.label); err != nil {
+			return err
+		}
+	}
+	return noWriters(job.pid)
+}
+
+func (n *Native) checkInstalledGeneration(label string) error {
+	build, expected := n.M.Baseline, n.beforeRecord
+	if label == neutralLabel {
+		build = n.M.Target
+		var err error
+		expected, err = targetRecord(n.beforeRecord, n.M, n.ArchivePath)
+		if err != nil {
+			return err
+		}
+	}
+	raw, err := readFile(recordPath, 64<<10, 0)
+	if err != nil || !bytes.Equal(raw, expected) {
+		return fmt.Errorf("registered service record does not match its pinned label")
+	}
+	for _, name := range binaries {
+		if _, err := pinnedFile(filepath.Join(bindir, name), build.Binaries[name]); err != nil {
+			return fmt.Errorf("registered service %s does not match its pinned label", name)
+		}
+	}
+	return nil
+}
+
+func (n *Native) unloadStopped(ctx context.Context, stopped launchJob) error {
+	if err := directory(runDir, n.M.OwnerUID, 0700); err != nil {
+		return err
+	}
+	now, _, err := n.recoveryService(ctx)
+	if err != nil || now != stopped {
+		return fmt.Errorf("registered stopped service changed before bootout")
+	}
+	if _, err := command(ctx, nil, "/bin/launchctl", "bootout", "system/"+stopped.label); err != nil {
+		return err
+	}
+	if err := n.waitAbsent(ctx); err != nil {
+		return err
+	}
+	return n.checkWriters(ctx, 0, true)
 }

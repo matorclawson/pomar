@@ -71,8 +71,9 @@ control path for actual caller GET readbacks. The command verifies installed
 file hashes/signatures, retained files, every terminal history record (including
 unknown evidence fields), public-key binding and owner/caller class/budget
 identity. Only after all checks does it lift admission's drain. A failed check
-retains its journal/archive and holds admission for reconciliation. Ordinary
-host reservation/admission and full native site qualification remain separate.
+retains its journal and archive. A failed label migration can reopen admission
+only after it has recovered and verified the original service. Ordinary host
+reservation and full native site qualification remain separate.
 
 ## Recovery and rollback
 
@@ -129,14 +130,25 @@ If an existing ad-hoc installation used linker-generated identifiers, record
 the independently observed values for both binaries in
 `identifiers.legacy_development_identifiers`. This field is accepted only
 for a development migration and applies only to its archived baseline.
+Use the Darwin bundle produced by `tools/build-release.sh` for an ad-hoc
+development target. The Makefile's gate signs the Swift helper and leaves the
+Go coordinator with its linker-generated identifier.
 
 After draining and unloading the matched manager, the upgrade proves both
-labels absent and checks for surviving writers. It durably removes the old
-startup plist before replacing binaries and publishes the new one only after
-replacement is complete. If interrupted while neither plist is installed,
-inspect the original archive and use explicit rollback. Rollback stops the
-matched replacement if running, restores the archived binary and record
-bytes and original plist permissions, then bootstraps the legacy name. The
+labels absent and checks for surviving writers. It leaves the legacy startup
+plist in place while it replaces the binaries and record. Then it atomically
+replaces the plist contents and renames that sole file to the neutral filename.
+Either interruption point leaves one startup plist. A reboot can still
+interrupt binary replacement. If apply encounters an error during stopping
+or later, it attempts a bounded rollback under the same lock and reports both
+outcomes. If the process or host stops before recovery, or the receipt reports
+incomplete recovery, inspect the original archive and use explicit rollback.
+
+Rollback drains and stops a matched running replacement. It can also unload
+a registered job with no PID when its installed plist, binaries and record
+match the frozen generation and no writers remain. It restores the archived
+binary and record bytes and original plist permissions, then bootstraps and
+verifies the legacy service before reopening admission. The
 manager key, data and control socket paths stay in place. Keep dependent jobs
 held until the host owner has reconciled an interrupted upgrade or reboot.
 
