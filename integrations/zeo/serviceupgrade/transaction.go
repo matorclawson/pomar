@@ -28,6 +28,7 @@ type Journal struct {
 	Before        Observation `json:"before"`
 	Archive       string      `json:"archive"`
 	SigningPolicy string      `json:"signing_policy"`
+	FromStartup   bool        `json:"rollback_from_startup,omitempty"`
 }
 
 // Driver methods are narrow, checked operations, not caller-supplied commands.
@@ -137,6 +138,7 @@ func Rollback(ctx context.Context, d Driver, j Journal, manifestSHA string) (Jou
 	if err := d.Check(ctx); err != nil {
 		return j, err
 	}
+	j.FromStartup = j.Phase == "starting" || (j.Phase == "rolling-back" && j.FromStartup)
 	j.Phase = "rolling-back"
 	if err := d.Save(j); err != nil {
 		return j, err
@@ -159,6 +161,7 @@ func Rollback(ctx context.Context, d Driver, j Journal, manifestSHA string) (Jou
 		return j, err
 	}
 	j.Phase = "rolled-back"
+	j.FromStartup = false
 	if err := d.Save(j); err != nil {
 		return j, fmt.Errorf("baseline admission reopened but rollback journal failed; inspect retained archive: %w", err)
 	}

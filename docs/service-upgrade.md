@@ -146,9 +146,13 @@ incomplete recovery, inspect the original archive and use explicit rollback.
 
 Rollback drains and stops a matched running replacement. It can also unload
 a registered job with no PID when its installed plist, binaries and record
-match the frozen generation and no writers remain. It restores the archived
-binary and record bytes and original plist permissions, then bootstraps and
-verifies the legacy service before reopening admission. The
+match the frozen generation and no writers remain. During fenced startup, a
+replacement can have a PID before its owner API responds. Recovery can then
+unload the pinned replacement through launchd and confirm that its PID and
+writers are gone. Later phases still require replacement owner readbacks.
+Rollback restores the archived binary and record bytes and original plist
+permissions, then bootstraps and verifies the legacy service before
+reopening admission. The
 manager key, data and control socket paths stay in place. Keep dependent jobs
 held until the host owner has reconciled an interrupted upgrade or reboot.
 

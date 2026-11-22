@@ -710,6 +710,9 @@ func (n *Native) Fence(ctx context.Context) error {
 		if job.pid == 0 {
 			return n.closeControl()
 		}
+		if recoverBeforeReadiness(n.M.migrating(), n.original, job) {
+			return directory(runDir, n.M.OwnerUID, 0700)
+		}
 	} else {
 		if _, err := n.currentService(ctx); err != nil {
 			return err
@@ -818,15 +821,18 @@ func (n *Native) Stop(ctx context.Context, before Observation) error {
 	if _, err = command(ctx, nil, "/bin/launchctl", "bootout", "system/"+label); err != nil {
 		return err
 	}
-	return n.waitAbsent(ctx)
+	return n.waitAbsent(ctx, 0)
 }
 
-func (n *Native) waitAbsent(ctx context.Context) error {
+func (n *Native) waitAbsent(ctx context.Context, pid int) error {
 	var err error
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if err = n.absent(ctx); err == nil {
-			return nil
+			if pid == 0 || syscall.Kill(pid, 0) == syscall.ESRCH {
+				return nil
+			}
+			err = fmt.Errorf("recovery cannot prove pinned PID %d has exited", pid)
 		}
 		if time.Now().After(deadline) {
 			return err
@@ -1128,7 +1134,11 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 	if err != nil {
 		return err
 	}
-	if job.pid != 0 {
+	if recoverBeforeReadiness(n.M.migrating(), j, job) {
+		if err := n.unloadForRecovery(ctx, job, birth); err != nil {
+			return err
+		}
+	} else if job.pid != 0 {
 		b, err := owner(ctx, "list")
 		if err != nil {
 			return err
@@ -1141,7 +1151,7 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 			return err
 		}
 	} else if job.label != "" {
-		if err := n.unloadStopped(ctx, job); err != nil {
+		if err := n.unloadForRecovery(ctx, job, ""); err != nil {
 			return err
 		}
 	}
@@ -1195,6 +1205,9 @@ func (n *Native) LoadRollback(path string) (Journal, error) {
 	if uniqueJSON(b) != nil || json.Unmarshal(b, &j) != nil || j.Archive != path || j.ManifestSHA != n.SHA || j.Schema != "pomar.service-upgrade-journal/v1" || j.SigningPolicy != n.M.SigningPolicy {
 		return j, fmt.Errorf("archive journal binding differs")
 	}
+	if j.FromStartup && j.Phase != "rolling-back" {
+		return j, fmt.Errorf("archive startup recovery binding differs")
+	}
 	if j.Before.Pin != n.M.Baseline.Pin || j.Before.KeyID != n.M.KeyID || !hex64.MatchString(j.Before.History) || !hex64.MatchString(j.Before.Capacity) || !hex64.MatchString(j.Before.OwnerCapacity) || !hex64.MatchString(j.Before.CallerCapacity) || !hex64.MatchString(j.Before.CallerHistory) || j.Before.PID <= 1 || j.Before.Birth == "" {
 		return j, fmt.Errorf("archive original observation binding differs")
 	}
@@ -1236,6 +1249,12 @@ func (n *Native) recoveryObservation(ctx context.Context, j Journal) (any, error
 			return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "absent", "journal": j}, nil
 		}
 		return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "loaded_without_process", "label": job.label, "journal": j}, nil
+	}
+	if recoverBeforeReadiness(n.M.migrating(), j, job) {
+		if err := directory(runDir, n.M.OwnerUID, 0700); err != nil {
+			return nil, err
+		}
+		return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "startup_recovery", "label": job.label, "pid": job.pid, "birth": birth, "journal": j}, nil
 	}
 	b, err := owner(ctx, "list")
 	if err != nil {

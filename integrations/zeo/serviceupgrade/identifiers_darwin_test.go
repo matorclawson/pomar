@@ -255,3 +255,106 @@ func TestMigrationTransactionKeepsStartupPlistAndSupportsRollback(t *testing.T) 
 		})
 	}
 }
+
+type unreadyReplacementFixture struct {
+	plistMigrationFixture
+	job      launchJob
+	verified bool
+}
+
+func (f *unreadyReplacementFixture) Start(ctx context.Context) error {
+	if err := f.plistMigrationFixture.Start(ctx); err != nil {
+		return err
+	}
+	if f.active == neutralLabel {
+		f.job = launchJob{label: neutralLabel, pid: 917}
+		return context.DeadlineExceeded // Owner readiness never returned.
+	}
+	return nil
+}
+
+func (f *unreadyReplacementFixture) Restore(ctx context.Context, j Journal) error {
+	if !recoverBeforeReadiness(true, j, f.job) {
+		return errors.New("normal recovery would require the unavailable owner API")
+	}
+	if err := bootoutRecoveryJob(f.job, "original birth", func() (launchJob, string, error) {
+		return f.job, "original birth", nil
+	}, func(label string) error {
+		if label != neutralLabel {
+			return errors.New("bootout selected the wrong label")
+		}
+		f.job = launchJob{}
+		return nil
+	}, func(pid int) error {
+		if pid != 917 || f.job.pid != 0 {
+			return errors.New("pinned replacement PID still running")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return f.plistMigrationFixture.Restore(ctx, j)
+}
+
+func (f *unreadyReplacementFixture) Verify(ctx context.Context, before Observation) error {
+	if f.active != legacyLabel || f.job.pid != 0 || before.Pin != "baseline" {
+		return errors.New("original service was not restored")
+	}
+	if err := f.plistMigrationFixture.Verify(ctx, before); err != nil {
+		return err
+	}
+	f.verified = true
+	return nil
+}
+
+func TestMigrationRestoresLegacyWhenReplacementOwnerNeverAnswers(t *testing.T) {
+	old := fixturePlist(legacyLabel, "serve")
+	next := fixturePlist(neutralLabel, "serve")
+	m := fixtureManifest()
+	m.Retained["plist"] = FilePin{digest(old), int64(len(old))}
+	m.Identifiers = &Identifiers{Mode: "legacy_to_neutral", TargetPlist: &FilePin{digest(next), int64(len(next))}}
+	f := &unreadyReplacementFixture{plistMigrationFixture: plistMigrationFixture{
+		plists: launchPlists{dir: t.TempDir(), uid: uint32(os.Getuid()), manifest: m},
+		active: legacyLabel, target: next,
+	}}
+	if err := os.WriteFile(f.plists.path(legacyLabel), old, 0640); err != nil {
+		t.Fatal(err)
+	}
+	j, err := apply(context.Background(), f, "frozen", func(ctx context.Context, failed Journal) (Journal, error) {
+		if !recoverBeforeReadiness(true, failed, f.job) {
+			t.Fatal("a pinned running replacement during startup needs the launchd recovery route")
+		}
+		return Rollback(ctx, f, failed, "frozen")
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || j.Phase != "rolled-back" || j.FromStartup || !f.verified {
+		t.Fatalf("startup timeout did not preserve the original error and verify rollback: %+v, %v", j, err)
+	}
+}
+
+func TestStartupRecoveryRefusesLaterPhasesAndChangedProcessIdentity(t *testing.T) {
+	job := launchJob{label: neutralLabel, pid: 917}
+	for _, j := range []Journal{
+		{Phase: "installing"}, {Phase: "verifying"}, {Phase: "complete"}, {Phase: "rolling-back"},
+	} {
+		if recoverBeforeReadiness(true, j, job) {
+			t.Fatalf("bypassed owner API from phase %s", j.Phase)
+		}
+	}
+	j := Journal{Phase: "rolling-back", FromStartup: true}
+	if !recoverBeforeReadiness(true, j, job) ||
+		recoverBeforeReadiness(false, j, job) ||
+		recoverBeforeReadiness(true, j, launchJob{label: legacyLabel, pid: job.pid}) {
+		t.Fatal("startup recovery did not bind the migration direction and original rollback phase")
+	}
+	if err := bootoutRecoveryJob(job, "original birth", func() (launchJob, string, error) {
+		return job, "reused PID", nil
+	}, func(string) error {
+		t.Fatal("issued bootout for changed process identity")
+		return nil
+	}, func(int) error {
+		t.Fatal("waited on an unbound PID")
+		return nil
+	}); err == nil {
+		t.Fatal("accepted changed process identity")
+	}
+}

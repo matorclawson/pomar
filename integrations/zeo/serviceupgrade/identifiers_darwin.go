@@ -350,19 +350,37 @@ func (n *Native) checkInstalledGeneration(label string) error {
 	return nil
 }
 
-func (n *Native) unloadStopped(ctx context.Context, stopped launchJob) error {
+func recoverBeforeReadiness(migrating bool, j Journal, job launchJob) bool {
+	// Start runs with the caller directory closed. Verify is the first
+	// phase that can open it, so later phases still require owner readback.
+	return migrating && job.label == neutralLabel && job.pid > 1 &&
+		(j.Phase == "starting" || (j.Phase == "rolling-back" && j.FromStartup))
+}
+
+func (n *Native) unloadForRecovery(ctx context.Context, expected launchJob, birth string) error {
 	if err := directory(runDir, n.M.OwnerUID, 0700); err != nil {
 		return err
 	}
-	now, _, err := n.recoveryService(ctx)
-	if err != nil || now != stopped {
-		return fmt.Errorf("registered stopped service changed before bootout")
-	}
-	if _, err := command(ctx, nil, "/bin/launchctl", "bootout", "system/"+stopped.label); err != nil {
+	if err := bootoutRecoveryJob(expected, birth, func() (launchJob, string, error) {
+		return n.recoveryService(ctx)
+	}, func(label string) error {
+		_, err := command(ctx, nil, "/bin/launchctl", "bootout", "system/"+label)
 		return err
-	}
-	if err := n.waitAbsent(ctx); err != nil {
+	}, func(pid int) error {
+		return n.waitAbsent(ctx, pid)
+	}); err != nil {
 		return err
 	}
 	return n.checkWriters(ctx, 0, true)
+}
+
+func bootoutRecoveryJob(expected launchJob, birth string, observe func() (launchJob, string, error), bootout func(string) error, waitExit func(int) error) error {
+	now, nowBirth, err := observe()
+	if err != nil || now != expected || nowBirth != birth {
+		return fmt.Errorf("registered service identity changed before recovery bootout")
+	}
+	if err := bootout(expected.label); err != nil {
+		return err
+	}
+	return waitExit(expected.pid)
 }
