@@ -176,6 +176,12 @@ func Verify(root string) (Manifest, error) {
 // atomically only after a complete version exists. A failed activation leaves
 // that recoverable version and the previous selection intact.
 func Install(bundle, prefix string) (Manifest, error) {
+	return install(bundle, prefix, string(os.PathSeparator))
+}
+
+// ancestorBoundary excludes outer directories only for package tests. The
+// public installer walks every prefix component up to the filesystem root.
+func install(bundle, prefix, ancestorBoundary string) (Manifest, error) {
 	m, err := Verify(bundle)
 	if err != nil {
 		return m, err
@@ -184,11 +190,11 @@ func Install(bundle, prefix string) (Manifest, error) {
 	if !filepath.IsAbs(prefix) || prefix == string(os.PathSeparator) {
 		return m, fmt.Errorf("prefix must be an absolute user-owned directory")
 	}
-	if err = secureDirectory(prefix); err != nil {
+	if err = secureDirectory(prefix, ancestorBoundary); err != nil {
 		return m, err
 	}
 	releases := filepath.Join(prefix, "releases")
-	if err = secureDirectory(releases); err != nil {
+	if err = secureDirectory(releases, ancestorBoundary); err != nil {
 		return m, err
 	}
 	lock := filepath.Join(prefix, ".install-lock")
@@ -298,11 +304,14 @@ func Install(bundle, prefix string) (Manifest, error) {
 	return m, err
 }
 
-// Existing prefix components must belong to this user, be directories, and be
-// non-writable by others. Do not follow symlinks through an installation root.
-func secureDirectory(path string) error {
+// Existing path components must be real directories without group or other
+// write permissions. The requested directory must belong to the caller.
+func secureDirectory(path, ancestorBoundary string) error {
 	missing := []string{}
-	for p := path; p != filepath.Dir(p); p = filepath.Dir(p) {
+	for p := path; p != ancestorBoundary; p = filepath.Dir(p) {
+		if p == filepath.Dir(p) {
+			return fmt.Errorf("installation prefix is outside its ancestor boundary")
+		}
 		st, err := os.Lstat(p)
 		if os.IsNotExist(err) {
 			missing = append(missing, p)

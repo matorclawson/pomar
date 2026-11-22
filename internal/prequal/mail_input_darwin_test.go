@@ -5,8 +5,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
-
-	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 func TestMailInputDarwinRefusesRootAndFileACLs(t *testing.T) {
@@ -38,20 +36,7 @@ func TestMailInputDarwinRefusesRootAndFileACLs(t *testing.T) {
 func TestMailInputDarwinAncestorACLChangeRefuses(t *testing.T) {
 	root, b, _, data, digest := mailInputFixture(t)
 	parent := filepath.Dir(b.CanonicalPath)
-	parentInfo, e := os.Stat(parent)
-	if e != nil {
-		t.Fatal(e)
-	}
-	hooks := mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: func(f *os.File) bool {
-		info, e := f.Stat()
-		if e != nil {
-			return false
-		}
-		if os.SameFile(parentInfo, info) {
-			return hostpolicy.DescriptorACLSafe(f)
-		}
-		return true // Other host ancestors remain a hermetic assumption.
-	}}
+	hooks := fixtureMailInputHooks(b)
 	if got, _, e := acquireMailInput(root, b, "plan.json", int64(len(data)), digest, hooks); e != nil || len(got) == 0 {
 		t.Fatalf("ancestor ACL-free control: %v", e)
 	}

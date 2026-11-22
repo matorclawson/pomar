@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -14,6 +16,16 @@ func testConfig(t *testing.T) config {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A directory can inherit its parent's group on Darwin. The custodian
+	// checks both the current effective group and the fixture's group.
+	if err := os.Chown(home, -1, os.Getegid()); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "darwin" {
+		if output, err := exec.Command("/bin/chmod", "-N", home).CombinedOutput(); err != nil {
+			t.Fatalf("clear inherited ACL from fixture home: %v: %s", err, output)
+		}
 	}
 	if err := os.Chmod(home, 0700); err != nil {
 		t.Fatal(err)
