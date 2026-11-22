@@ -9,13 +9,29 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rodriveracom/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/notification"
 )
 
-func TestHostMailChannelBindsSeatAndRevokesWithNetwork(t *testing.T) {
+type testChannel struct{ revoked atomic.Bool }
+
+func (c *testChannel) Name() string { return "test-channel" }
+
+func (c *testChannel) Revoke() { c.revoked.Store(true) }
+
+func (c *testChannel) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	if c.revoked.Load() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func TestHostNotificationChannelBindsWorkloadAndRevokesWithNetwork(t *testing.T) {
 	root, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatal(err)
@@ -29,7 +45,12 @@ func TestHostMailChannelBindsSeatAndRevokesWithNetwork(t *testing.T) {
 		t.Fatal("use a short physical TMPDIR")
 	}
 	e := &Environment{Spec: VMSpec{Environment: "guest-1", Session: "session", Incarnation: "incarnation-1", Directory: root, EgressSocket: filepath.Join(root, "egress.sock"), HostConfig: HostConfig{Seat: "example-seat", MailOrigin: "http://mail.example:7743"}}}
-	h := &Host{gates: map[string]*Egress{}, servers: map[string]*http.Server{}}
+	h := &Host{gates: map[string]*Egress{}, servers: map[string]*http.Server{}, openChannel: func(b notification.Binding, route string) (notification.Channel, error) {
+		if b.Identity != e.Spec.Seat || b.Environment != e.Spec.Environment || b.Incarnation != e.Spec.Incarnation || route != e.Spec.MailOrigin {
+			t.Fatal("channel did not receive exact owner binding", b, route)
+		}
+		return &testChannel{}, nil
+	}}
 	if err := h.gate(e); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +60,7 @@ func TestHostMailChannelBindsSeatAndRevokesWithNetwork(t *testing.T) {
 			s.Close()
 		}
 	}()
-	if e.Spec.MailSocket != filepath.Join(root, "mail.sock") {
+	if e.Spec.MailSocket != filepath.Join(root, "mail.sock") || e.Spec.NotificationChannel != "test-channel" {
 		t.Fatal("mail socket not environment-bound")
 	}
 	fi, err := os.Lstat(e.Spec.MailSocket)
@@ -55,17 +76,15 @@ func TestHostMailChannelBindsSeatAndRevokesWithNetwork(t *testing.T) {
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: time.Second}
 	r, _ := http.NewRequest("GET", "http://local/v1/whoami", nil)
-	r.Header.Set("X-Zmail-Instance", "other-seat")
 	resp, err := client.Do(r)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != 403 {
-		t.Fatal("guest selected another seat", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		t.Fatal("owner-selected notification channel unavailable", resp.StatusCode)
 	}
 	h.gates[e.Spec.Environment].Revoke()
-	r.Header.Set("X-Zmail-Instance", "example-seat")
 	resp, err = client.Do(r)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +93,7 @@ func TestHostMailChannelBindsSeatAndRevokesWithNetwork(t *testing.T) {
 	if resp.StatusCode != 503 {
 		t.Fatal("network revoke left mail available", resp.StatusCode)
 	}
-	old := h.servers[e.Spec.Environment+"-mail"].Handler.(*mailRelay)
+	old := h.servers[e.Spec.Environment+"-mail"].Handler.(*testChannel)
 	e.Spec.Incarnation = "incarnation-2"
 	if err := h.gate(e); err != nil {
 		t.Fatal(err)
@@ -100,7 +119,9 @@ func TestFailedMailChannelSetupClosesOtherChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := &Environment{Spec: VMSpec{Environment: "guest-1", Session: "session", Incarnation: "incarnation-1", Directory: root, EgressSocket: filepath.Join(root, "egress.sock"), HostConfig: HostConfig{Seat: "example-seat", MailOrigin: "http://mail.example:7743"}}}
-	h := &Host{gates: map[string]*Egress{}, servers: map[string]*http.Server{}}
+	h := &Host{gates: map[string]*Egress{}, servers: map[string]*http.Server{}, openChannel: func(notification.Binding, string) (notification.Channel, error) {
+		return &testChannel{}, nil
+	}}
 	if err := h.gate(e); err == nil {
 		t.Fatal("occupied mail path replaced")
 	}

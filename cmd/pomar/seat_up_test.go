@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/rodriveracom/pomar/internal/seatapi"
-	"github.com/rodriveracom/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/integrations/zeo/seatapi"
+	"github.com/rodriveracom/pomar/integrations/zeo/seatdecl"
 )
 
 // fakeHost is the development host's API as `seat up` sees it: the real

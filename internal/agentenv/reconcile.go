@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rodriveracom/pomar/internal/calljournal"
 	"net/http"
 	"os"
 	"os/exec"
@@ -85,31 +86,6 @@ func readVMStatus(e *Environment) ([]byte, error) {
 	return b, err
 }
 
-// writeEvidence creates immutable private bytes and syncs the directory before
-// the environment journal can reference them as replacement evidence.
-func writeEvidence(path string, b []byte) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(b)
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
-}
 func (h *Host) machineProbe(ctx context.Context, r FenceProbeRequest) (FenceProbeEvidence, error) {
 	if h.probe != nil {
 		return h.probe(ctx, r)
@@ -117,7 +93,7 @@ func (h *Host) machineProbe(ctx context.Context, r FenceProbeRequest) (FenceProb
 	var evidence FenceProbeEvidence
 	b, _ := json.Marshal(r)
 	file := filepath.Join(h.config.Root, r.Environment, "reconcile-probe-"+r.Operation+".json")
-	if err := writeEvidence(file, b); err != nil {
+	if err := calljournal.WriteEvidence(file, b); err != nil {
 		return evidence, err
 	}
 	// Only the service owner's native Swift helper supplies machine evidence.
@@ -298,7 +274,7 @@ func (h *Host) reconcileLocked(e *Environment, req ReconcileRequest) (Action, er
 	b, _ := json.Marshal(evidence)
 	receipt.EvidenceFile = "reconcile-evidence-" + req.OperationID + ".json"
 	receipt.EvidenceSHA256 = digest(b)
-	if err = writeEvidence(filepath.Join(e.Spec.Directory, receipt.EvidenceFile), b); err != nil {
+	if err = calljournal.WriteEvidence(filepath.Join(e.Spec.Directory, receipt.EvidenceFile), b); err != nil {
 		h.fatal = err
 		return Action{}, err
 	}

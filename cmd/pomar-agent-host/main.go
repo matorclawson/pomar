@@ -10,9 +10,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/rodriveracom/pomar/integrations/zeo/seatapi"
+	"github.com/rodriveracom/pomar/integrations/zeo/seatdecl"
+	"github.com/rodriveracom/pomar/integrations/zeomessenger"
 	"github.com/rodriveracom/pomar/internal/agentenv"
-	"github.com/rodriveracom/pomar/internal/seatapi"
-	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 func main() {
@@ -24,7 +25,7 @@ func main() {
 	}
 	if err == nil {
 		var host *agentenv.Host
-		host, err = agentenv.OpenHost(config)
+		host, err = agentenv.OpenHostWithChannel(config, zeomessenger.OpenChannel)
 		if err == nil {
 			defer host.Close()
 			if config.SeatRoot != "" {
