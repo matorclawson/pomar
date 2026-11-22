@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Relicensed Dreamhuggers-owned Pomar code and documentation from Apache-2.0
+  to MIT under the Pomar rights record dated 22 November 2026
+  (SHA-256 `2ef5e29dbefd4db0cafd57f23277b6b5f77f44dbf5e75bdd4dc77d0a707dc45c`).
 - Moved the Go module and release download links to `github.com/rodriveracom/pomar`.
 - Added standalone setup and contribution instructions for people running Pomar on their own infrastructure.
 - The mail relay retains the `X-Zmail-Instance` header for compatibility.

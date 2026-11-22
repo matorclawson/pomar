@@ -64,7 +64,7 @@ using an installed release. See [CONTRIBUTING.md](CONTRIBUTING.md),
 [release preparation](docs/releases.md), [manager classes](docs/manager-classes.md)
 and [agent environments](docs/agent-environments.md).
 
-Licensed under Apache-2.0.
+Pomar is licensed under the [MIT License](LICENSE).
 
 The unreleased [actor-switch integration](docs/harness-switching.md) selects an
 owner-configured Claude or Codex harness on the same retained seat after fencing.

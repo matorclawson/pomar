@@ -53,6 +53,12 @@ executables. The manifest binds the archive's source commit and files. It is not
 an independently signed CI result. The CLI prints the release version and source
 commit; the Swift host's legacy version string is not a release identity.
 
+The current bundle includes `NOTICE`, the SwiftPM license inventory and
+`THIRD-PARTY-LICENSES.txt`. The packager checks that the inventory covers the
+lockfile, reads license and notice files from the resolved checkout commits,
+and checks the root license digests. The release manifest binds the included
+texts. The current installer also accepts the original v1 and v2 inventories.
+
 The fixed bundle includes root `AGENTS.md` and the health, attempt-progress,
 job-failure, controlled-service-upgrade and session/protocol guides. Their hashes and modes are
 bound in the same release manifest as the executables. A modified or missing
