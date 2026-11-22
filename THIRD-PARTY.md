@@ -1,12 +1,13 @@
 # Third-party licenses
 
-Swift Package Manager fetches the dependencies pinned in
-[`host/Package.resolved`](host/Package.resolved). Each dependency keeps its
+Swift Package Manager fetches the dependencies pinned in the source
+repository's `host/Package.resolved`. Each dependency keeps its
 own license and notices. [`SWIFTPM-LICENSES.tsv`](SWIFTPM-LICENSES.tsv) lists
 the upstream license file and its SHA-256 for each pinned revision. Some
 projects include additional terms or notices alongside the listed file.
 When redistributing dependencies, retain their applicable licenses and
-notices.
+notices. Pomar binary archives include those texts from the pinned SwiftPM
+checkouts in `THIRD-PARTY-LICENSES.txt`.
 
 The initial Swift rules in `.gitignore` come from GitHub's
 [`Swift.gitignore` template](https://github.com/github/gitignore/blob/eeb775f7cbd229e8cd487ef06a1176dc239201d9/Swift.gitignore)

@@ -32,6 +32,7 @@ func run(args []string) error {
 	commit := fs.String("commit", "", "full clean source commit")
 	bins := fs.String("bin-dir", "", "directory of signed darwin/arm64 tools and static linux/arm64 shim")
 	source := fs.String("source", ".", "source containing public docs/LICENSE")
+	swiftCheckouts := fs.String("swift-checkouts", "", "resolved SwiftPM checkouts (default: host/.build/checkouts under source)")
 	out := fs.String("out", "", "new output directory")
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -88,6 +89,13 @@ func run(args []string) error {
 			}
 		}
 	}
+	if *swiftCheckouts == "" {
+		*swiftCheckouts = filepath.Join(sourceRoot, "host", ".build", "checkouts")
+	}
+	licenses, err := collectSwiftLicenses(sourceRoot, *swiftCheckouts)
+	if err != nil {
+		return err
+	}
 	if err := os.Mkdir(*out, 0755); err != nil {
 		return err
 	}
@@ -102,6 +110,16 @@ func run(args []string) error {
 		}
 	}
 	for _, name := range distribution.Files {
+		if name == distribution.SwiftLicenseFile {
+			p := filepath.Join(root, name)
+			if err := os.WriteFile(p, licenses, 0644); err != nil {
+				return err
+			}
+			if err := os.Chmod(p, 0644); err != nil {
+				return err
+			}
+			continue
+		}
 		src := filepath.Join(*source, filepath.FromSlash(name))
 		mode := os.FileMode(0644)
 		if strings.HasPrefix(name, "bin/") {

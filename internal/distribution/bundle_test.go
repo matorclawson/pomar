@@ -193,10 +193,19 @@ func TestIdentityRejectsPathsAndFloatingVersions(t *testing.T) {
 	}
 }
 
-func TestLegacyReleaseRemainsVerifiableAfterToolExpansion(t *testing.T) {
+func TestHistoricalInventoriesRemainInstallableAndRollbackable(t *testing.T) {
+	for _, schema := range []string{LegacySchema, PreviousSchema} {
+		t.Run(schema, func(t *testing.T) {
+			testHistoricalRelease(t, schema)
+		})
+	}
+}
+
+func testHistoricalRelease(t *testing.T, schema string) {
+	t.Helper()
 	root := t.TempDir()
-	m := Manifest{Schema: LegacySchema, Version: "v0.1.0", Commit: strings.Repeat("a", 40), Platform: "darwin-arm64", MinimumMacOS: "26", Files: map[string]File{}}
-	for _, name := range LegacyFiles {
+	m := Manifest{Schema: schema, Version: "v0.1.0", Commit: strings.Repeat("a", 40), Platform: "darwin-arm64", MinimumMacOS: "26", Files: map[string]File{}}
+	for _, name := range releaseFiles(schema) {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			t.Fatal(err)
