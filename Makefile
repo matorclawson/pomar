@@ -81,7 +81,7 @@ swift-build:
 # lacks the entitlement.
 swift-sign:
 	@echo "=== swift sign (ad-hoc, virtualization entitlement)"
-	@codesign --force --sign - --entitlements host/pomar-host.entitlements "$(HOST_BIN)"
+	@codesign --force --sign - --identifier io.github.rodriveracom.pomar.pomar-host --entitlements host/pomar-host.entitlements "$(HOST_BIN)"
 	@codesign -d --entitlements - "$(HOST_BIN)" 2>/dev/null | grep -E "virtualization|get-task-allow" || true
 	@codesign -d --entitlements - --xml "$(HOST_BIN)" 2>/dev/null | grep -q com.apple.security.virtualization
 	@"$(HOST_BIN)" version

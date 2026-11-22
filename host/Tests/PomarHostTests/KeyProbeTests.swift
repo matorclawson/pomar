@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 
 @testable import PomarHostCore
@@ -18,4 +19,14 @@ import Testing
     #expect(result.lines.contains("file_key_mode=600"))
     #expect(result.lines.contains("file_key_reload_verify=true"))
     #expect(result.lines.contains { $0.hasPrefix("file_public_key_sha256=") })
+}
+
+@Test func keyProbeUsesTheNeutralServiceAndItsOwnAccount() {
+    let first = UUID().uuidString
+    let second = UUID().uuidString
+    let query = KeyProbe.keychainQuery(account: first)
+    #expect((query[kSecClass as String] as? String) == (kSecClassGenericPassword as String))
+    #expect((query[kSecAttrService as String] as? String) == "io.github.rodriveracom.pomar.key-probe")
+    #expect((query[kSecAttrAccount as String] as? String) == first)
+    #expect((KeyProbe.keychainQuery(account: second)[kSecAttrAccount as String] as? String) == second)
 }

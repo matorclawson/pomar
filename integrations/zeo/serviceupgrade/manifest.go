@@ -37,11 +37,51 @@ type Manifest struct {
 	CertificateSHA1 string             `json:"certificate_sha1"`
 	SigningPolicy   string             `json:"signing_policy"`
 	Entitlements    FilePin            `json:"host_entitlements"`
+	Identifiers     *Identifiers       `json:"identifiers,omitempty"`
+}
+
+// Identifiers binds the direction of a v2 upgrade and the exact target plist
+// for a legacy-to-neutral migration. A neutral upgrade retains its own plist.
+type Identifiers struct {
+	Mode                         string            `json:"mode"`
+	TargetPlist                  *FilePin          `json:"target_plist,omitempty"`
+	LegacyDevelopmentIdentifiers map[string]string `json:"legacy_development_identifiers,omitempty"`
+}
+
+const (
+	legacyLabel   = "org.zeroemployee.pomar.manager"
+	neutralLabel  = "io.github.rodriveracom.pomar.manager"
+	legacyPrefix  = "ac.zeo.pomar."
+	neutralPrefix = "io.github.rodriveracom.pomar."
+)
+
+func (m Manifest) migrating() bool {
+	return m.Identifiers != nil && m.Identifiers.Mode == "legacy_to_neutral"
+}
+
+func (m Manifest) serviceLabel(target bool) string {
+	if m.Identifiers != nil && (target || !m.migrating()) {
+		return neutralLabel
+	}
+	return legacyLabel
+}
+
+func (m Manifest) signingID(name string, target bool) string {
+	if m.serviceLabel(target) == neutralLabel {
+		return neutralPrefix + name
+	}
+	if m.migrating() && m.SigningPolicy == "development_transition" {
+		if id, ok := m.Identifiers.LegacyDevelopmentIdentifiers[name]; ok {
+			return id
+		}
+	}
+	return legacyPrefix + name
 }
 
 var hex40 = regexp.MustCompile(`^[a-f0-9]{40}$`)
 var hex64 = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var hostName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,62}$`)
+var codeIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
 
 var binaries = []string{"pomar", "pomar-host"}
 var retained = []string{"shim", "caller", "caller-policy", "caller-grant", "classes", "plist"}
@@ -51,11 +91,41 @@ func validFile(f FilePin, maximum int64) bool {
 }
 
 func (m Manifest) Validate() error {
-	if m.Schema != "pomar.service-upgrade/v1" || !hostName.MatchString(m.Host) ||
+	if !hostName.MatchString(m.Host) ||
 		m.OperatorUID == 0 || m.OwnerUID == 0 || m.CallerUID == 0 || m.OperatorUID == m.OwnerUID ||
 		m.OperatorUID == m.CallerUID || m.OwnerUID == m.CallerUID || !hex64.MatchString(m.KeyID) ||
 		!validFile(m.InstallRecord, 64<<10) || !validFile(m.Entitlements, 64<<10) {
 		return fmt.Errorf("unsupported service identity or incomplete certificate binding")
+	}
+	switch {
+	case m.Schema == "pomar.service-upgrade/v1" && m.Identifiers == nil:
+	case m.Schema == "pomar.service-upgrade/v2" && m.Identifiers != nil:
+		switch m.Identifiers.Mode {
+		case "neutral":
+			if m.Identifiers.TargetPlist != nil {
+				return fmt.Errorf("neutral upgrade retains the installed plist")
+			}
+		case "legacy_to_neutral":
+			if m.Identifiers.TargetPlist == nil || !validFile(*m.Identifiers.TargetPlist, 64<<10) ||
+				m.Identifiers.TargetPlist.SHA256 == m.Retained["plist"].SHA256 ||
+				!validFile(m.Retained["plist"], 64<<10) {
+				return fmt.Errorf("migration requires distinct exact baseline and target plists")
+			}
+		default:
+			return fmt.Errorf("unsupported service identifier transition")
+		}
+		if ids := m.Identifiers.LegacyDevelopmentIdentifiers; ids != nil {
+			if !m.migrating() || m.SigningPolicy != "development_transition" || len(ids) != len(binaries) {
+				return fmt.Errorf("legacy development identifiers require both binary roles and a development migration")
+			}
+			for _, name := range binaries {
+				if !codeIdentifier.MatchString(ids[name]) || ids[name] == neutralPrefix+name {
+					return fmt.Errorf("invalid legacy development identifier for %s", name)
+				}
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported service upgrade schema or identifiers")
 	}
 	switch m.SigningPolicy {
 	case "internal_certificate":
@@ -76,6 +146,13 @@ func (m Manifest) Validate() error {
 		for _, name := range binaries {
 			if !validFile(b.Binaries[name], 512<<20) {
 				return fmt.Errorf("missing or oversized binary binding")
+			}
+		}
+	}
+	if m.migrating() {
+		for _, name := range binaries {
+			if m.Baseline.Binaries[name].SHA256 == m.Target.Binaries[name].SHA256 {
+				return fmt.Errorf("migration requires distinct binary signing identities for %s", name)
 			}
 		}
 	}

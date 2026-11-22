@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rodriveracom/pomar/integrations/zeomessenger/prequal"
+	"github.com/rodriveracom/pomar/integrations/zeo/prequal"
 )
 
 var exactArgs = []string{"-mode", "processes", "-scope", "original"}

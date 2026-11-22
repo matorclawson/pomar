@@ -10,7 +10,7 @@ import Security
 public enum KeyProbe {
     /// A fixed message, so two signatures from the same key are comparable runs.
     static let message = Data("pomar key-probe v1".utf8)
-    static let keychainService = "org.zeroemployee.pomar.key-probe"
+    static let keychainService = "io.github.rodriveracom.pomar.key-probe"
 
     public struct Result {
         public var lines: [String] = []
@@ -86,24 +86,29 @@ public enum KeyProbe {
     /// delete. Each OSStatus is reported as returned; errSecNoDefaultKeychain (-25307)
     /// means the user has no keychain to use, which is a finding, not a crash.
     static func keychain(_ r: inout Result) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: "probe",
-        ]
-        SecItemDelete(query as CFDictionary)  // a leftover from an earlier run, if any
+        // A fresh account confines readback and cleanup to this invocation.
+        // Previous probe items and persistent credentials are outside its query.
+        let query = keychainQuery(account: UUID().uuidString)
         var add = query
         add[kSecValueData as String] = Data("probe".utf8)
         let addStatus = SecItemAdd(add as CFDictionary, nil)
         r.add("keychain_add", status(addStatus))
         guard addStatus == errSecSuccess else { return }
+        defer { r.add("keychain_delete", status(SecItemDelete(query as CFDictionary))) }
         var read = query
         read[kSecReturnData as String] = true
         var out: CFTypeRef?
         let readStatus = SecItemCopyMatching(read as CFDictionary, &out)
         r.add("keychain_read", status(readStatus))
         r.add("keychain_read_matches", String((out as? Data) == Data("probe".utf8)))
-        r.add("keychain_delete", status(SecItemDelete(query as CFDictionary)))
+    }
+
+    static func keychainQuery(account: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: account,
+        ]
     }
 
     static func write(_ data: Data, to url: URL) throws {

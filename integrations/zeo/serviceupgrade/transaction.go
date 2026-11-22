@@ -1,5 +1,5 @@
-// Package serviceupgrade changes only the two binaries of an existing service.
-// It does not provision accounts, images, callers, keys, jobs or a new daemon.
+// Package serviceupgrade upgrades an existing service and supports an
+// explicitly bound migration of its launchd and binary signing identities.
 package serviceupgrade
 
 import (
