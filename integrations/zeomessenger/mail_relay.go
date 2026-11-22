@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
- "github.com/rodriveracom/pomar/notification"
+	"github.com/rodriveracom/pomar/notification"
 )
 
 const mailRequestLimit = 1 << 20

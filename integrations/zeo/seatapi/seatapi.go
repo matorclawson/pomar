@@ -18,9 +18,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/rodriveracom/pomar/integrations/zeo/seatdecl"
 	"github.com/rodriveracom/pomar/internal/calljournal"
 	"github.com/rodriveracom/pomar/internal/localclient"
-	"github.com/rodriveracom/pomar/integrations/zeo/seatdecl"
 )
 
 // Store holds the seats under one private root:
