@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // council M4: an attached operator must never be locked out of a session

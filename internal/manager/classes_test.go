@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // The class fixtures already model CPU/memory. Model a healthy shared disk

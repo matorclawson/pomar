@@ -14,8 +14,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/seatapi"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/seatapi"
 )
 
 // The operator's seat commands (POMAR-CC SOW 15 §4): `pomar seats` lists

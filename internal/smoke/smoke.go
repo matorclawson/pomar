@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/sign"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/sign"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // Paths inside the data root. downloads/ and kernels/ are venue structure.

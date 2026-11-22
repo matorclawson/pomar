@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/npmproxy"
+	"github.com/rodriveracom/pomar/internal/npmproxy"
 )
 
 func seconds(n int64) *int64 { return &n }

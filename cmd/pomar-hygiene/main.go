@@ -19,7 +19,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/hygiene"
+	"github.com/rodriveracom/pomar/internal/hygiene"
 )
 
 func main() {

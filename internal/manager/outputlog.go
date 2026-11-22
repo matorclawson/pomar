@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 // The attempt's output log (the elders' ruling r30 §4.2, and their note of

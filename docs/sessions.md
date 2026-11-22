@@ -18,9 +18,8 @@ So a console that speaks to one speaks to both.
   for the connecting process. It authenticates the OS principal and nothing
   finer: on a host where several seats share one user, they are one
   principal to the service.
-- **Binding a client to a seat or an elder, and any role key, aren't here.**
-  They belong to ZEO-RT and the Architect, and nothing of them is kept in
-  session state.
+- **External identity and roles belong to the caller.** The service keeps
+  no external seat, role or account bindings in session state.
 - **Control is explicit.** Any number of clients view a session; at most one
   controls it. Only the controller's input and window size reach the program,
   and each write is fenced by the controller's grant epoch: a revoked
@@ -397,9 +396,8 @@ decision, outside anything a PTY carries.
 
 ### Wiring it to Claude Code
 
-Nothing here is shipped: it's the named caller zeocouncil's review asked
-for, for whoever builds the Claude Code guest adapter to adapt. The shape
-that fits Claude Code's own hook events:
+This example shows how a Claude Code guest adapter can use the existing
+operation API from Claude Code's hook events:
 
 - **`PreToolUse`** calls `begin`, before the tool runs, with an operation ID
   of the agent's choosing (its own tool-call ID, if it has one) and a
@@ -462,5 +460,4 @@ pomar session attach -take NAME    # take control from whoever has it
 ## The protocol
 
 The attach stream and the JSON API are specified in
-[sessions-protocol.md](sessions-protocol.md), for any client, such as
-ZEOAPP's console.
+[sessions-protocol.md](sessions-protocol.md).

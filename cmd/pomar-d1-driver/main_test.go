@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/prequal"
+	"github.com/rodriveracom/pomar/internal/prequal"
 )
 
 var exactArgs = []string{"-mode", "processes", "-scope", "original"}

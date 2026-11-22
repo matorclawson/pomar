@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 // The pins document (POMAR-SOW-06 §4.1; elders' ruling r26 §4.1): what an

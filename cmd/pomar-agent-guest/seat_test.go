@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
-	"github.com/zeroemployeeorg/pomar/internal/claudeactor"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/claudeactor"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // The tmux session's program is the supervisor, never Claude Code itself:

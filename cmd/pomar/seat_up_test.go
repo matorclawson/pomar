@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 	"net"
 	"net/http"
 	"os"
@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatapi"
-	"github.com/zeroemployeeorg/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/internal/seatapi"
+	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 // fakeHost is the development host's API as `seat up` sees it: the real

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
 // VMService is the process Virtualization.framework runs each guest in. It

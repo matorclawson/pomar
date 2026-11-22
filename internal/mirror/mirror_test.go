@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // isolatedEnv keeps the developer's git configuration out of the tests.

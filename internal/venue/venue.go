@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 // DefaultMaxFillPercent is the fill level above which heavy work is refused.

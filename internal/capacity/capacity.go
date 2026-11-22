@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/artifactreturn"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 // GiB is 2^30 bytes.

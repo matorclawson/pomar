@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/goproxy"
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/goproxy"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
 // HostConfig is supplied by the service owner, never by a guest. A dedicated

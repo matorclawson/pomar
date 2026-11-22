@@ -14,11 +14,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/ownerclient"
-	"github.com/zeroemployeeorg/pomar/internal/seatapi"
-	"github.com/zeroemployeeorg/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/ownerclient"
+	"github.com/rodriveracom/pomar/internal/seatapi"
+	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 // The seat lifecycle commands (POMAR-CC SOW 15 §4):

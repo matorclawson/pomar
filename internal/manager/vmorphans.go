@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
 // VMOrphan is a Virtualization VM service running under the manager's uid

@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // A session's live output is retained only in memory (seatterm's ring,

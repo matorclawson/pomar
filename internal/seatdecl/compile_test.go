@@ -2,7 +2,7 @@ package seatdecl
 
 import (
 	"encoding/json"
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 	"strings"
 	"testing"
 )

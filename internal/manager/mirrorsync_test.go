@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/mirror"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/mirror"
 )
 
 // gitEnv keeps the developer's git configuration out of the test.

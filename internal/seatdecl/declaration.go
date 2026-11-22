@@ -20,7 +20,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // Schema names this format.

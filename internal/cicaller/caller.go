@@ -16,9 +16,9 @@ import (
 	"regexp"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/calljournal"
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/calljournal"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/manager"
 )
 
 const maxWire = 48 << 20

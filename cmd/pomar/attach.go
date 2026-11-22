@@ -16,8 +16,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 var environmentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)

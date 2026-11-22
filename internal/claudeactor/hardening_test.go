@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // The cap counts requests already raised and waiting for the controller, not

@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/cache"
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/goproxy"
-	"github.com/zeroemployeeorg/pomar/internal/proc"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/cache"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/goproxy"
+	"github.com/rodriveracom/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // shortTemp gives a directory whose paths fit a Unix socket; t.TempDir's

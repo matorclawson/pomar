@@ -15,16 +15,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/base"
-	"github.com/zeroemployeeorg/pomar/internal/cache"
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/goproxy"
-	"github.com/zeroemployeeorg/pomar/internal/mirror"
-	"github.com/zeroemployeeorg/pomar/internal/npmproxy"
-	"github.com/zeroemployeeorg/pomar/internal/proc"
-	"github.com/zeroemployeeorg/pomar/internal/result"
-	"github.com/zeroemployeeorg/pomar/internal/sign"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/base"
+	"github.com/rodriveracom/pomar/internal/cache"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/goproxy"
+	"github.com/rodriveracom/pomar/internal/mirror"
+	"github.com/rodriveracom/pomar/internal/npmproxy"
+	"github.com/rodriveracom/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/sign"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // Paths inside the data root.

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 const pin = "c3e64a5000000000000000000000000000000001"

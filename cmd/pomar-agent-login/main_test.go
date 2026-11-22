@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
-	"github.com/zeroemployeeorg/pomar/internal/claudeactor"
+	"github.com/rodriveracom/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/claudeactor"
 )
 
 const code = "synthetic-code-0123456789"

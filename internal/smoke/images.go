@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/debs"
+	"github.com/rodriveracom/pomar/internal/debs"
 )
 
 // GuestImage is one pinned image a class can boot, and so the base it clones.

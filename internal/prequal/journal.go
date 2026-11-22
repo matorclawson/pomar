@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/localclient"
 )
 
 var ErrEvidenceCustody = errors.New("qualification evidence custody failed")

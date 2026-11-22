@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
+	"github.com/rodriveracom/pomar/internal/artifactreturn"
 	"os"
 	"strings"
 	"testing"

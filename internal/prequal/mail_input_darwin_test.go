@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 func TestMailInputDarwinRefusesRootAndFileACLs(t *testing.T) {

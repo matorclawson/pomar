@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/distribution"
+	"github.com/rodriveracom/pomar/internal/distribution"
 )
 
 const quickHelp = `Pomar — isolated Linux jobs and development seats on Apple silicon
@@ -41,7 +41,7 @@ Job admission is not completion: retrieve the result and verify its signature.
 
 More: pomar help all | pomar help server | pomar help install | pomar help upgrade
 Agents and scripts: pomar help -json (commands, exit codes, the loop); see AGENTS.md
-Docs: https://github.com/zeroemployeeorg/pomar/tree/main/docs
+Docs: https://github.com/rodriveracom/pomar/tree/main/docs
 `
 
 func helpCmd(args []string, stdout, stderr io.Writer) int {

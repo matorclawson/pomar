@@ -13,7 +13,7 @@ import (
 	"os"
 	"runtime/debug"
 
-	"github.com/zeroemployeeorg/pomar/internal/ownerclient"
+	"github.com/rodriveracom/pomar/internal/ownerclient"
 )
 
 func main() {

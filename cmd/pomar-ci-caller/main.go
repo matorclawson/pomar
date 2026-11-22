@@ -8,7 +8,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/zeroemployeeorg/pomar/internal/cicaller"
+	"github.com/rodriveracom/pomar/internal/cicaller"
 )
 
 func main() {

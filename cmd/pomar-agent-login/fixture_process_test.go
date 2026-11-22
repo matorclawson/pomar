@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/claudeactor"
+	"github.com/rodriveracom/pomar/internal/claudeactor"
 )
 
 // Every fake process is retained by the fixture owner and reaped even when a

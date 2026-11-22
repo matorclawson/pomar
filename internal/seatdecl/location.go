@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/calljournal"
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/calljournal"
+	"github.com/rodriveracom/pomar/internal/localclient"
 )
 
 // Location is one revision of where a seat is active, kept apart from its

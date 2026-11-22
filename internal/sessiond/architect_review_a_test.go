@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // zeocouncil/the Architect's review of the #128 stack, part A.

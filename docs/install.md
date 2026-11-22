@@ -4,6 +4,30 @@ Pomar distributions target **darwin/arm64 on macOS 26 or later**. A caller needs
 an existing approved manager. A development owner can start a separate instance
 with the same bundle. Neither route needs the Pomar source repository.
 
+## Build and install from source
+
+Before the first release, build the bundle on an Apple silicon Mac with
+macOS 26 or later, Go 1.27.x, Swift 6.2 or later and the Apple developer tools.
+This builds the locked dependencies and installs the bundle into your own
+prefix. Use an explicit Git commit when building from a shared checkout.
+
+```sh
+git clone https://github.com/rodriveracom/pomar.git
+cd pomar
+make verify
+out="$(mktemp -d)"
+sh tools/build-release.sh v0.1.0-local "$out/release"
+tar -xzf "$out/release/pomar-v0.1.0-local-darwin-arm64.tar.gz" -C "$out"
+"$out/pomar-v0.1.0-local-darwin-arm64/bin/pomar" install \
+  -bundle "$out/pomar-v0.1.0-local-darwin-arm64"
+export PATH="$HOME/.local/share/pomar/current/bin:$PATH"
+pomar version
+```
+
+Use [the development manager guide](operations.md#development-manager) to
+start your own foreground manager in a dedicated private root. If you already
+have a manager, use the control socket and class supplied by its host owner.
+
 ## Download
 
 Select an explicit published tag, including its prerelease suffix when present.

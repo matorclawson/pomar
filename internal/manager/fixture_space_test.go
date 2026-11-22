@@ -3,8 +3,8 @@ package manager
 import (
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // A fixture owns its disk counters. Mirror preparation and default admission

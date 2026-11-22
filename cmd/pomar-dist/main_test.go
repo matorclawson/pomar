@@ -4,7 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"github.com/zeroemployeeorg/pomar/internal/distribution"
+	"github.com/rodriveracom/pomar/internal/distribution"
 	"io"
 	"os"
 	"path/filepath"

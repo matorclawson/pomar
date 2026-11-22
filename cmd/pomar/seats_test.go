@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatapi"
-	"github.com/zeroemployeeorg/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/internal/seatapi"
+	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 // seatHost serves the real seat routes on a host-shaped owner socket.

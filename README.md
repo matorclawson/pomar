@@ -10,18 +10,18 @@ capacity and retained results.
 
 **Status:** early prototype, macOS 26 or later, Apple silicon. The release
 pipeline is prepared here; the first binary release has not yet been published.
-Until a release is published, the download commands below cannot succeed.
+To try Pomar now, use a [local source build](docs/install.md#build-and-install-from-source).
 
 ## Install a release
 
 Users of a published release need no Git checkout, Go or Swift compiler. Choose
-an explicit tag from [Releases](https://github.com/zeroemployeeorg/pomar/releases),
+an explicit tag from [Releases](https://github.com/rodriveracom/pomar/releases),
 download that tag's `install.sh` and `SHA256SUMS`, and verify the installer before
 running it. For example, **after `v0.1.0` is published**:
 
 ```sh
 VERSION=v0.1.0
-URL="https://github.com/zeroemployeeorg/pomar/releases/download/$VERSION"
+URL="https://github.com/rodriveracom/pomar/releases/download/$VERSION"
 curl -fL "$URL/install.sh" -o install.sh
 curl -fL "$URL/SHA256SUMS" -o SHA256SUMS
 awk '$2 == "install.sh" { print }' SHA256SUMS | shasum -a 256 -c -
@@ -61,7 +61,7 @@ For a repository job, name the owner's configured mirror and an exact source
 commit with `-mirror`, `-ref` and `-sha`; you do not need a local clone.
 See [operations, seats and result verification](docs/operations.md), and
 [health and diagnostics](docs/health-and-diagnostics.md) for current room,
-progress, explicit unknowns and the operator roadmap.
+progress and result verification.
 
 ## Start a development manager
 
@@ -74,7 +74,8 @@ POMAR_DEV_ROOT="$HOME/.local/share/pomar-dev/example"
 pomar server prepare -root "$POMAR_DEV_ROOT"
 pomar server kernel -root "$POMAR_DEV_ROOT"
 # Use the actual kernel digest printed by the previous command.
-pomar server start -root "$POMAR_DEV_ROOT" -kernel-sha256 ACTUAL_DIGEST
+pomar server start -root "$POMAR_DEV_ROOT" -kernel-sha256 ACTUAL_DIGEST \
+  -class-name dev-example -class-concurrency 1
 ```
 
 This is a separate development instance. Capacity, images, source mirrors and
@@ -84,6 +85,7 @@ See [development ownership](docs/operations.md#development-manager).
 
 ## Develop Pomar
 
+Start with [the standalone build and install guide](docs/install.md#build-and-install-from-source).
 Contributors build from source on Apple silicon with the pinned Go and Swift
 requirements. `make verify` is the native merge gate. This is separate from
 using an installed release. See [CONTRIBUTING.md](CONTRIBUTING.md),

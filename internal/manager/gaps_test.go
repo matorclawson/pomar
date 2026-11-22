@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/mirror"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/mirror"
 )
 
 // A source the mirror cannot place is refused by name before capacity is

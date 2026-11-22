@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/prequal"
+	"github.com/rodriveracom/pomar/internal/prequal"
 )
 
 const observationLimit = 1 << 20

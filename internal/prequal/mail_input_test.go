@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 func mailInputFixture(t *testing.T) (*os.Root, MailInputRootBinding, string, []byte, string) {

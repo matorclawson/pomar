@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/zeroemployeeorg/pomar/internal/distribution"
+	"github.com/rodriveracom/pomar/internal/distribution"
 	"io"
 	"os"
 	"path/filepath"

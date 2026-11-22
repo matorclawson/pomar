@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 const ConsoleUID = 1001

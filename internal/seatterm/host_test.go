@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/termstate"
+	"github.com/rodriveracom/pomar/internal/termstate"
 )
 
 // journal is an in-memory audit that can be made to fail.

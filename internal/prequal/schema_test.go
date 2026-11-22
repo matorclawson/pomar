@@ -3,8 +3,8 @@ package prequal_test
 import (
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/prequal"
-	"github.com/zeroemployeeorg/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/internal/prequal"
+	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 // seat profile/up compile only declarations and their class catalogue. Even a

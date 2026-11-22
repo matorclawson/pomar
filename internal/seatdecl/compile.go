@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"slices"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // ClassesSchema names the owner's seat class catalogue.

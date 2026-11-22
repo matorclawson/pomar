@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/sessiond"
+	"github.com/rodriveracom/pomar/internal/sessiond"
 )
 
 // council P3-B on #137: internal/sessiond's own test for -preserves-install-path

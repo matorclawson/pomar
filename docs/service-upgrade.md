@@ -5,10 +5,11 @@ separate administrator operation for an **already provisioned** macOS service.
 It does not create accounts, install a daemon, change grants, create a class,
 submit a job or admit a runtime actor.
 
-The v1 service profile binds the existing `_pomar` owner and `_profrodci` caller,
-fixed manager label, binary paths, public caller policy, narrow grant, classes
-file and unchanged launch plist. It refuses another deployment layout. New
-host provisioning and more profiles require their own implementation/review.
+The v1 service upgrade profile binds one existing service layout, including
+its owner and caller, manager label, binaries, caller policy, grant, classes
+and launch plist. The upgrade refuses other layouts. For a standalone
+installation, use the [user-prefix installer](install.md) and the
+[development manager](operations.md#development-manager).
 
 ## Frozen payload
 
@@ -21,7 +22,7 @@ The manifest contains roles, never arbitrary target paths or shell commands.
 Duplicate fields, unknown fields and excess nesting are refused.
 
 For `internal_certificate`, both target binaries must have the manifest-bound internal certificate and the
-fixed product identifiers `ac.zeo.pomar.pomar` / `ac.zeo.pomar.pomar-host`.
+fixed product identifiers enforced by the installed upgrade profile.
 For either policy, the host must have exactly the reviewed Virtualization entitlement; the
 coordinator must have none. An ad-hoc development signature is insufficient for an internal release.
 The separate `development_transition` policy requires structurally verified

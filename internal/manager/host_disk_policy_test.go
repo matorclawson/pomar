@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // One actual file drives both predicates; fake filesystem counters keep this

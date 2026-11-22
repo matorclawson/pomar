@@ -1,7 +1,7 @@
 package capacity
 
 import (
-	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
+	"github.com/rodriveracom/pomar/internal/artifactreturn"
 	"testing"
 )
 

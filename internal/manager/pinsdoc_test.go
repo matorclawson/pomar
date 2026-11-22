@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/capacity"
 )
 
 func TestPinsDocIsCanonicalAndWrittenOnce(t *testing.T) {

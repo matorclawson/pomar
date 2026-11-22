@@ -11,7 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 // MailInputRootBinding comes from the owner's independently admitted host

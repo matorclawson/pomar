@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/npmproxy"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/npmproxy"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // An npm class's attempts get an npm registry of their own, on the pattern of

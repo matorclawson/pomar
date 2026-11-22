@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
-	"github.com/zeroemployeeorg/pomar/internal/termstate"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/termstate"
 )
 
 // ErrNoService is a root with no service answering on its socket.

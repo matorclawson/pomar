@@ -15,7 +15,7 @@ case "$prefix" in /*) ;; *) echo 'prefix must be absolute' >&2; exit 2;; esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/pomar-install.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 asset="pomar-$version-darwin-arm64.tar.gz"
-url="https://github.com/zeroemployeeorg/pomar/releases/download/$version"
+url="https://github.com/rodriveracom/pomar/releases/download/$version"
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$url/SHA256SUMS" -o "$work/SHA256SUMS"
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' "$url/$asset" -o "$work/$asset"
 # Only this exact archive line is used. Other assets do not affect installation.

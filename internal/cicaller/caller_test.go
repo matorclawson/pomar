@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/manager"
 )
 
 func fixture(t *testing.T, h http.HandlerFunc) (Policy, Request) {

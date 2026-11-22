@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/manager"
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 func TestRun(t *testing.T) {

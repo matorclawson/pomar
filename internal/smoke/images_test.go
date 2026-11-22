@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/ocilayout"
+	"github.com/rodriveracom/pomar/internal/ocilayout"
 )
 
 // The catalogue is consistent, and its first image is the CI image as it

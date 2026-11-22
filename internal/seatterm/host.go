@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/zeroemployeeorg/pomar/internal/termstate"
+	"github.com/rodriveracom/pomar/internal/termstate"
 )
 
 // SessionHost holds a seat's terminal sessions in its guest, in place of a

@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // StateEnv names, in a session's environment, the socket its adapter

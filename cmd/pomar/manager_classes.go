@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
+	"github.com/rodriveracom/pomar/internal/artifactreturn"
 	"io"
 	"math"
 	"os"
@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/base"
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/manager"
-	"github.com/zeroemployeeorg/pomar/internal/smoke"
+	"github.com/rodriveracom/pomar/internal/base"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/smoke"
 )
 
 const classesSchema = "pomar.manager-classes/v1"

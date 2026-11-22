@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 // ResultPolicy is an admission fact. An absent policy is unknown, never an

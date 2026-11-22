@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/capacity"
 )
 
 // The kernel's account of the peer is the connecting process's uid.

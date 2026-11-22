@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
 // POMAR-CC-SOW-37 rev3: a public-Host-API replacement->resolution regression

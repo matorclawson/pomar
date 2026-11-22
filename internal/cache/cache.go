@@ -17,7 +17,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // GiB is 2^30 bytes.

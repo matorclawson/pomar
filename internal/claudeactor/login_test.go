@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 const goodCode = "synthetic-auth-code-0123456789"

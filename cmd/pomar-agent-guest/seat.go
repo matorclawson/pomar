@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
-	"github.com/zeroemployeeorg/pomar/internal/claudeactor"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/claudeactor"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // An interactive seat (POMAR-CC SOW 15 §5, SOW 16 §3): -actor seat runs no

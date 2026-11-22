@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // The credential check sees only a regular, non-empty file; it never opens it.

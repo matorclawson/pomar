@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 // Resources uses checked integers: 1000 millicores is one logical/vCPU slot.

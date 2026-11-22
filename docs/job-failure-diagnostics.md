@@ -21,9 +21,8 @@ unfinished request has a start without a completion. Connection timing can
 be absent when a connection is reused or when a custom transport does not
 implement HTTP trace hooks.
 
-**`completed` with HTTP 200 is not proof the guest received every byte**
-(PROFROD-SOW-330/pomar#83 found this gap): the status line and
-Content-Length are already on the wire before the body is copied, so a
+**HTTP 200 and a `completed` event describe the relay-side response.**
+The status line and Content-Length are already on the wire before the body is copied, so a
 write that fails partway can't change what the client was already told,
 and the relay has no way to revise it. `send_short` records an observed
 local copy error or size mismatch, with the real byte count and (when the

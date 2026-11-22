@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/capacity"
 )
 
 // shortDir is a temporary directory with a short path: a Unix socket's path is

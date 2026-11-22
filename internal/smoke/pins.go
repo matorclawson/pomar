@@ -4,7 +4,7 @@
 // object is ledgered in the data root before it is created.
 package smoke
 
-import "github.com/zeroemployeeorg/pomar/internal/debs"
+import "github.com/rodriveracom/pomar/internal/debs"
 
 // Pinned artifacts. The kernel and the init filesystem are the guest's trust
 // roots: the kernel runs the guest, and vminitd is PID 1 inside it with the

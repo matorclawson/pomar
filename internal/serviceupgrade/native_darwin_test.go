@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/manager"
 	"strings"
 	"testing"
 )

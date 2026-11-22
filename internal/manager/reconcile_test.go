@@ -3,7 +3,7 @@ package manager
 import (
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
 const hostBin = "/opt/pomar/pomar-host"

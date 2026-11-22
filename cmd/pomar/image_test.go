@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/ocilayout"
-	"github.com/zeroemployeeorg/pomar/internal/smoke"
+	"github.com/rodriveracom/pomar/internal/ocilayout"
+	"github.com/rodriveracom/pomar/internal/smoke"
 )
 
 func TestImageNameMustBeTaggedAndNotPomarsOwn(t *testing.T) {

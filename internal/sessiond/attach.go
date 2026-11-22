@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // attach upgrades to seatterm.ProtocolV2 and carries one client of a

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 func TestRecordLog(t *testing.T) {

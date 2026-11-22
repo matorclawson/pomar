@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/capacity"
 )
 
 // A drain refuses every new start by name while live attempts run on, and

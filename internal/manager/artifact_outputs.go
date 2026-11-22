@@ -11,7 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/capacity"
 )
 
 // A distinct verb prevents older helpers from silently ignoring artifact bounds.

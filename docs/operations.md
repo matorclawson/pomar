@@ -33,7 +33,7 @@ Flags precede positional arguments or the job's `--` separator.
 
 ```sh
 pomar run -id build-1 -class YOUR_CLASS \
-  -mirror YOUR_CONFIGURED_MIRROR -ref refs/heads/main -sha FULL_COMMIT -- make verify
+  -mirror YOUR_CONFIGURED_MIRROR -ref refs/heads/main -sha FULL_COMMIT -- /bin/echo hello
 pomar attempt get -id build-1
 pomar logs -id build-1
 pomar attempt result -id build-1 > build-1.result.json

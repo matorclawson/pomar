@@ -146,8 +146,7 @@ Task/control lookup requires the original session and incarnation. It may
 return historical evidence for a known old operation. A missing operation is
 labelled `durable_non_acceptance` only in the matching, intact current journal.
 That legacy wire label means current journal absence, not proof that a delayed
-earlier POST cannot still commit. ZEO-RT calls this observation
-`CurrentJournalAbsence`; standalone controllers must preserve the same limitation.
+earlier POST cannot still commit. Controllers must preserve that limitation.
 Keep the original operation ID, input digest and incarnation for inspection.
 Absence alone grants neither replay nor release authority; this interface does
 not establish a stronger non-acceptance or general retry protocol. A missing
@@ -231,10 +230,10 @@ baseline and clean status/diff. Unexpected retained work holds the transition
 for assessment; it is never reset or discarded.
 
 `POST /v1/environments/{id}/continuations` projects an external controller's existing
-intent/lifecycle disposition into the retained broker journal. ZEO-RT is one
-consumer example; standalone controllers do not need ZEO-RT's authorisation.
-Pomar does not establish a separate approval authority. The owner supplies the disposition ID, intent and authority
-references, responsible owner, original operation/input/thread/turn identities,
+intent/lifecycle disposition into the retained broker journal. The controller
+supplies its existing decision. The owner supplies the disposition ID, intent
+and authority references, responsible owner, original operation, input, thread
+and turn identities,
 original and latest inspection fence operation IDs, the explicit new launch,
 inventory digest, disk-recovery description, scoped external-action inventory,
 and the new successor task. The host supplies its machine-owned fence receipts;

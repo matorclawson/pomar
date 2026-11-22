@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/localclient"
 )
 
 const Limit = 12 << 20

@@ -62,9 +62,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/calljournal"
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/ownerclient"
+	"github.com/rodriveracom/pomar/internal/calljournal"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/ownerclient"
 )
 
 func main() {

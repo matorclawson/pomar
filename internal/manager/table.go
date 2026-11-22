@@ -14,9 +14,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/mirror"
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/mirror"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 // State is an attempt's state as the manager knows it.

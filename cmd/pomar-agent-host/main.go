@@ -10,9 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
-	"github.com/zeroemployeeorg/pomar/internal/seatapi"
-	"github.com/zeroemployeeorg/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/seatapi"
+	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 func main() {

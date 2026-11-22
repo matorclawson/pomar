@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
-	"github.com/zeroemployeeorg/pomar/internal/sessiond"
+	"github.com/rodriveracom/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/sessiond"
 )
 
 // pomar session's refusals carry fixed exit codes, and its output is JSON.

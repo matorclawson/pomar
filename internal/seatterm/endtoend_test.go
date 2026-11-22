@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/localclient"
 )
 
 // The whole path: the operator's client on the owner-only socket, through a

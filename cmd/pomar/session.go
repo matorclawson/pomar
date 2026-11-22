@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
-	"github.com/zeroemployeeorg/pomar/internal/sessiond"
+	"github.com/rodriveracom/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/sessiond"
 )
 
 // `pomar session`: named programs on terminals that outlive every client,

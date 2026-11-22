@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 // The job environment the helper gives a command with a source

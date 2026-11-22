@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // The live qualification runs only when POMAR_LIVE_CLAUDE names an installed,
