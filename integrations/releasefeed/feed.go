@@ -20,6 +20,8 @@ var producerID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
 type Entry struct {
 	Producer  string
 	Sequence  uint64
+	IssuedAt  int64 // Unix seconds, inclusive.
+	ExpiresAt int64 // Unix seconds, exclusive.
 	Manifest  []byte
 	Signature []byte
 }
@@ -37,24 +39,29 @@ type Trust struct {
 	PublicKey ed25519.PublicKey
 }
 
-// SigningBytes binds a producer and sequence to the exact original manifest.
+// SigningBytes binds a producer, sequence and validity interval to the exact
+// original manifest.
 // The domain and length-prefixed fields keep other protocols and field splits
 // from producing the same signed bytes.
 func SigningBytes(entry Entry) ([]byte, error) {
 	if !producerID.MatchString(entry.Producer) || entry.Sequence == 0 ||
+		entry.IssuedAt <= 0 || entry.ExpiresAt <= entry.IssuedAt ||
 		len(entry.Manifest) == 0 || len(entry.Manifest) > MaxManifestBytes {
-		return nil, errors.New("invalid release entry binding or manifest size")
+		return nil, errors.New("invalid release entry binding, validity interval or manifest size")
 	}
 	b := []byte("pomar.signed-release-feed/v1\x00")
 	b = binary.BigEndian.AppendUint16(b, uint16(len(entry.Producer)))
 	b = append(b, entry.Producer...)
 	b = binary.BigEndian.AppendUint64(b, entry.Sequence)
+	b = binary.BigEndian.AppendUint64(b, uint64(entry.IssuedAt))
+	b = binary.BigEndian.AppendUint64(b, uint64(entry.ExpiresAt))
 	b = binary.BigEndian.AppendUint32(b, uint32(len(entry.Manifest)))
 	return append(b, entry.Manifest...), nil
 }
 
-// Read verifies one explicitly selected release against independent trust. The
-// caller owns release selection, durable sequencing and any later activation.
+// Read verifies one explicitly selected release against independent trust for
+// historical inspection. Activation requires Activate, which checks the signed
+// validity interval and durably advances the producer's sequence before use.
 func Read(ctx context.Context, src Source, trust Trust, sequence uint64) (Entry, error) {
 	if src == nil || !producerID.MatchString(trust.Producer) ||
 		len(trust.PublicKey) != ed25519.PublicKeySize || sequence == 0 {

@@ -175,6 +175,9 @@ import Foundation
     codexSeat.mailSocket = codexSeat.directory + "/mail.sock"
     codexSeat.notificationChannel = "example-notifier"
     #expect(Array(AgentEnvironment.brokerArguments(codexSeat).suffix(2)) == ["-notification-channel", "example-notifier"])
+    codexSeat.notificationChannel = "zeomessenger"
+    #expect(AgentEnvironment.valid(codexSeat))
+    #expect(Array(AgentEnvironment.brokerArguments(codexSeat).suffix(2)) == ["-notification-channel", "zeomessenger"])
     codexSeat.controllerCapabilities = ["inbox"]
     #expect(!AgentEnvironment.valid(codexSeat))
     codexSeat.controllerCapabilities = []; codexSeat.agentVersion = "0.170.0"
