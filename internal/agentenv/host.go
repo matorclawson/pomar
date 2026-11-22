@@ -23,6 +23,7 @@ import (
 
 	"github.com/rodriveracom/pomar/internal/goproxy"
 	"github.com/rodriveracom/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/notification"
 )
 
 // HostConfig is supplied by the service owner, never by a guest. A dedicated
@@ -64,7 +65,7 @@ type HostConfig struct {
 	QualificationFixture *QualificationFixture `json:"qualificationFixture,omitempty"`
 
 	// SeatRoot is the owner's private directory of seat declarations and
-	// locations (internal/seatapi); empty serves no seat routes.
+	// locations (the optional organization integration); empty serves no seat routes.
 	SeatRoot string `json:"seatRoot,omitempty"`
 	// SeatHere is this host's location name, as seat locations name it (for
 	// example pomar:macbook). `pomar seat up` starts a seat only where its
@@ -177,15 +178,16 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 type VMSpec struct {
 	RequireRetainedDisk bool `json:"requireRetainedDisk,omitempty"`
 	HostConfig
-	Environment   string `json:"environment"`
-	Profile       string `json:"profile,omitempty"`
-	Session       string `json:"session"`
-	Incarnation   string `json:"incarnation"`
-	Directory     string `json:"directory"`
-	Rootfs        string `json:"rootfs"`
-	ControlSocket string `json:"controlSocket"`
-	EgressSocket  string `json:"egressSocket"`
-	MailSocket    string `json:"mailSocket,omitempty"`
+	Environment         string `json:"environment"`
+	Profile             string `json:"profile,omitempty"`
+	Session             string `json:"session"`
+	Incarnation         string `json:"incarnation"`
+	Directory           string `json:"directory"`
+	Rootfs              string `json:"rootfs"`
+	ControlSocket       string `json:"controlSocket"`
+	EgressSocket        string `json:"egressSocket"`
+	MailSocket          string `json:"mailSocket,omitempty"`
+	NotificationChannel string `json:"notificationChannel,omitempty"`
 }
 
 type Action struct {
@@ -231,19 +233,20 @@ type HelperExit struct {
 }
 
 type Host struct {
-	mu        sync.Mutex
-	config    HostConfig
-	lock      *os.File
-	envs      map[string]*Environment
-	gates     map[string]*Egress
-	servers   map[string]*http.Server
-	processes proc.Lister
-	stopWait  time.Duration
-	probe     func(context.Context, FenceProbeRequest) (FenceProbeEvidence, error)
-	fatal     error
+	mu          sync.Mutex
+	config      HostConfig
+	lock        *os.File
+	envs        map[string]*Environment
+	gates       map[string]*Egress
+	servers     map[string]*http.Server
+	processes   proc.Lister
+	stopWait    time.Duration
+	probe       func(context.Context, FenceProbeRequest) (FenceProbeEvidence, error)
+	fatal       error
+	openChannel notification.OpenChannel
 
 	// mounts are owner routes served beside the environment routes, such as
-	// the seat routes (internal/seatapi), which this package can't import.
+	// the seat routes (the optional organization integration), which this package can't import.
 	mounts map[string]http.Handler
 }
 
@@ -258,6 +261,11 @@ func randomID() string {
 }
 
 func OpenHost(config HostConfig) (*Host, error) {
+	return OpenHostWithChannel(config, nil)
+}
+
+// OpenHostWithChannel installs an explicitly selected owner adapter.
+func OpenHostWithChannel(config HostConfig, openChannel notification.OpenChannel) (*Host, error) {
 	if err := ValidateControllerCapabilities(config.ControllerCapabilities); err != nil {
 		return nil, err
 	}
@@ -278,9 +286,21 @@ func OpenHost(config HostConfig) (*Host, error) {
 			if p.Seat == "" {
 				return nil, errors.New("mail belongs to an owner-bound seat profile")
 			}
-			if _, err := newMailRelay(p.Seat, "validation", "validation", config.MailOrigin, nil); err != nil {
-				return nil, fmt.Errorf("profile %s mail: %w", name, err)
+
+			if openChannel == nil {
+				return nil, errors.New("notification channel profile requires an owner adapter")
 			}
+			channel, err := openChannel(notification.Binding{Identity: p.Seat, Environment: "validation", Incarnation: "validation"}, config.MailOrigin)
+			if err != nil {
+				return nil, fmt.Errorf("profile %s notification channel: %w", name, err)
+			}
+			if channel == nil || !seatProfileName.MatchString(channel.Name()) {
+				if channel != nil {
+					channel.Revoke()
+				}
+				return nil, fmt.Errorf("profile %s: invalid notification channel name", name)
+			}
+			channel.Revoke()
 		}
 		if p.QualificationFixture != nil {
 			agent := config.Agent
@@ -348,7 +368,7 @@ func OpenHost(config HostConfig) (*Host, error) {
 		lock.Close()
 		return nil, errors.New("agent host already owned")
 	}
-	h := &Host{config: config, lock: lock, envs: map[string]*Environment{}, gates: map[string]*Egress{}, servers: map[string]*http.Server{}}
+	h := &Host{config: config, openChannel: openChannel, lock: lock, envs: map[string]*Environment{}, gates: map[string]*Egress{}, servers: map[string]*http.Server{}}
 	files, err := filepath.Glob(filepath.Join(config.Root, "*", "environment.json"))
 	if err != nil {
 		h.Close()
@@ -483,6 +503,7 @@ func (h *Host) gate(e *Environment) (err error) {
 			}
 			delete(h.gates, e.Spec.Environment)
 			e.Spec.MailSocket = ""
+			e.Spec.NotificationChannel = ""
 		}
 	}()
 	if fi, err := os.Lstat(e.Spec.EgressSocket); err == nil {
@@ -554,10 +575,21 @@ func (h *Host) gate(e *Environment) (err error) {
 	go gs.Serve(gl)
 	e.Spec.GoProxySocket = goSocket
 	e.Spec.MailSocket = ""
+	e.Spec.NotificationChannel = ""
 	if e.Spec.Seat != "" && e.Spec.MailOrigin != "" {
-		mail, err := newMailRelay(e.Spec.Seat, e.Spec.Environment, e.Spec.Incarnation, e.Spec.MailOrigin, nil)
+		if h.openChannel == nil {
+			return errors.New("retained notification channel has no owner adapter")
+		}
+		binding := notification.Binding{Identity: e.Spec.Seat, Environment: e.Spec.Environment, Incarnation: e.Spec.Incarnation}
+		mail, err := h.openChannel(binding, e.Spec.MailOrigin)
 		if err != nil {
 			return err
+		}
+		if mail == nil || !seatProfileName.MatchString(mail.Name()) {
+			if mail != nil {
+				mail.Revoke()
+			}
+			return errors.New("invalid owner notification channel")
 		}
 		g.mu.Lock()
 		if g.revoked {
@@ -584,9 +616,10 @@ func (h *Host) gate(e *Environment) (err error) {
 			ln.Close()
 			return err
 		}
-		server := mailHTTPServer(mail)
+		server := &http.Server{Handler: mail, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 20 * time.Second, MaxHeaderBytes: 8192}
 		h.servers[e.Spec.Environment+"-mail"] = server
 		e.Spec.MailSocket = socket
+		e.Spec.NotificationChannel = mail.Name()
 		go server.Serve(ln)
 	}
 	return nil

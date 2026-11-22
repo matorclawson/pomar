@@ -49,6 +49,7 @@ public enum AgentEnvironment {
         public var egressSocket: String
         public var goProxySocket: String
         public var mailSocket: String? = nil
+        public var notificationChannel: String? = nil
         public var cpus: Int
         public var memoryBytes: UInt64
         public var controllerCapabilities: [String]? = nil
@@ -255,6 +256,9 @@ public enum AgentEnvironment {
                     "-controller-capabilities", (o.controllerCapabilities ?? []).joined(separator: ",")]
         if (o.agent ?? "codex") == "codex", let seat = o.seat {
             args += ["-actor", "codex-seat", "-seat", seat, "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", o.agentVersion ?? "", "-codex-launch", String(data: (try? JSONEncoder().encode(o.seatLaunch)) ?? Data(), encoding: .utf8) ?? ""]
+            if o.mailSocket != nil, let channel = o.notificationChannel {
+                args += ["-notification-channel", channel]
+            }
         } else if o.agent == "claude" {
             if let seat = o.seat {
                 args += ["-actor", "seat", "-seat", seat, "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", o.agentVersion ?? ""]

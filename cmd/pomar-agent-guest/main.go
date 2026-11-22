@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rodriveracom/pomar/integrations/zeomessenger"
 	"github.com/rodriveracom/pomar/internal/agentenv"
 	"github.com/rodriveracom/pomar/internal/claudeactor"
 	"github.com/rodriveracom/pomar/internal/codexseat"
@@ -107,9 +108,13 @@ func run() error {
 	codexVersion := flag.String("codex-version", "", "the pinned Codex seat version")
 	actorKind := flag.String("actor", "codex", "the coding agent: codex (app-server), claude (Claude Code, stream-json) or seat (an interactive Claude Code seat)")
 	seat := flag.String("seat", "", "with -actor seat: the seat's name")
+	extension := flag.String("notification-channel", "", "owner-configured optional notification channel")
 	claude := flag.String("claude", "/opt/pomar-claude/bin/claude", "pinned Claude Code binary, with -actor claude")
 	claudeVersion := flag.String("claude-version", "", "the pinned Claude Code version, reported in the userAgent, with -actor claude")
 	flag.Parse()
+	if *extension != "" && (*extension != zeomessenger.Name || *actorKind != "codex-seat") {
+		return errors.New("unknown or unsupported notification channel")
+	}
 	if *actorKind != "codex" && *actorKind != "claude" && *actorKind != "seat" && *actorKind != "codex-seat" {
 		return fmt.Errorf("unknown -actor %q", *actorKind)
 	}
@@ -132,7 +137,11 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		return runCodexSeat(store, *seat, *codex, *codexVersion, *workspace, *socket, launch)
+		var extensionEnv []string
+		if *extension == zeomessenger.Name {
+			extensionEnv = zeomessenger.GuestEnvironment(*seat)
+		}
+		return runCodexSeat(store, *seat, *codex, *codexVersion, *workspace, *socket, launch, extensionEnv)
 	}
 	if *actorKind == "seat" {
 		self, err := os.Executable()

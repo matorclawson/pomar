@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/rodriveracom/pomar/internal/calljournal"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -251,7 +252,7 @@ func (h *Host) retirementProbe(e *Environment, ret *Retirement) error {
 	}
 	b, _ := json.Marshal(v)
 	file := "retirement-evidence-" + op + ".json"
-	if err = writeEvidence(filepath.Join(e.Spec.Directory, file), b); err != nil {
+	if err = calljournal.WriteEvidence(filepath.Join(e.Spec.Directory, file), b); err != nil {
 		h.fatal = err
 		return err
 	}

@@ -171,6 +171,10 @@ import Foundation
     #expect(AgentEnvironment.valid(codexSeat))
     #expect(Array(AgentEnvironment.brokerArguments(codexSeat).prefix(codex.count+8)) == codex + ["-actor", "codex-seat", "-seat", "zeocreator", "-codex", "/opt/pomar-codex/bin/codex", "-codex-version", "0.160.0"])
     #expect(AgentEnvironment.brokerArguments(codexSeat).contains("-codex-launch"))
+    #expect(!AgentEnvironment.brokerArguments(codexSeat).contains("-notification-channel"))
+    codexSeat.mailSocket = codexSeat.directory + "/mail.sock"
+    codexSeat.notificationChannel = "example-notifier"
+    #expect(Array(AgentEnvironment.brokerArguments(codexSeat).suffix(2)) == ["-notification-channel", "example-notifier"])
     codexSeat.controllerCapabilities = ["inbox"]
     #expect(!AgentEnvironment.valid(codexSeat))
     codexSeat.controllerCapabilities = []; codexSeat.agentVersion = "0.170.0"

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/rodriveracom/pomar/internal/serviceupgrade"
+	"github.com/rodriveracom/pomar/integrations/zeo/serviceupgrade"
 	"io"
 	"time"
 )

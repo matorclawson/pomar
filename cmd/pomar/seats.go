@@ -14,8 +14,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/rodriveracom/pomar/integrations/zeo/seatapi"
 	"github.com/rodriveracom/pomar/internal/localclient"
-	"github.com/rodriveracom/pomar/internal/seatapi"
 )
 
 // The operator's seat commands: `pomar seats` lists every declared seat and, on

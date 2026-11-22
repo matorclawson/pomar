@@ -14,11 +14,11 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/rodriveracom/pomar/integrations/zeo/seatapi"
+	"github.com/rodriveracom/pomar/integrations/zeo/seatdecl"
 	"github.com/rodriveracom/pomar/internal/agentenv"
 	"github.com/rodriveracom/pomar/internal/localclient"
 	"github.com/rodriveracom/pomar/internal/ownerclient"
-	"github.com/rodriveracom/pomar/internal/seatapi"
-	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 // The seat lifecycle commands:
