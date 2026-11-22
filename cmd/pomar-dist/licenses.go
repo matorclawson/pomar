@@ -98,7 +98,7 @@ func swiftLicensePins(source string) ([]swiftLicense, error) {
 }
 
 var regexpRevision = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var legalFilename = regexp.MustCompile(`(?i)^(licen[cs]e|notice|copying|copyright|unlicense)([-_.][a-z0-9]+)*$`)
+var legalFilename = regexp.MustCompile(`(?i)^(licen[cs]e|notices?|copying|copyright|unlicense)([-_.][a-z0-9]+)*$`)
 
 func legalTextName(name string) bool {
 	if !legalFilename.MatchString(name) {

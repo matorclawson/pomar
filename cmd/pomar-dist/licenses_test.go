@@ -30,8 +30,14 @@ func TestBuiltBundleContainsEveryLockedSwiftLicenseAndNotice(t *testing.T) {
 	rootName := "pomar-v0.1.0-darwin-arm64"
 	out := filepath.Join(t.TempDir(), "release")
 	licenses := map[string]map[string]string{
-		"alpha": {"LICENSE": "alpha license\n", "NOTICE.txt": "alpha attribution\n", "Sources/CDep/LICENSE": "nested license\n"},
-		"beta":  {"LICENSE": "beta license with no final newline"},
+		"alpha": {
+			"LICENSE": "alpha license\n", "NOTICE": "alpha notice\n", "NOTICE.txt": "alpha attribution\n",
+			"Sources/CDep/LICENSE": "nested license\n",
+		},
+		"beta": {
+			"LICENSE": "beta license with no final newline",
+			"NOTICES": "beta notices\n", "NOTICES.txt": "beta attributions with no final newline",
+		},
 	}
 	var lock struct {
 		Pins []swiftPin
