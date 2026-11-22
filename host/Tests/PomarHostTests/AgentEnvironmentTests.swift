@@ -204,18 +204,18 @@ import Foundation
     #expect(!AgentEnvironment.setupCommand(sourceSHA: sha, agent: "claude", codexSeat: true)[2].contains("pomar-terminal"))
 }
 
-// POMAR-CC-SOW-37: a real, not just string-level, regression for the
-// missing-HEAD bundle bug. internal/mirror.Bundle records a bundle's ref
-// under its own branch name, never a literal "HEAD" -- the real guest's
-// setup script ("git fetch ... HEAD") failed against exactly that shape
-// with "couldn't find remote ref HEAD" (confirmed directly against a live
-// guest this session, vm.log). This test takes the ACTUAL generated setup
-// script from AgentEnvironment.setupCommand -- not a hand-typed stand-in
-// -- redirects its hardcoded /work and /pomar/source.bundle paths into a
-// real temp sandbox, and runs the real init/fetch/checkout sequence
-// against a real branch-only bundle. If the fetch line in the real source
-// regresses to the literal "HEAD" form, this test fails for real, because
-// it executes whatever setupCommand actually emits, not a copy of it.
+// A real, not just string-level, regression for the missing-HEAD bundle bug.
+// internal/mirror.Bundle records a bundle's ref under its own branch name,
+// never a literal "HEAD" -- the real guest's setup script ("git fetch... HEAD")
+// failed against exactly that shape with "couldn't find remote ref HEAD"
+// (confirmed directly against a live guest this session, vm.log). This test
+// takes the ACTUAL generated setup script from AgentEnvironment.setupCommand --
+// not a hand-typed stand-in -- redirects its hardcoded /work and
+// /pomar/source.bundle paths into a real temp sandbox, and runs the real
+// init/fetch/checkout sequence against a real branch-only bundle. If the fetch
+// line in the real source regresses to the literal "HEAD" form, this test fails
+// for real, because it executes whatever setupCommand actually emits, not a
+// copy of it.
 @Test func bundleFetchSurvivesABranchOnlyBundleWithoutALiteralHEAD() throws {
     func run(_ args: [String], cwd: String) throws -> Int32 {
         let p = Process()

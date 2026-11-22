@@ -10,15 +10,15 @@ import (
 const pin = "c3e64a5000000000000000000000000000000001"
 const tree = "7ee0000000000000000000000000000000000002"
 
-// valid is the pilot's shape: zeocreator, its role and provider account not
-// yet allocated, so no App is named (SOW 16 §1.5, §8).
+// valid is the pilot's shape: zeocreator, its role and provider account not yet
+// allocated, so no App is named.
 func valid() Declaration {
 	return Declaration{
 		Schema: Schema, Seat: "zeocreator", Project: "zeocreator",
 		Sources: []Source{
-			{Role: "work", Repository: "zeroemployeeorg/zeocreator", Fork: "architect/zeocreator", Branch: "principal/urls", Commit: pin, Tree: tree, Destination: "work", Writable: true,
+			{Role: "work", Repository: "example-org/example-app", Fork: "example-fork/example-app", Branch: "principal/urls", Commit: pin, Tree: tree, Destination: "work", Writable: true,
 				Locks: []Lock{{Path: "uv.lock", SHA256: strings.Repeat("a", 64)}}},
-			{Role: "records", Repository: "owner/records", Fork: "architect/records", Branch: "records/zeocreator", Commit: pin, Tree: tree, Destination: "records", Writable: true},
+			{Role: "records", Repository: "owner/records", Fork: "example-fork/records", Branch: "records/zeocreator", Commit: pin, Tree: tree, Destination: "records", Writable: true},
 			{Role: "read_only", Repository: "owner/zeocore", Branch: "main", Commit: pin, Tree: tree, Destination: "deps/zeocore"},
 		},
 		Class:     "seat-linux-arm64-v1",
@@ -26,7 +26,7 @@ func valid() Declaration {
 		Network:   Network{AllowedHosts: []string{"api.anthropic.com"}},
 		Provider:  Provider{Agent: "claude", Version: "2.1.280", Account: NotEstablished},
 		Resume:    Resume{Policy: "fresh-from-sow", HandoverSOW: "records/zeocreator@abc:SOW-04"},
-		Identity: Identity{Role: NotEstablished, Forks: []string{"architect/zeocreator", "architect/records"},
+		Identity: Identity{Role: NotEstablished, Forks: []string{"example-fork/example-app", "example-fork/records"},
 			Push:        []string{"refs/heads/zeocreator/*", "refs/heads/records/zeocreator"},
 			Permissions: map[string]string{"contents": "write", "metadata": "read"}},
 	}
@@ -82,9 +82,9 @@ func TestValidateRefusesEachViolation(t *testing.T) {
 		"a missing tree":               func(d *Declaration) { d.Sources[2].Tree = "" },
 		"records without a pin":        func(d *Declaration) { d.Sources[1].Commit = "" },
 		"work not writable":            func(d *Declaration) { d.Sources[0].Writable = false },
-		"work on its golden repo":      func(d *Declaration) { d.Sources[0].Fork = "zeroemployeeorg/zeocreator" },
+		"work on its golden repo":      func(d *Declaration) { d.Sources[0].Fork = "example-org/example-app" },
 		"a writable read-only source":  func(d *Declaration) { d.Sources[2].Writable = true },
-		"a read-only source with fork": func(d *Declaration) { d.Sources[2].Fork = "architect/zeocore" },
+		"a read-only source with fork": func(d *Declaration) { d.Sources[2].Fork = "example-fork/example-dependency" },
 		"an absolute destination":      func(d *Declaration) { d.Sources[2].Destination = "/etc" },
 		"an escaping destination":      func(d *Declaration) { d.Sources[2].Destination = "../up" },
 		"an unclean destination":       func(d *Declaration) { d.Sources[2].Destination = "deps//zeocore" },
@@ -112,9 +112,11 @@ func TestValidateRefusesEachViolation(t *testing.T) {
 		"a bound role not as its bot": func(d *Declaration) {
 			d.Identity.Role, d.Identity.AppID, d.Identity.InstallationID, d.Identity.GitAuthor = "master", 1, 2, "someone <a@b.c>"
 		},
-		"a golden repo as a fork":             func(d *Declaration) { d.Identity.Forks = []string{"zeroemployeeorg/zeocreator", "architect/records"} },
-		"a fork that is also a golden source": func(d *Declaration) { d.Sources[2].Repository = "architect/records" },
-		"forks not the writable set":          func(d *Declaration) { d.Identity.Forks = []string{"architect/zeocreator"} },
+		"a golden repo as a fork": func(d *Declaration) {
+			d.Identity.Forks = []string{"example-org/example-app", "example-fork/records"}
+		},
+		"a fork that is also a golden source": func(d *Declaration) { d.Sources[2].Repository = "example-fork/records" },
+		"forks not the writable set":          func(d *Declaration) { d.Identity.Forks = []string{"example-fork/example-app"} },
 		"push to main":                        func(d *Declaration) { d.Identity.Push = []string{"refs/heads/main"} },
 		"push to another seat":                func(d *Declaration) { d.Identity.Push = []string{"refs/heads/zeonewsroom/*"} },
 		"push to another lane":                func(d *Declaration) { d.Identity.Push = []string{"refs/heads/records/zeonewsroom"} },
@@ -160,7 +162,7 @@ func TestValidateAcceptsTheAllowedShapes(t *testing.T) {
 		"a labelled account": func(d *Declaration) { d.Provider.Account = "claude-max-2" },
 		"no records source (DESIGN-01)": func(d *Declaration) {
 			d.Sources = append(d.Sources[:1], d.Sources[2:]...)
-			d.Identity.Forks, d.Identity.Push = []string{"architect/zeocreator"}, []string{"refs/heads/zeocreator/*"}
+			d.Identity.Forks, d.Identity.Push = []string{"example-fork/example-app"}, []string{"refs/heads/zeocreator/*"}
 		},
 	}
 	for name, mutate := range cases {
@@ -224,8 +226,7 @@ func TestHostsAndPathsAreStrict(t *testing.T) {
 
 // A key given twice is refused at every level, compared case-folded:
 // encoding/json would keep the last value, so the bytes, and their sha256,
-// could show one value while another validates (ZEO-RT's review of
-// c0121325, SOW 84).
+// could show one value while another validates.
 func TestParseRefusesAKeyGivenTwice(t *testing.T) {
 	good := string(encode(t, valid()))
 	if _, _, err := Parse([]byte(good)); err != nil {

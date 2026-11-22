@@ -52,8 +52,8 @@ var GuestImages = []GuestImage{
 	{Name: DefaultGuestImage, Repo: ImageRepo, Tag: ImageTag, Digest: ImageDigest, Arm64: ImageArm64, Packages: CIPackages},
 	// Node 24.21.0, the Active LTS, for npm classes and their guest proof.
 	// Slim: no compiler or headers, so it does not establish native-addon
-	// readiness. The index, the arm64 manifest and its config were each
-	// hashed and matched their digests on 2026-10-02 (POMAR-SOW-04).
+	// readiness. The index, the arm64 manifest and its config were each hashed
+	// and matched their digests on 2026-10-02.
 	{Name: "node24-slim", Repo: "docker.io/library/node", Tag: "24-bookworm-slim",
 		Digest: "sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6",
 		Arm64:  "sha256:24b8bc17702002d2ed0c1da9ad66c3ee507cc279d0856726662ff2b6fc35c149"},
@@ -70,17 +70,16 @@ var GuestImages = []GuestImage{
 	{Name: "node24-python314-chromium", Repo: "localhost/pomar/runner-tools", Tag: "20261007-v5", LocalLayout: true,
 		Digest: "sha256:498c46febe123361a398475cdf47da02426ee1b6d6982ca15f190ac5bcc320bd",
 		Arm64:  "sha256:ab317bddf37bbc3bc03e5f51b40636512b9e2ef1266983791e8e439e24a4d7ae"},
-	// The same runner tools with tmux, for interactive seats (POMAR-CC SOW 15
-	// §5): its base is the runner-tools layout plus SeatPackages. This names
-	// the image only; it qualifies no seat, agent version or class.
+	// The same runner tools with tmux, for interactive seats: its base is the
+	// runner-tools layout plus SeatPackages. This names the image only; it
+	// qualifies no seat, agent version or class.
 	{Name: "seat-runner-tools", Repo: "localhost/pomar/runner-tools", Tag: "20261007-v5", LocalLayout: true,
 		Digest:   "sha256:498c46febe123361a398475cdf47da02426ee1b6d6982ca15f190ac5bcc320bd",
 		Arm64:    "sha256:ab317bddf37bbc3bc03e5f51b40636512b9e2ef1266983791e8e439e24a4d7ae",
 		Packages: SeatPackages},
-	// The CI image with tmux, for qualifying Claude Code in an interactive
-	// seat (POMAR-CC SOW 15 §5.4) on a development host that holds no
-	// runner-tools layout. It is a qualification base only: no seat runs
-	// its work on it.
+	// The CI image with tmux, for qualifying Claude Code in an interactive seat
+	// on a development host that holds no runner-tools layout. It is a
+	// qualification base only: no seat runs its work on it.
 	{Name: "seat-qualification", Repo: ImageRepo, Tag: ImageTag, Digest: ImageDigest, Arm64: ImageArm64,
 		Packages: append(append([]debs.Package{}, CIPackages...), SeatPackages...)},
 }

@@ -426,17 +426,17 @@ type Source struct {
 	// out at the pinned commit. Jobs that read their own history need it.
 	Git  bool   `json:"git,omitempty"`
 	Base string `json:"base,omitempty"` // default "main"
-	// ReadOnly leaves /work root-owned and not writable by the job (POMAR-
-	// SOW-06 §4.2): the job writes only to its home, /tmp and its outputs.
+	// ReadOnly leaves /work root-owned and not writable by the job: the job
+	// writes only to its home, /tmp and its outputs.
 	ReadOnly bool `json:"readonly,omitempty"`
 	// SHA, when set, is the exact commit to run: it must be in Ref's history,
 	// and the start is refused otherwise. Without it, Ref is pinned to its tip
-	// at admission (the elders' ruling r30 §4.2).
+	// at admission.
 	SHA string `json:"sha,omitempty"`
 	// BaseSHA, with SHA and Git, is the base commit the job diffs against
-	// (RELEASE_BASE): the guest gets a repository at SHA with the history
-	// back to BaseSHA's merge base, and Ref is then optional. Both must be
-	// commits the mirror has (the elders' ruling of 2026-09-27 §2.4).
+	// (RELEASE_BASE): the guest gets a repository at SHA with the history back
+	// to BaseSHA's merge base, and Ref is then optional. Both must be commits
+	// the mirror has.
 	BaseSHA string `json:"base_sha,omitempty"`
 }
 
@@ -516,10 +516,9 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 	}
 	// The source is settled before capacity is claimed: the mirror synced
 	// (with configured mirrors), the commits found and their reachability
-	// judged at that sync, all before the lock, since a fetch must not hold
-	// up the other routes. A mirror that cannot be synced and a commit the
-	// mirror does not reach are refused by name, apart (the elders' ruling of
-	// 2026-09-27 17:21Z §4).
+	// judged at that sync, all before the lock, since a fetch must not hold up
+	// the other routes. A mirror that cannot be synced and a commit the mirror
+	// does not reach are refused by name, apart.
 	var sha string
 	var reach *mirror.Reach
 	// A drain refuses before any fetch; the check under the admission lock
@@ -1259,7 +1258,7 @@ func (m *Manager) writeSource(ctx context.Context, src *Source, sha, rec string)
 
 // accessArgs are the helper's flags for who the job runs as and what it may
 // write: a read-only source, or, with no source in a class that requires it,
-// the job user (POMAR-SOW-06 §4.2).
+// the job user.
 func accessArgs(src *Source, jc JobClass) []string {
 	switch {
 	case src != nil && src.ReadOnly:
@@ -1271,9 +1270,9 @@ func accessArgs(src *Source, jc JobClass) []string {
 }
 
 // verifyBases verifies each class's base once, at the manager's start and
-// before either socket is open (elders' note of 2026-09-26 on POMAR-SOW-06
-// §9). A base that fails stays unverified: starts in its class are refused
-// with base-unverified until it passes, rather than hashed inline.
+// before either socket is open. A base that fails stays unverified: starts in
+// its class are refused with base-unverified until it passes, rather than
+// hashed inline.
 func (m *Manager) verifyBases() {
 	for _, jc := range m.cfg.Classes {
 		if jc.VerifyBase == nil {
@@ -1375,10 +1374,10 @@ func (m *Manager) settleSource(id string, src *Source) (string, *mirror.Reach, e
 }
 
 // checkTimeLimits stops each live attempt that has outlived its class's time
-// limit (elders' ruling r30 §4.1 item 2): SIGTERM first, then SIGKILL once a
-// further StallWait has passed with the helper still alive. The attempt is
-// marked timed out when first signalled, and finish records it timed-out
-// whatever the helper then reports: a hung job never holds a slot for ever.
+// limit: SIGTERM first, then SIGKILL once a further StallWait has passed with
+// the helper still alive. The attempt is marked timed out when first
+// signalled, and finish records it timed-out whatever the helper then reports:
+// a hung job never holds a slot for ever.
 func (m *Manager) checkTimeLimits(live []Entry, now time.Time) {
 	for _, e := range live {
 		if e.Created.IsZero() {
@@ -1429,8 +1428,7 @@ func (m *Manager) Get(id string) (Entry, bool) {
 
 // sourceJSON is an attempt's source.json: what was asked for, what it was
 // pinned to, and how it was reachable at admission. A head-and-base start
-// records the base SHA it named, not a branch (the elders' ruling of
-// 2026-09-27 17:21Z §4).
+// records the base SHA it named, not a branch.
 func sourceJSON(src *Source, sha string, reach *mirror.Reach) map[string]any {
 	sj := map[string]any{"mirror": src.Mirror, "ref": src.Ref, "sha": sha, "git": src.Git, "reach": reach}
 	if src.BaseSHA != "" {

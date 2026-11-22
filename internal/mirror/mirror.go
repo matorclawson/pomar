@@ -30,9 +30,8 @@ var (
 )
 
 // ErrNoMirror is a mirror that is not there: never synced, or not ledgered.
-// ErrUnknownCommit is a commit the mirror does not have, or does not reach
-// the way a start requires. The manager names them apart when it refuses a
-// start (the elders' ruling of 2026-09-27 17:21Z §4).
+// ErrUnknownCommit is a commit the mirror does not have, or does not reach the
+// way a start requires. The manager names them apart when it refuses a start.
 var (
 	ErrNoMirror      = errors.New("mirror: no such mirror")
 	ErrUnknownCommit = errors.New("mirror: unknown commit")
@@ -181,10 +180,10 @@ func (m *Mirrors) Bundle(ctx context.Context, name, sha, branch, base, dst strin
 	return err
 }
 
-// ResolveAt checks that sha, a full commit SHA the caller names, is a commit of
-// mirror name and in the history of its branch, and returns it. A start that
-// names its exact commit gets that commit, never whatever the branch has
-// moved to since (the elders' ruling r30 §4.2).
+// ResolveAt checks that sha, a full commit SHA the caller names, is a commit
+// of mirror name and in the history of its branch, and returns it. A start
+// that names its exact commit gets that commit, never whatever the branch has
+// moved to since.
 func (m *Mirrors) ResolveAt(ctx context.Context, name, branch, sha string) (string, error) {
 	if !fullSHA.MatchString(sha) {
 		return "", fmt.Errorf("mirror: %q is not a full commit SHA", sha)
@@ -221,13 +220,12 @@ func (m *Mirrors) Commit(ctx context.Context, name, sha string) error {
 	return nil
 }
 
-// BundleAt writes a git bundle of exactly two commits, head and base, and
-// the history they reach, as refs/heads/head and refs/heads/base: a guest
-// that fetches it can check out head and run `git diff base...HEAD`, the
-// merge base included. The bundle is made in a throwaway bare repository
-// that borrows the mirror's objects (git alternates), so the shared mirror
-// is never written. dst must not exist (the elders' ruling of 2026-09-27
-// §2.4).
+// BundleAt writes a git bundle of exactly two commits, head and base, and the
+// history they reach, as refs/heads/head and refs/heads/base: a guest that
+// fetches it can check out head and run `git diff base...HEAD`, the merge base
+// included. The bundle is made in a throwaway bare repository that borrows the
+// mirror's objects (git alternates), so the shared mirror is never written.
+// dst must not exist.
 func (m *Mirrors) BundleAt(ctx context.Context, name, head, base, dst string) error {
 	for _, sha := range []string{head, base} {
 		if err := m.Commit(ctx, name, sha); err != nil {
@@ -276,11 +274,11 @@ type Reach struct {
 }
 
 // Reachable checks that head is a commit of mirror name reachable from a ref
-// the mirror syncs (a branch, refs/heads/*, or a pull request's,
-// refs/pull/*), and, when base is set, that base is in the history of
-// refs/heads/baseBranch. It is judged now, so the caller calls it right after
-// the sync that admits the attempt; the Reach it returns records the refs
-// and their tips as they were (the elders' ruling of 2026-09-27 17:21Z §4).
+// the mirror syncs (a branch, refs/heads/*, or a pull request's, refs/pull/*),
+// and, when base is set, that base is in the history of refs/heads/baseBranch.
+// It is judged now, so the caller calls it right after the sync that admits
+// the attempt; the Reach it returns records the refs and their tips as they
+// were.
 func (m *Mirrors) Reachable(ctx context.Context, name, head, base, baseBranch string) (Reach, error) {
 	if !m.Venue.IsOpen(venue.KindVolume, id(name)) {
 		return Reach{}, fmt.Errorf("%w %q; sync it first", ErrNoMirror, name)

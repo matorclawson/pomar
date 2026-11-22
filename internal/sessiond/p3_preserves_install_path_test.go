@@ -8,15 +8,15 @@ import (
 	"testing"
 )
 
-// council P3 on #137: no test covered CreateRequest's own JSON field, or
-// cmd/pomar/session.go's CLI flag, actually reaching seatterm.Command --
-// the existing test called checkExpectedSHA256 directly, so dropping the
-// field at either plumbing point (server.go's CreateRequest->Command
-// construction, or the CLI's own CreateRequest literal) would pass every
-// existing test while silently discarding -preserves-install-path. This
-// drives the real POST /v1/sessions route, with a correctly-hashed file,
-// so the only way it can refuse is if PreservesInstallPath actually made
-// it all the way from the request body through to the launch.
+// no test covered CreateRequest's own JSON field, or cmd/pomar/session.go's CLI
+// flag, actually reaching seatterm.Command -- the existing test called
+// checkExpectedSHA256 directly, so dropping the field at either plumbing point
+// (server.go's CreateRequest->Command construction, or the CLI's own
+// CreateRequest literal) would pass every existing test while silently
+// discarding -preserves-install-path. This drives the real POST /v1/sessions
+// route, with a correctly-hashed file, so the only way it can refuse is if
+// PreservesInstallPath actually made it all the way from the request body
+// through to the launch.
 func TestCreateRequestPlumbsPreservesInstallPathToTheLaunch(t *testing.T) {
 	_, c := serve(t, root(t))
 	dir := t.TempDir()

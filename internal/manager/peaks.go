@@ -11,10 +11,9 @@ import (
 	"github.com/rodriveracom/pomar/internal/proc"
 )
 
-// VMService is the process Virtualization.framework runs each guest in. It
-// is not the helper: the helper's own CPU and memory say nothing about the
-// guest (POMAR-SOW-03 §30.3), so an attempt's memory and CPU are read from
-// its VM service (elders' ruling r9 §2).
+// VMService is the process Virtualization.framework runs each guest in. It is
+// not the helper: the helper's own CPU and memory say nothing about the guest,
+// so an attempt's memory and CPU are read from its VM service.
 const VMService = "/System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine"
 
 // linkWindow bounds how long after its helper starts a VM service may start

@@ -6,16 +6,13 @@ import (
 )
 
 // TestStopAllDoesNotRaceASessionsOwnPump is a dedicated regression for the
-// data race council and the Architect assigned under POMAR-CC-SOW-37,
-// reproduced in the exact shape every real occurrence took (confirmed by
-// three separate council -race findings, each in a different test, all
-// through this same server-shutdown path): Server.Serve returning calls
-// stopAll, which Terminates every session List still reports Running.
-// seatterm's TermSession.pump, closing its own master once its command has
-// already exited, and Stop's signal closure reading that same master's
-// Fd() (via foregroundPgrp, once the session's reaped channel closes) are
-// two independent observers of the same process-death event, with no
-// order between them otherwise.
+// data race on the server shutdown path: Server.Serve returning calls stopAll,
+// which Terminates every session List still reports Running. seatterm's
+// TermSession.pump, closing its own master once its command has already
+// exited, and Stop's signal closure reading that same master's Fd() (via
+// foregroundPgrp, once the session's reaped channel closes) are two
+// independent observers of the same process-death event, with no order between
+// them otherwise.
 //
 // A long sequential batch of quick-exiting sessions keeps the tail of the
 // batch genuinely racing stopAll when the test returns, even though the

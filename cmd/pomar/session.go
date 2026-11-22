@@ -369,11 +369,10 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 			return 2
 		}
 		// The payload goes to the server exactly as read, never wrapped or
-		// scanned here: the server bounds it on its own (maxPasteBytes, not
-		// an ordinary send's bound) and, unless -raw, refuses any ESC byte
-		// in it before bracketing it, so a caller can't construct a request
-		// that bypasses that by wrapping it first (zeocouncil's and the
-		// Architect's BLOCKER on #128's stack).
+		// scanned here: the server bounds it on its own (maxPasteBytes, not an
+		// ordinary send's bound) and, unless -raw, refuses any ESC byte in it
+		// before bracketing it, so a caller can't construct a request that
+		// bypasses the check by wrapping the payload first.
 		req := sessiond.SendRequest{Operation: *op, Text: string(payload), Take: *take, Session: *gen, WhenReady: *ready,
 			ReadyWaitMS: int(rwait.Milliseconds()), AcceptWaitMS: int(await.Milliseconds()), Paste: true, Raw: *raw, AckUnknown: *ackUnk}
 		if *epoch >= 0 {

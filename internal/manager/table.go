@@ -64,10 +64,9 @@ type Entry struct {
 	// Class is the job class the attempt was admitted as; its caps are the
 	// guest's. An entry from before classes counts as capacity.CI.
 	Class capacity.Class `json:"class,omitzero"`
-	// HostCondition names a condition of the host that compromised the
-	// attempt while it was live; capacity.ReasonHostDiskFull is the first.
-	// An attempt with one ends failed with it as its reason, whatever its
-	// exit code (elders' ruling r9 §2).
+	// HostCondition names a condition of the host that compromised the attempt
+	// while it was live; capacity.ReasonHostDiskFull is the first. An attempt
+	// with one ends failed with it as its reason, whatever its exit code.
 	HostCondition string `json:"host_condition,omitempty"`
 	// DiskFull is read only from tables written before HostCondition.
 	DiskFull bool `json:"disk_full,omitempty"`

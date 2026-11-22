@@ -192,15 +192,14 @@ func TestPasteIsNotCappedAtAnOrdinarySendsBound(t *testing.T) {
 	}
 }
 
-// Council's P1-2: a same-ID retry of an operation that originally settled
-// as partial or uncertain must replay that EXACT original status as a
-// 409, never a fresh 200 -- stop already got this (H3); send must too.
-// recorded (the single function both send's and stop's retries go
-// through) is planted directly with a settled "partial" send, exactly as
-// the real handler would leave it, then retried through the real HTTP
-// path: both halves are checked in one test -- the server replays 409
-// (not 200), and the client's Do populates the caller's out with the
-// full result (queued/written/epoch/detail), not only the error string.
+// A same-ID retry of an operation that originally settled as partial or
+// uncertain must replay that EXACT original status as a 409, never a fresh 200
+// -- stop already got this (H3); send must too. recorded (the single function
+// both send's and stop's retries go through) is planted directly with a settled
+// "partial" send, exactly as the real handler would leave it, then retried
+// through the real HTTP path: both halves are checked in one test -- the server
+// replays 409 (not 200), and the client's Do populates the caller's out with
+// the full result (queued/written/epoch/detail), not only the error string.
 func TestSendRetryReplaysItsOriginalPartialOrUncertainStatus(t *testing.T) {
 	s, c := serve(t, root(t))
 	var made Created

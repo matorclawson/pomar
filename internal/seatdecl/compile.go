@@ -29,9 +29,9 @@ type Class struct {
 	Agents      map[string]Agent `json:"agents"` // key: "<agent>@<version>"
 }
 
-// Agent is one pinned agent package in a class. A seat runs only an agent
-// whose interactive qualification is recorded (SOW 15 §2.3, §5.4); the
-// headless qualification alone doesn't admit a seat.
+// Agent is one pinned agent package in a class. A seat runs only an agent whose
+// interactive qualification is recorded; the headless qualification alone
+// doesn't admit a seat.
 type Agent struct {
 	Archive              string   `json:"archive"`
 	ArchiveSHA256        string   `json:"archive_sha256"`
@@ -39,9 +39,9 @@ type Agent struct {
 	RequiredHosts        []string `json:"required_hosts"`
 }
 
-// Binding is one source as the environment will receive it: the declared
-// pins and destination, matched later to the owner's verified source
-// artifact (SOW 16 §2). It carries no GitHub authority.
+// Binding is one source as the environment will receive it: the declared pins
+// and destination, matched later to the owner's verified source artifact. It
+// carries no GitHub authority.
 type Binding struct {
 	Role        string `json:"role"`
 	Repository  string `json:"repository"`

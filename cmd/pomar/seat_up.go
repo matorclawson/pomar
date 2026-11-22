@@ -21,7 +21,7 @@ import (
 	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
-// The seat lifecycle commands (POMAR-CC SOW 15 §4):
+// The seat lifecycle commands:
 //
 //	pomar seat profile SEAT -classes FILE -source-bundle FILE
 //	    compiles the seat's current declaration against the owner's seat

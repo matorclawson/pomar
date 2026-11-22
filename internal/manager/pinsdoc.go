@@ -10,10 +10,10 @@ import (
 	"github.com/rodriveracom/pomar/internal/result"
 )
 
-// The pins document (POMAR-SOW-06 §4.1; elders' ruling r26 §4.1): what an
-// attempt runs with, written once into its record at admission and copied
-// into its guest at /pomar/pins.json (root-owned, mode 0444) before the
-// command is released. `pomar attempt pins` prints the same bytes.
+// The pins document: what an attempt runs with, written once into its record at
+// admission and copied into its guest at /pomar/pins.json (root-owned, mode
+// 0444) before the command is released. `pomar attempt pins` prints the same
+// bytes.
 const (
 	PinsSchema  = "pomar.pins/v1"
 	pinsName    = "pins.json"

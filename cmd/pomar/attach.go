@@ -22,11 +22,11 @@ import (
 
 var environmentName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
 
-// seatAttach opens a seat environment's interactive terminal (SOW 15 §4,
-// §5): it binds the terminal to the environment's current session and
-// incarnation, puts the local terminal in raw mode, and carries it until
-// the seat's terminal closes. Detaching is tmux's own Ctrl-b d, and the
-// seat keeps running; a dropped connection leaves it running too.
+// seatAttach opens a seat environment's interactive terminal: it binds the
+// terminal to the environment's current session and incarnation, puts the local
+// terminal in raw mode, and carries it until the seat's terminal closes.
+// Detaching is tmux's own Ctrl-b d, and the seat keeps running; a dropped
+// connection leaves it running too.
 func seatAttach(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("seat attach", flag.ContinueOnError)
 	fs.SetOutput(stderr)

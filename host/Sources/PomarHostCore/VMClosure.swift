@@ -1,8 +1,8 @@
 import Foundation
 
-// sow: pomar-SOW-87. These are acknowledgments from the VM-owning helper,
-// not proof inferred from a missing process or directory. The manager must
-// bind them to its original helper identity before publishing a closure.
+// These are acknowledgments from the VM-owning helper, not proof inferred from
+// a missing process or directory. The manager must bind them to its original
+// helper identity before publishing a closure.
 enum VMClosure {
     static func acknowledge(
         stop: () async throws -> Void,

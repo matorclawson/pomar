@@ -1,8 +1,8 @@
-// Package boundary is the guest boundary self-test (POMAR-SOW-06 §4.3; the
-// elders' ruling r26 §4.3): a fixed probe that runs as the job in a real
-// guest and reports what it can reach, and the host-side checks that grade
-// its report. The probe only reports; every judgement is made here, in Go,
-// on the host. A missing or untestable line fails its check.
+// Package boundary provides the guest boundary self-test, a fixed probe that
+// runs as the job in a real guest and reports what it can reach, and the
+// host-side checks that grade its report. The probe only reports; every
+// judgement is made here, in Go, on the host. A missing or untestable line
+// fails its check.
 package boundary
 
 import (
@@ -46,7 +46,7 @@ cat "$out"
 // ReportName is the probe's output, copied out of the guest.
 const ReportName = "boundaries.txt"
 
-// The four checks, with the names profrod-site's workshop uses (#744 item 7).
+// The four checks reported by the boundary probe.
 const (
 	CheckNetwork  = "candidate_cannot_reach_public_network"
 	CheckHome     = "candidate_cannot_read_home"

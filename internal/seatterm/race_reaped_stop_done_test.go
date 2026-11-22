@@ -5,16 +5,16 @@ import (
 	"testing"
 )
 
-// TestReapedThenStopThenDoneHasNoDataRace is council's own targeted
-// reproducer for the s.master lifetime race (POMAR-CC-SOW-37 rev2 F1): for
-// each of a hundred quick-exiting sessions, wait for s.reaped to close (the
-// leader is gone, its pid free), then call Stop, then wait for Done. This
-// exercises exactly the ordering pump() and Stop()'s signal closure race on
-// -- s.reaped closing unblocks Stop's foregroundPgrp(s.master) read at the
-// same moment pump's own EIO can be closing s.master -- without depending on
-// sessiond's shutdown timing, which the earlier
-// TestStopAllDoesNotRaceASessionsOwnPump regression (kept as supporting
-// evidence, not the required regression) only reproduced unreliably.
+// TestReapedThenStopThenDoneHasNoDataRace is a targeted reproducer for the
+// s.master lifetime race: for each of a hundred quick-exiting sessions, wait
+// for s.reaped to close (the leader is gone, its pid free), then call Stop,
+// then wait for Done. This exercises exactly the ordering pump() and Stop()'s
+// signal closure race on -- s.reaped closing unblocks Stop's
+// foregroundPgrp(s.master) read at the same moment pump's own EIO can be
+// closing s.master -- without depending on sessiond's shutdown timing, which
+// the earlier TestStopAllDoesNotRaceASessionsOwnPump regression (kept as
+// supporting evidence, not the required regression) only reproduced
+// unreliably.
 func TestReapedThenStopThenDoneHasNoDataRace(t *testing.T) {
 	h, _ := newHost(t)
 	for i := 0; i < 100; i++ {

@@ -102,7 +102,7 @@ func TestStartChoosesTheNamedClass(t *testing.T) {
 }
 
 // Class names follow the attempt-id pattern: lower-case letters, digits and
-// dashes (the elders' ruling of 2026-09-27 §1.3).
+// dashes.
 func TestJobClassNamesArePatternChecked(t *testing.T) {
 	v, _ := openFixtureVenue(t.TempDir())
 	v.Init()

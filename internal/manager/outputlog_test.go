@@ -101,10 +101,10 @@ func TestFinishRecordsAndServesTheLog(t *testing.T) {
 	}
 }
 
-// The log is checked against the result's output_log, never the response's
-// own header: a log served with bytes and a header that agree with each other
-// but not with the result is refused (the elders' ruling of 2026-09-27 17:21Z
-// §4). With the pinned key, the result's signature is verified first.
+// The log is checked against the result's output_log, never the response's own
+// header: a log served with bytes and a header that agree with each other but
+// not with the result is refused. With the pinned key, the result's signature
+// is verified first.
 func TestLogIsCheckedAgainstTheSignedResult(t *testing.T) {
 	m, ctl, v := openSigning(t, true)
 	id := "log-2"

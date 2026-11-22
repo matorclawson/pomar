@@ -104,8 +104,8 @@ type EnvironmentProfile struct {
 	Qualification        bool                  `json:"qualification,omitempty"`
 	QualificationFixture *QualificationFixture `json:"qualificationFixture,omitempty"`
 
-	// Seat makes this an interactive seat's profile (POMAR-CC SOW 15 §5): a
-	// pinned Claude Code or Codex agent with no controller capabilities.
+	// Seat makes this an interactive seat's profile: a pinned Claude Code or
+	// Codex agent with no controller capabilities.
 	Seat string `json:"seat,omitempty"`
 	// SeatDeclarationSHA256 binds a seat profile, and so every environment
 	// made from it, to the one declaration it was compiled from.

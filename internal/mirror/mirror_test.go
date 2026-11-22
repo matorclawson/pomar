@@ -313,9 +313,8 @@ func TestBundleAtPullRequestHead(t *testing.T) {
 }
 
 // Reachable judges, at the sync, that a head is reached by a synced branch or
-// pull request and a base by its branch, and records the refs with their
-// tips; it names a commit it cannot place apart from a missing mirror (the
-// elders' ruling of 2026-09-27 17:21Z §4).
+// pull request and a base by its branch, and records the refs with their tips;
+// it names a commit it cannot place apart from a missing mirror.
 func TestReachable(t *testing.T) {
 	m, env, up, sha1 := setup(t)
 	ctx := context.Background()

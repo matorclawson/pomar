@@ -246,7 +246,7 @@ func fileSHA256(path string) (string, error) {
 
 // RecordedSHA256 returns the sha256 recorded when the base at rootfs (a path
 // Path or Verify returned) was built. It reads the record; it does not hash
-// the rootfs, which is gigabytes (elders' ruling r26 §4.1).
+// the rootfs, which is gigabytes.
 func RecordedSHA256(rootfs string) (string, error) {
 	b, err := os.ReadFile(filepath.Join(filepath.Dir(rootfs), "rootfs.sha256"))
 	if err != nil {
@@ -261,7 +261,7 @@ func RecordedSHA256(rootfs string) (string, error) {
 
 // ErrUnverified is returned when a base has not been verified since this
 // machine booted: its hash is checked when the manager starts, never on an
-// attempt's path (elders' note of 2026-09-26 on POMAR-SOW-06 §9).
+// attempt's path.
 var ErrUnverified = errors.New("base: not verified since this boot")
 
 // Verified returns the rootfs path of a base that was verified since this

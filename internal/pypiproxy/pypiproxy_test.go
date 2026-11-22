@@ -228,8 +228,8 @@ func TestLockedFileIsCheckedCachedAndServed(t *testing.T) {
 	}
 }
 
-// The ruled test (POMAR-SOW-05 §7, PR 3): a file whose hash is not in the
-// lock is refused, and the upstream is never asked for it.
+// The ruled test: a file whose hash is not in the lock is refused, and the
+// upstream is never asked for it.
 func TestFileNotInLockIsRefused(t *testing.T) {
 	up, srv, cache := setup(t)
 	get(t, srv, "/simple/demo/")

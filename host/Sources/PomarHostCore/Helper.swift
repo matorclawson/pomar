@@ -458,7 +458,7 @@ public enum Helper {
                 config.interfaces = []
                 // With no interface there is nothing to resolve through: the
                 // guest's resolv.conf names no resolver, instead of whatever
-                // the image carries (elders' ruling r26 §4.3).
+                // the image carries.
                 config.dns = Helper.noResolver
                 if let sock = o.proxySocket {
                     config.sockets = [

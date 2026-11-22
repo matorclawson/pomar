@@ -24,9 +24,9 @@ export PATH="$HOME/.local/share/pomar/current/bin:$PATH"
 pomar version
 ```
 
-Use [the development manager guide](operations.md#development-manager) to
-start your own foreground manager in a dedicated private root. If you already
-have a manager, use the control socket and class supplied by its host owner.
+Continue with the [development manager quickstart](operations.md#development-manager)
+to run your first local job. For an existing signing-enabled manager, use the
+[signed-manager workflow](operations.md#submit-inspect-and-verify-a-job).
 
 ## Download
 

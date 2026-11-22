@@ -1,9 +1,8 @@
-// Package seatterm carries an interactive seat's terminal: a bounded,
-// typed byte stream between the operator's attach client and a PTY in the
-// seat's guest (POMAR-CC SOW 15 §5, as corrected by SOW 16 §3). It carries
-// keystrokes, screen bytes and window size, and nothing else: no files, no
-// ports, no command but the fixed one it is given. Nothing it carries is
-// recorded.
+// Package seatterm carries an interactive seat's terminal: a bounded, typed
+// byte stream between the operator's attach client and a PTY in the seat's
+// guest. It carries keystrokes, screen bytes and window size, and nothing else:
+// no files, no ports, no command but the fixed one it is given. Nothing it
+// carries is recorded.
 package seatterm
 
 import (
@@ -104,10 +103,10 @@ func ResizePayload(cols, rows uint16) []byte {
 	return b
 }
 
-// ProtocolV2 is the session host's stream (POMAR-CC SOW 27 §3.2): the same
-// frames as v1, plus Notice and the meta frames (Control, Presence, State),
-// carrying the exact screen on attach and then the session's live output.
-// v1 streams never carry either, and ReadFrame keeps refusing them.
+// ProtocolV2 is the session host's stream: the same frames as v1, plus Notice
+// and the meta frames (Control, Presence, State), carrying the exact screen on
+// attach and then the session's live output. v1 streams never carry either, and
+// ReadFrame keeps refusing them.
 const ProtocolV2 = "pomar-terminal/v2"
 
 // Notice is a v2 frame from the session host to a client: a short line of

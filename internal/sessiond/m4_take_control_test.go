@@ -10,12 +10,12 @@ import (
 	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
-// council M4: an attached operator must never be locked out of a session
-// he's attached to. This proves the end-to-end path a held Ctrl-^ drives
-// (cmd/pomar's takeKeyReader is unit-tested separately for the byte-level
-// part): a dispossessed controller asks for control back over the same
-// Requests channel sessionAttach wires to that key, and gets it, without
-// detaching and reattaching with -take.
+// an attached operator must never be locked out of a session he's attached to.
+// This proves the end-to-end path a held Ctrl-^ drives (cmd/pomar's
+// takeKeyReader is unit-tested separately for the byte-level part): a
+// dispossessed controller asks for control back over the same Requests channel
+// sessionAttach wires to that key, and gets it, without detaching and
+// reattaching with -take.
 func TestADispossessedControllerTakesControlBackWithoutDetaching(t *testing.T) {
 	_, c := serve(t, root(t))
 	req := shell("op-1", "work", `printf 'ready\n'; while read l; do printf 'got:%s\n' "$l"; done`)

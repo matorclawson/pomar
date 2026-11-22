@@ -114,8 +114,7 @@ func openNamedClassSockets(t *testing.T, ciName string) (*Manager, *Client, *Cli
 }
 
 // Through the control socket, a caller sees and uses only the classes its uid
-// is allowed; the owner's socket is not scoped (the council's ruling of
-// 2026-10-01 23:11Z §3).
+// is allowed; the owner's socket is not scoped.
 func TestControlSocketScopesEveryAttemptRouteByClass(t *testing.T) {
 	m, owner, ctl := openTwoClassSockets(t)
 	mine, theirs := terminalEntry("mine-1"), terminalEntry("theirs-1")

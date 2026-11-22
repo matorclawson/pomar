@@ -26,17 +26,17 @@ const (
 	ImageDigest = "sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452"
 	// ImageArm64 keys the base root filesystem built from the image.
 	ImageArm64 = "sha256:4220c5d84f685eb34a728d389bab47674b46f433b5218ae9a75a5fbd5e0be724"
-	// BaseSizeBytes is the ext4 capacity of a base (and so of each clone).
-	// The ext4 image is sparse and each clone is copy-on-write, so the host
-	// pays only for what is written; the capacity bounds what one guest can
-	// write. 2 GiB was too small for a Go gate with -race (POMAR-SOW-03 §36).
+	// BaseSizeBytes is the ext4 capacity of a base (and so of each clone). The
+	// ext4 image is sparse and each clone is copy-on-write, so the host pays
+	// only for what is written; the capacity bounds what one guest can write. 2
+	// GiB was too small for a Go gate with -race.
 	BaseSizeBytes = 16 << 30
 )
 
 // CIPackages are the Debian packages the CI class's base carries beyond its
-// image (elders' ruling r12 §3): jq and the libraries it links, from the
-// bookworm arm64 archive, each pinned to the sha256 its Packages index lists.
-// A changed list is a new base. Each addition is named in a SOW.
+// image: jq and the libraries it links, from the bookworm arm64 archive, each
+// pinned to the sha256 its Packages index lists. A changed list is a new base.
+// Each addition is named in a SOW.
 var CIPackages = []debs.Package{
 	{Name: "jq", URL: "https://deb.debian.org/debian/pool/main/j/jq/jq_1.6-2.1+deb12u2_arm64.deb",
 		SHA256: "c232e9407e0f47006dd6077804c1274fd2e4f8be02efc78822db748ed65bea99"},
@@ -47,10 +47,9 @@ var CIPackages = []debs.Package{
 }
 
 // SeatPackages carry tmux into a seat's base: the terminal an interactive
-// seat's operator attaches to (POMAR-CC SOW 15 §5, SOW 16 §3). Bookworm's
-// tmux 3.3a-3 and the library dependencies its images don't already ship,
-// each fetched from the archive and matched to the arm64 Packages index on
-// 2026-10-09. No maintainer script runs.
+// seat's operator attaches to. Bookworm's tmux 3.3a-3 and the library
+// dependencies its images don't already ship, each fetched from the archive and
+// matched to the arm64 Packages index on 2026-10-09. No maintainer script runs.
 //
 // Every path these packages carry is under /usr. A package with top-level
 // /bin, /sbin, /lib or /lib64 paths would replace a merged-/usr image's

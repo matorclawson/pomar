@@ -13,17 +13,17 @@ import (
 	"github.com/rodriveracom/pomar/internal/sessiond"
 )
 
-// council P3-B on #137: internal/sessiond's own test for -preserves-install-path
+// internal/sessiond's own test for -preserves-install-path
 // (TestCreateRequestPlumbsPreservesInstallPathToTheLaunch) posts a
-// CreateRequest directly to the HTTP route and never touches this file at
-// all, so it proves nothing about the CLI's own flag literal at
-// session.go's `new` case -- dropping -preserves-install-path from that
-// sessiond.CreateRequest{...} construction (session.go:200) would pass
-// every existing test while silently discarding the flag a caller
-// actually typed. This drives the real `pomar session new
-// -preserves-install-path -expected-sha256 ...` command line through
-// run(), so the only way it can refuse is if the CLI's own flag parsing
-// and request construction carried the flag all the way to the launch.
+// CreateRequest directly to the HTTP route and never touches this file at all,
+// so it proves nothing about the CLI's own flag literal at session.go's `new`
+// case -- dropping -preserves-install-path from that
+// sessiond.CreateRequest{...} construction (session.go:200) would pass every
+// existing test while silently discarding the flag a caller actually typed.
+// This drives the real `pomar session new -preserves-install-path
+// -expected-sha256...` command line through run(), so the only way it can
+// refuse is if the CLI's own flag parsing and request construction carried the
+// flag all the way to the launch.
 func TestSessionNewCLIPlumbsPreservesInstallPathToTheLaunch(t *testing.T) {
 	dir, _ := os.MkdirTemp("/tmp", "pscpip")
 	t.Cleanup(func() { os.RemoveAll(dir) })

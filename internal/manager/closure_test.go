@@ -1,6 +1,6 @@
 package manager
 
-// sow: pomar-SOW-87. Persisted-boundary fixtures, not real VM or power-loss proof.
+// Persisted-boundary fixtures, not real VM or power-loss proof.
 import (
 	"bytes"
 	"context"

@@ -287,8 +287,8 @@ func (a *Actor) requestPermission(args json.RawMessage) string {
 		return denyText(refusal)
 	}
 	a.nextPermission++
-	// The actor's nonce keeps request IDs, and so the broker's permission
-	// IDs, distinct across actors and incarnations (POMAR-CC SOW 06 finding 2).
+	// The actor's nonce keeps request IDs, and so the broker's permission IDs,
+	// distinct across actors and incarnations.
 	id, _ := json.Marshal(fmt.Sprintf("claude-permission-%s-%d", a.nonce, a.nextPermission))
 	w := &permissionWait{input: p.Input, decision: make(chan string, 1)}
 	if a.permissions == nil {

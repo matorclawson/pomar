@@ -19,11 +19,11 @@ import (
 	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
-// An interactive seat (POMAR-CC SOW 15 §5, SOW 16 §3): -actor seat runs no
-// headless actor. The broker socket serves the seat's terminal, bound to
-// this environment's session and incarnation, and its session record; the
-// seat's tmux session, run as the coding user, holds only the supervisor,
-// which starts the pinned Claude Code when the operator asks.
+// An interactive seat: -actor seat runs no headless actor. The broker socket
+// serves the seat's terminal, bound to this environment's session and
+// incarnation, and its session record; the seat's tmux session, run as the
+// coding user, holds only the supervisor, which starts the pinned Claude Code
+// when the operator asks.
 const (
 	seatUID, seatGID = 1000, 1000
 	seatHome         = "/pomar/job"
@@ -49,10 +49,10 @@ func seatEnv() []string {
 	return append(claudeactor.GuestEnv(seatHome, seatConfigDir, seatPath), "TERM=xterm-256color", "LANG=C.UTF-8")
 }
 
-// agentArgs are Claude Code's fixed arguments in a seat: Pomar's own tools
-// and Bash rules under --restricted, as for the headless actor, so neither
-// a repository nor the agent can loosen them. Permission prompts go to the
-// operator at the terminal, not to a bridge (SOW 16 §3.5).
+// agentArgs are Claude Code's fixed arguments in a seat: Pomar's own tools and
+// Bash rules under --restricted, as for the headless actor, so neither a
+// repository nor the agent can loosen them. Permission prompts go to the
+// operator at the terminal, not to a bridge.
 func agentArgs() []string {
 	return []string{"--restricted", "--tools", claudeactor.GuestTools, "--settings", claudeactor.BashRules}
 }

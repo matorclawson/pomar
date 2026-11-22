@@ -1,6 +1,6 @@
 package manager
 
-// sow: pomar-SOW-87. The legacy decoder must fail before dropping new evidence.
+// The legacy decoder must fail before dropping new evidence.
 import (
 	"bytes"
 	"encoding/json"

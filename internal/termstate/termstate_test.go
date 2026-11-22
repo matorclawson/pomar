@@ -85,9 +85,8 @@ func same(a, b *Terminal) string {
 }
 
 // A snapshot taken at any point, followed by what is forwarded after it,
-// renders exactly what the uninterrupted stream does (ZEOAPP's
-// continuation requirement, SOW179). Every cut of every fixture is tried,
-// cuts inside characters and sequences included.
+// renders exactly what the uninterrupted stream does. Try every cut of
+// every fixture, including cuts inside characters and sequences.
 func TestASnapshotPlusWhatFollowsEqualsTheWholeStream(t *testing.T) {
 	skipped := 0
 	for name, stream := range fixtures {
@@ -149,9 +148,8 @@ func TestQueriesAreAnsweredAndNotForwarded(t *testing.T) {
 
 // A string past maxString (64 KiB) is forwarded raw, unbuffered; but once a
 // bare ESC aborts it (never a backslash), the model must stop believing it's
-// still inside that string, or every later query for the rest of the
-// session goes unintercepted and the client's screen drifts from the
-// model's (zeocouncil's review of #127, LOW 1).
+// still inside that string, or every later query for the rest of the session
+// goes unintercepted and the client's screen drifts from the model's.
 func TestAQueryAfterAnOverlongAbortedStringIsStillIntercepted(t *testing.T) {
 	term := New(80, 24, 0)
 	long := strings.Repeat("Q", maxString+1000)
@@ -174,14 +172,13 @@ func TestAQueryAfterAnOverlongAbortedStringIsStillIntercepted(t *testing.T) {
 	}
 }
 
-// zeocouncil's delta review of #127 (ans_2f39c5837fd5ccb8, a MEDIUM on the
-// first fix): the aborted ESC must never reach the client on its own,
-// neither forwarded immediately by passString nor left dangling for a real
-// terminal to pair with whatever comes next. The exact attack: an overlong
-// OSC, then a query the host answers in the model's place (so nothing of it
-// is forwarded), then plaintext that happens to start like an OSC 52
-// clipboard write. A client that only has the forwarded bytes, with no
-// model of its own, must never see that as a real OSC.
+// the aborted ESC must never reach the client on its own, neither forwarded
+// immediately by passString nor left dangling for a real terminal to pair with
+// whatever comes next. The exact attack: an overlong OSC, then a query the host
+// answers in the model's place (so nothing of it is forwarded), then plaintext
+// that happens to start like an OSC 52 clipboard write. A client that only has
+// the forwarded bytes, with no model of its own, must never see that as a real
+// OSC.
 func TestAnInterceptedQueryNeverLeavesADanglingEscape(t *testing.T) {
 	term := New(80, 24, 0)
 	long := strings.Repeat("Q", maxString+1000)
@@ -198,13 +195,12 @@ func TestAnInterceptedQueryNeverLeavesADanglingEscape(t *testing.T) {
 	if bytes.HasPrefix(out[max(0, i-7):], []byte("\x1b]52;c;QUJD")) {
 		t.Fatalf("the smuggled OSC 52 rode through whole: %q", out[max(0, i-10):i+10])
 	}
-	// zeocouncil's residual LOW on #127: an intercepted query forwards
-	// nothing of its own, so the client needs its own signal that the
-	// string ended there, or it keeps swallowing everything after as
-	// string data until some later BEL or ST. A synthesized ST must sit
-	// right before the plaintext, so a client replaying these bytes
-	// reaches ground (the string closed) before it sees "]52;c;QUJD" as
-	// what it actually is: inert text, not string content.
+	// an intercepted query forwards nothing of its own, so the client needs its
+	// own signal that the string ended there, or it keeps swallowing everything
+	// after as string data until some later BEL or ST. A synthesized ST must
+	// sit right before the plaintext, so a client replaying these bytes reaches
+	// ground (the string closed) before it sees "]52;c;QUJD" as what it
+	// actually is: inert text, not string content.
 	if !bytes.Contains(out, []byte("\x1b\\]52;c;QUJD")) {
 		t.Fatalf("no synthesized ST closes the client's string before the plaintext: %q", lastBytes(out, 40))
 	}
@@ -299,10 +295,9 @@ func TestASnapshotHoldsNoQuery(t *testing.T) {
 }
 
 // A bare ESC inside an OSC or DCS string ends it there, unterminated: its
-// content is never applied, and the ESC (with what follows) is reprocessed
-// as a fresh sequence, so a smuggled OSC hiding inside what looked like a
-// title is parsed for real, not swallowed as inert text and replayed on
-// every snapshot (zeocouncil's review of #126, LOW 2).
+// content is never applied, and the ESC (with what follows) is reprocessed as a
+// fresh sequence, so a smuggled OSC hiding inside what looked like a title is
+// parsed for real, not swallowed as inert text and replayed on every snapshot.
 func TestABareESCEndsAnOSCOrDCSString(t *testing.T) {
 	term := New(80, 24, 0)
 	// The outer OSC 2 (set title) never completes: a nested OSC 52 (set the
@@ -344,9 +339,9 @@ func TestTheTitleNeverHoldsAControlByte(t *testing.T) {
 }
 
 // A flood of combining marks on one cell is bounded, not stored whole: the
-// cell, and so every Snapshot that reconstructs it, stays small however
-// many marks a program (hostile or not) sends (zeocouncil's review of
-// #126, MEDIUM: unbounded growth under the session lock).
+// cell, and so every Snapshot that reconstructs it, stays small however many
+// marks a program (hostile or not) sends (the session lock must not permit
+// unbounded growth).
 func TestCombiningMarksAreBoundedPerCell(t *testing.T) {
 	term := New(80, 24, 0)
 	term.Feed([]byte("e" + strings.Repeat("́", 10000))) // 'e' plus 10000 acute accents
@@ -428,13 +423,12 @@ func TestRandomStreamsContinueExactlyFromAnyCut(t *testing.T) {
 // repeats finds a REP (repeat the last character) in a stream.
 var repeats = regexp.MustCompile("\x1b\\[[0-9]*b")
 
-// FuzzFeedNeverPanics feeds raw, often malformed bytes to a fresh
-// terminal: truncated escapes, a huge CSI parameter, a flood of
-// combining marks, a nested OSC inside an unterminated one, and invalid
-// UTF-8 among them. Nothing here is well-formed by construction, unlike
-// tokens above, which TestRandomStreamsContinueExactlyFromAnyCut draws
-// from (zeocouncil's review of #126, LOW 5: "fuzzed" there is a seeded
-// search over well-formed tokens only, never hostile input).
+// FuzzFeedNeverPanics feeds raw, often malformed bytes to a fresh terminal:
+// truncated escapes, a huge CSI parameter, a flood of combining marks, a
+// nested OSC inside an unterminated one, and invalid UTF-8 among them. Nothing
+// here is well-formed by construction, unlike tokens above, which
+// TestRandomStreamsContinueExactlyFromAnyCut draws from (the other search uses
+// well-formed tokens only).
 func FuzzFeedNeverPanics(f *testing.F) {
 	for _, s := range []string{
 		"", "\x1b", "\x1b[", "\x1b]", "\x1bP", "\x1b]2;x\x1b]52;c;QkFE\x07y\x07",
@@ -443,8 +437,8 @@ func FuzzFeedNeverPanics(f *testing.F) {
 		strings.Repeat("\xff", 200), "\xc0\x80", "\xed\xa0\x80", "\xe2\x28\xa1",
 		fixtures["queries"], fixtures["rep and erase"],
 		// An OSC past maxString (64 KiB), aborted by a bare ESC (never a
-		// backslash), then a real query: zeocouncil's #127 LOW 1, reached
-		// only once an input can exceed maxString, past the old truncation.
+		// backslash), then a real query: the regression is reached only once
+		// an input can exceed maxString, past the old truncation.
 		"\x1b]52;c;" + strings.Repeat("Q", 70000) + "\x1b[6n",
 	} {
 		f.Add([]byte(s))

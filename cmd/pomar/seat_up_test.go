@@ -121,14 +121,14 @@ func declareSeat(t *testing.T, s seatapi.Store, version string) string {
 // declareSeatAt declares zeocreator with its work and records sources at pin.
 func declareSeatAt(t *testing.T, s seatapi.Store, version, pin string) string {
 	t.Helper()
-	sources := []seatdecl.Source{{Role: "work", Repository: "zeroemployeeorg/zeocreator", Fork: "architect/zeocreator", Branch: "main", Commit: pin, Tree: pin, Destination: "work", Writable: true}}
-	sources = append(sources, seatdecl.Source{Role: "records", Repository: "owner/records", Fork: "architect/records", Branch: "records/zeocreator", Commit: pin, Tree: pin, Destination: "records", Writable: true})
+	sources := []seatdecl.Source{{Role: "work", Repository: "example-org/example-app", Fork: "example-fork/example-app", Branch: "main", Commit: pin, Tree: pin, Destination: "work", Writable: true}}
+	sources = append(sources, seatdecl.Source{Role: "records", Repository: "owner/records", Fork: "example-fork/records", Branch: "records/zeocreator", Commit: pin, Tree: pin, Destination: "records", Writable: true})
 	d := seatdecl.Declaration{Schema: seatdecl.Schema, Seat: "zeocreator", Project: "zeocreator",
 		Sources: sources,
 		Class:   "seat-linux-arm64-v1", Resources: seatdecl.Resources{CPUs: 2, MemoryGiB: 4, DiskGiB: 16},
 		Provider: seatdecl.Provider{Agent: "claude", Version: version, Account: seatdecl.NotEstablished},
 		Resume:   seatdecl.Resume{Policy: "fresh-from-sow", HandoverSOW: "x"},
-		Identity: seatdecl.Identity{Role: seatdecl.NotEstablished, Forks: []string{"architect/zeocreator", "architect/records"},
+		Identity: seatdecl.Identity{Role: seatdecl.NotEstablished, Forks: []string{"example-fork/example-app", "example-fork/records"},
 			Push: []string{"refs/heads/zeocreator/*"}, Permissions: map[string]string{"contents": "write", "metadata": "read"}}}
 	raw, _ := json.Marshal(d)
 	cur, _, _ := s.Current("zeocreator")
@@ -333,10 +333,9 @@ func up(root, rec, classes string) (int, string) {
 	return code, errb.String()
 }
 
-// A running environment made from an older declaration is never reported
-// as the seat, though the seat's location is current: up refuses, and
-// leaves the environment and its incarnation as they are (the POMAR
-// Codex's review of #103).
+// A running environment made from an older declaration is never reported as
+// the seat, though the seat's location is current: up refuses, and leaves the
+// environment and its incarnation as they are.
 func TestSeatUpRefusesARunningEnvironmentFromAStaleDeclaration(t *testing.T) {
 	for name, change := range map[string]func(store seatapi.Store) string{
 		"source":   func(s seatapi.Store) string { return declareSeatAt(t, s, "2.1.280", strings.Repeat("d", 40)) },
@@ -400,10 +399,9 @@ func carryRecords(t *testing.T) {
 	t.Cleanup(func() { carriedSources = prev })
 }
 
-// This host's location is its configuration's statement, never the
-// caller's flag (ZEO-RT's review, SOW 84): a host naming no location starts
-// no seat, a -here that disagrees with the host is refused, and -here may
-// be left out.
+// This host's location is its configuration's statement, never the caller's
+// flag: a host naming no location starts no seat, a -here that disagrees with
+// the host is refused, and -here may be left out.
 func TestSeatUpTakesThisHostsLocationFromItsConfiguration(t *testing.T) {
 	carryRecords(t)
 	for _, c := range []struct {

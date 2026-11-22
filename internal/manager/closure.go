@@ -1,6 +1,6 @@
 package manager
 
-// sow: pomar-SOW-87. This is trusted execution evidence, not release approval.
+// This is trusted execution evidence, not release approval.
 import (
 	"bytes"
 	"encoding/base64"

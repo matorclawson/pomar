@@ -60,7 +60,7 @@ func TestVenueUnaccountedExit(t *testing.T) {
 // A result reply as the manager serves it (and `pomar attempt result` prints
 // it) verifies as received, with <, >, & and non-ASCII in the document. A
 // re-indented or edited copy does not: the verifier checks the bytes it
-// received, never a rebuilt document (the elders' ruling of 2026-09-27 §2.1).
+// received, never a rebuilt document.
 func TestResultVerifyChecksTheReceivedBytes(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "keys")
 	if err := os.Mkdir(dir, 0o700); err != nil {

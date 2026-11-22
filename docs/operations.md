@@ -2,7 +2,9 @@
 
 ## Choose the manager
 
-Use the exact approved control socket given by your host owner:
+For a first job on your own Mac, start with the [development manager quickstart](#development-manager).
+For an existing signing-enabled manager, use the approved control socket given
+by its host owner:
 
 ```sh
 export POMAR_SOCKET=/path/to/approved/control.sock
@@ -31,13 +33,18 @@ Flags precede positional arguments or the job's `--` separator.
 
 ## Submit, inspect and verify a job
 
+This workflow uses a manager configured to sign results. Obtain its public key
+from the owner independently of the replies you will verify. Result signing
+requires a manager running under a dedicated role account. The development
+manager below runs under your ordinary account and returns unsigned results.
+
 ```sh
 pomar run -id build-1 -class YOUR_CLASS \
   -mirror YOUR_CONFIGURED_MIRROR -ref refs/heads/main -sha FULL_COMMIT -- /bin/echo hello
 pomar attempt get -id build-1
-pomar logs -id build-1
 pomar attempt result -id build-1 > build-1.result.json
 pomar result verify -reply build-1.result.json -public-key YOUR_PINNED_PUBLIC_KEY
+pomar logs -id build-1 -public-key YOUR_PINNED_PUBLIC_KEY
 ```
 
 The manager resolves and materializes its configured source mirror, so a caller
@@ -78,32 +85,48 @@ than resetting its workspace or rebinding it to changed source.
 
 ## Development manager
 
-Use a new absolute, dedicated root, separate from service data and provider
-state. The foreground server commands require the root in argv; it cannot be
-inherited from `POMAR_DATA_ROOT`. They refuse root execution and bind the host
-and shim to the same installed release as the CLI.
+[Install Pomar](install.md#build-and-install-from-source) first. Run both
+terminals as your ordinary macOS account with the installed `pomar` on your
+`PATH`. Use a new absolute, private root separate from service and provider data.
+
+In the first terminal, prepare the pinned guest base and fetch its pinned
+kernel. This may need network access and disk space.
 
 ```sh
 POMAR_DEV_ROOT="$HOME/.local/share/pomar-dev/example"
 pomar server prepare -root "$POMAR_DEV_ROOT"
 pomar server kernel -root "$POMAR_DEV_ROOT"
+```
+
+Copy the SHA-256 printed by the kernel command into `ACTUAL_DIGEST` below.
+Leave the manager running in the foreground.
+
+```sh
 pomar server start -root "$POMAR_DEV_ROOT" -kernel-sha256 ACTUAL_DIGEST \
   -class-name dev-example -class-concurrency 1
 ```
 
-`prepare` builds the pinned default catalogue base; `-image NAME` selects another
-catalogue image. `kernel` uses the catalogue-pinned kernel-fetch path. Both can
-require network and disk space. They do not rebuild the Pomar implementation.
-`start` runs the existing manager in the foreground. Its class/mirror/budget and
-optional restricted control-socket options are the low-level manager options
-shown by `pomar help all`. Concurrency1 in this example is a limit, not a measured
-capacity qualification. Existing admission and host fill checks remain active.
+In the second terminal, use that same root and run a job in the development
+class. No repository mirror is needed for this example.
 
-In another terminal select the manager's owner socket explicitly with `-root`.
-Wait for jobs to finish, then stop the foreground manager with Ctrl-C. Never use
-this development convenience command to recover, restart or replace a permanent
-service. A stopped manager does not itself establish that every helper or guest
-has exited; inspect retained attempts and VM-orphan reports.
+```sh
+POMAR_DEV_ROOT="$HOME/.local/share/pomar-dev/example"
+pomar status -root "$POMAR_DEV_ROOT"
+pomar run -wait -root "$POMAR_DEV_ROOT" -id hello-1 -class dev-example -- /bin/echo hello
+pomar attempt get -root "$POMAR_DEV_ROOT" -id hello-1
+pomar logs -root "$POMAR_DEV_ROOT" -id hello-1
+```
+
+A successful run exits 0 and the log contains `hello`. The personal manager
+returns an unsigned local result. `logs` checks the log against that result's
+digest. Use the [signed-manager workflow](#submit-inspect-and-verify-a-job) when
+you need an independently authenticated receipt.
+
+After the job finishes, press Ctrl-C in the first terminal. If the attempt
+outcome or guest closure is uncertain, inspect the original attempt and
+retained VM-orphan reports before taking further action. Use `pomar help all`
+for additional class, mirror and capacity options.
+
 ## Current capacity and parallel jobs
 
 Managed jobs use aggregate resource admission, not an exclusive host lock.

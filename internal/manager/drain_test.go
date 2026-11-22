@@ -10,8 +10,7 @@ import (
 )
 
 // A drain refuses every new start by name while live attempts run on, and
-// lifting it lets starts through again (the elders' ruling of 2026-09-27
-// 17:21Z §2 item 2).
+// lifting it lets starts through again.
 func TestDrainRefusesNewStartsAndLeavesLiveOnes(t *testing.T) {
 	m, ctl, v := openSigningWithSpace(t, false, healthyFixtureSpace)
 	owner := NewClient(v.Root())

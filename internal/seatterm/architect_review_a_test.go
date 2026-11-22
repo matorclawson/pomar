@@ -4,8 +4,8 @@ import (
 	"testing"
 )
 
-// zeocouncil/the Architect's review of the #128 stack, part A, the pieces
-// that belong at the seatterm layer.
+// Regression tests for attach, input and lifecycle fencing at the terminal
+// layer.
 
 // M5: an epoch-fence check-then-act gap. A caller that reads the current
 // epoch, then asks for control expecting that exact epoch, must be refused

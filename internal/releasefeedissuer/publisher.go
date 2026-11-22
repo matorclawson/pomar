@@ -14,8 +14,9 @@ import (
 
 var entryName = regexp.MustCompile(`^[0-9]{6}-[0-9a-f]{12}$`)
 
-// CheckPublicDirectory is the platform check required by Council A3. The
-// command fixes the actual root; tests supply independent temporary directories.
+// CheckPublicDirectory checks the publication directory before use. The
+// command fixes the actual root; tests supply independent temporary
+// directories.
 func CheckPublicDirectory(path string, uid int) error {
 	info, e := os.Lstat(path)
 	if e != nil || !info.IsDir() || info.Mode().Perm() != 0755 {

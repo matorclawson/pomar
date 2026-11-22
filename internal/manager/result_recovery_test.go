@@ -1,7 +1,7 @@
 package manager
 
-// sow: pomar-SOW-87. Synthetic persisted boundary fixtures. These tests exercise
-// the real reader/publication paths; they are not host power-loss qualification.
+// Synthetic persisted boundary fixtures. These tests exercise the real
+// reader/publication paths; they are not host power-loss qualification.
 import (
 	"bytes"
 	"context"

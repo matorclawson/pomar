@@ -106,8 +106,7 @@ func TestAnUnreadableSessionIsNeverReplaced(t *testing.T) {
 	}
 }
 
-// The actor's path is absolute, never looked up on a PATH (zeocouncil's
-// review of #126, INFO on supervisor.go:126).
+// The actor's path is absolute, never looked up on a PATH.
 func TestStartRefusesARelativeAgentPath(t *testing.T) {
 	s, calls, _ := supervisor(t, "", "")
 	s.Agent = "claude"

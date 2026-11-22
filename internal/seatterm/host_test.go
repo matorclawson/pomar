@@ -224,14 +224,13 @@ func TestOnlyTheControllerReachesThePTY(t *testing.T) {
 // queued input never lands; and only the new controller's input arrives.
 func TestATakeoverFencesTheOldControllersQueuedInput(t *testing.T) {
 	h, j := newHost(t)
-	// pomar/architect review: a fixed sleep here only has to be "long
-	// enough" for the child to have actually reached `stty raw -echo`
-	// under whatever host scheduling delay applies to ITS startup
-	// specifically -- unrelated to delay anywhere else in the test. The
-	// shell now writes an explicit marker right after that call returns,
-	// so the test can wait for the real condition the blocking-writer
-	// behavior below actually depends on (raw/no-echo mode genuinely
-	// active), rather than guess a duration.
+	// a fixed sleep here only has to be "long enough" for the child to have
+	// actually reached `stty raw -echo` under whatever host scheduling delay
+	// applies to ITS startup specifically -- unrelated to delay anywhere else
+	// in the test. The shell now writes an explicit marker right after that
+	// call returns, so the test can wait for the real condition the
+	// blocking-writer behavior below actually depends on (raw/no-echo mode
+	// genuinely active), rather than guess a duration.
 	s, _, err := h.Create("op-4", "operator", sh("stty raw -echo; printf 'RAWREADY\\n'; sleep 2; exec cat"))
 	if err != nil {
 		t.Fatal(err)
@@ -370,8 +369,8 @@ func TestAnExitedSessionGrantsNothing(t *testing.T) {
 }
 
 // Detaching revokes control and removes the client in one step: a detached
-// client controls nothing and queues nothing, whatever it held, and the
-// program keeps running (ZEOAPP's review of 6b4691ca, SOW 184).
+// client controls nothing and queues nothing, whatever it held, and the program
+// keeps running.
 func TestADetachedClientControlsNothing(t *testing.T) {
 	h, _ := newHost(t)
 	s, _, err := h.Create("op-8", "operator", sh("sleep 30"))
@@ -728,13 +727,12 @@ func TestARelativeCommandIsRefused(t *testing.T) {
 	}
 }
 
-// When the leader exits on its own, a straggler it leaves behind — a
-// background child that ignores the kernel's automatic SIGHUP to the
-// terminal's group — doesn't keep the session from being noticed to have
-// ended: the group is killed right behind the leader's own reap, so
-// pump's Read sees EIO and the session's Done closes within a bound, not
-// only once the straggler happens to exit on its own (zeocouncil's review
-// of #126, LOW 3).
+// When the leader exits on its own, a straggler it leaves behind — a background
+// child that ignores the kernel's automatic SIGHUP to the terminal's group —
+// doesn't keep the session from being noticed to have ended: the group is
+// killed right behind the leader's own reap, so pump's Read sees EIO and the
+// session's Done closes within a bound, not only once the straggler happens to
+// exit on its own.
 func TestAStragglerThatIgnoresHUPDoesntKeepTheSessionAlive(t *testing.T) {
 	h, j := newHost(t)
 	s, _, err := h.Create("op-19", "operator",

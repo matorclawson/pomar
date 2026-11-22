@@ -1,7 +1,3 @@
-// The POMAR Codex's fixture from its review of #108 at 0285806e (zmsg
-// msg-pomar-pomar-review108-finite-deadline-20261009-v1, sha256 41ccf0d1...),
-// formatted; its logic is unchanged.
-
 package seatterm
 
 import (

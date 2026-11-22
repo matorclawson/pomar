@@ -35,53 +35,25 @@ The bundle includes the CLI, signed VM host, Linux shim, restricted clients and
 these guides. Installation keeps versions side by side and activates only your
 user tools. See [installation and rollback](docs/install.md).
 
-## Run a job
+## Run your first local job
 
-Your host owner provides an approved control socket and job class. Installing a
-client does not grant access to a manager or a development seat.
+After [building and installing from source](docs/install.md#build-and-install-from-source)
+or installing a published release, follow the [development manager quickstart](docs/operations.md#development-manager).
+It prepares a private development root, starts the manager in one terminal, and
+runs `/bin/echo hello` from another. The manager returns an unsigned result for
+this local smoke check.
 
-```sh
-export POMAR_SOCKET=/path/to/approved/control.sock
-pomar doctor
-pomar health
-pomar status
-pomar run -id hello-1 -class YOUR_CLASS -- /bin/echo hello
-pomar jobs
-pomar attempt get -id hello-1
-pomar logs -id hello-1
-```
+## Use a signed manager
 
-`run` submits a job. A successful submission is not a successful job. After it
-ends, retrieve and verify its signed result using the owner's independently
-retained public key. Commands use JSON for job records. Explicit `-socket`
-overrides the environment; an explicit `-root` selects that root's owner socket.
-Pomar never guesses a production data root or socket.
+If you already have access to a signing-enabled manager, get its approved control
+socket, job class and independently pinned public key from its owner. Use the
+[signed-manager workflow](docs/operations.md#submit-inspect-and-verify-a-job)
+to submit work and verify its result and log. Explicit `-socket` overrides
+`POMAR_SOCKET`; an explicit `-root` alone selects that root's owner socket.
 
-For a repository job, name the owner's configured mirror and an exact source
-commit with `-mirror`, `-ref` and `-sha`; you do not need a local clone.
-See [operations, seats and result verification](docs/operations.md), and
-[health and diagnostics](docs/health-and-diagnostics.md) for current room,
-progress and result verification.
-
-## Start a development manager
-
-Installed releases also contain the tools to build a catalogue-pinned base,
-fetch its pinned kernel, and start a foreground manager in an explicit private
-root. They do not install a permanent service:
-
-```sh
-POMAR_DEV_ROOT="$HOME/.local/share/pomar-dev/example"
-pomar server prepare -root "$POMAR_DEV_ROOT"
-pomar server kernel -root "$POMAR_DEV_ROOT"
-# Use the actual kernel digest printed by the previous command.
-pomar server start -root "$POMAR_DEV_ROOT" -kernel-sha256 ACTUAL_DIGEST \
-  -class-name dev-example -class-concurrency 1
-```
-
-This is a separate development instance. Capacity, images, source mirrors and
-caller admission remain explicit host-owner decisions. A permanent deployment
-continues using its reviewed installed binaries until its owner upgrades it.
-See [development ownership](docs/operations.md#development-manager).
+For a repository job, pass the owner's configured mirror, ref and exact source
+commit with `-mirror`, `-ref` and `-sha`. See
+[health and diagnostics](docs/health-and-diagnostics.md) for capacity and progress.
 
 ## Develop Pomar
 

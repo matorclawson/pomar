@@ -224,11 +224,10 @@ func resultVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "result verify: the result is not signed")
 		return 1
 	}
-	// The document is checked exactly as it arrived: as the manager signed
-	// it, and as `pomar attempt result` prints it. Nothing re-encodes or
-	// re-compacts it first (the elders' ruling of 2026-09-27 §2.1): a
-	// verifier that rebuilds the document checks something other than what
-	// it received.
+	// The document is checked exactly as it arrived: as the manager signed it,
+	// and as `pomar attempt result` prints it. Nothing re-encodes or
+	// re-compacts it first: a verifier that rebuilds the document checks
+	// something other than what it received.
 	if !result.Verify(key, r.Result, sig) {
 		fmt.Fprintln(stdout, "result verify: FAILED: the signature does not match this result and key")
 		return 1
@@ -541,7 +540,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		Mirrors: &mirror.Mirrors{Venue: v},
 		GoProxy: proxy,
 		// Caps can be raised to measure a job; the class stays unmeasured
-		// until a SOW states its figures.
+		// until the owner measures its limits.
 		Class:   ciClass(*className, *vcpu, *memMiB, *diskGiB, *concurrency, *timeLimit),
 		Host:    host,
 		ShimBin: *shimBin,
@@ -1033,8 +1032,8 @@ func volumeCmd(step string, args []string, stdout, stderr io.Writer) int {
 }
 
 // ciClass is the CI class with the manager's settings. The class stays
-// measured only at the figures the elders set; any other caps are a
-// measurement run's, and no capacity claim is made from them.
+// measured only at the measured limits; any other caps are a measurement
+// run's, and no capacity claim is made from them.
 func ciClass(name string, vcpu int, memMiB, diskGiB int64, concurrency int, limit time.Duration) capacity.Class {
 	c := capacity.CI
 	c.Name, c.Concurrency = name, concurrency
@@ -1074,9 +1073,9 @@ func fetchOutput(c *manager.Client, id, name, path string) (string, error) {
 	return sum, nil
 }
 
-// boundariesCmd is the guest boundary self-test (POMAR-SOW-06 §4.3): it runs
-// the fixed probe as a real attempt with a read-only source, fetches its
-// report through copy-out (checked against its sha256), and grades it here.
+// boundariesCmd is the guest boundary self-test: it runs the fixed probe as a
+// real attempt with a read-only source, fetches its report through copy-out
+// (checked against its sha256), and grades it here.
 func boundariesCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("smoke boundaries", flag.ContinueOnError)
 	fs.SetOutput(stderr)

@@ -44,7 +44,7 @@ func TestCompileMakesTheProfileFromTheCatalogueOnly(t *testing.T) {
 	if strings.Join(p.AllowedHosts, ",") != "api.anthropic.com,claude.ai" {
 		t.Fatalf("hosts %v", p.AllowedHosts)
 	}
-	if got.DeclarationSHA256 != sum || len(got.Sources) != 3 || got.Sources[0].Fork != "architect/zeocreator" || got.Sources[2].Writable {
+	if got.DeclarationSHA256 != sum || len(got.Sources) != 3 || got.Sources[0].Fork != "example-fork/example-app" || got.Sources[2].Writable {
 		t.Fatalf("sources %+v", got.Sources)
 	}
 	// No identity, credential or fixture reaches the profile.

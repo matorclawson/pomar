@@ -1,6 +1,6 @@
 package manager
 
-// sow: pomar-SOW-87. No VM or permanent service is started by these fixtures.
+// No VM or permanent service is started by these fixtures.
 import (
 	"bytes"
 	"encoding/json"

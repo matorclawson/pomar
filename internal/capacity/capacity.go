@@ -48,21 +48,21 @@ type Class struct {
 	VMOverheadBytes int64 `json:"vm_overhead_bytes"`
 	// DiskPeakBytes is the most one attempt writes to the data root.
 	DiskPeakBytes int64 `json:"disk_peak_bytes"`
-	// Concurrency is the class's measured concurrency limit on this host:
-	// the largest N that ran the class's real gate clean twice (elders'
-	// ruling r12 §2). Zero means not measured here: only the slots bound it.
-	// It is per host, so it is set on the host, never in the code.
+	// Concurrency is the class's measured concurrency limit on this host: the
+	// largest N that ran the class's real gate clean twice. Zero means not
+	// measured here: only the slots bound it. It is per host, so it is set on
+	// the host, never in the code.
 	Concurrency int `json:"concurrency"`
 	// Measured is false while the figures are placeholders. No capacity
 	// claim is made from a class that is not measured.
 	Measured bool `json:"measured"`
-	// TimeLimitSeconds is the class's wall-clock limit per attempt: an
-	// attempt still live that long after it was admitted is stopped, and
-	// ends timed-out (elders' ruling r30 §4.1 item 2). Zero means none.
+	// TimeLimitSeconds is the class's wall-clock limit per attempt: an attempt
+	// still live that long after it was admitted is stopped, and ends
+	// timed-out. Zero means none.
 	TimeLimitSeconds int64 `json:"time_limit_s,omitempty"`
 	// LogCapBytes caps what is recorded, signed and served of an attempt's
 	// output log; a longer log is marked truncated. Zero means the manager's
-	// default (the elders' ruling of 2026-09-27 §2.2: a per-class cap).
+	// default.
 	LogCapBytes int64 `json:"log_cap_bytes,omitempty"`
 	// OutputCapBytes caps the total named files copied out of an attempt.
 	// Zero preserves the manager's historical 64 MiB limit. The admitted
@@ -72,14 +72,14 @@ type Class struct {
 	ArtifactOutput *artifactreturn.Policy `json:"artifact_output,omitempty"`
 }
 
-// VMOverhead is the per-guest memory the host pays above the cap: measured
-// at 175 MB for 1 and 2 GiB guests; the elders set 0.3 GB (r12 §2).
+// VMOverhead is the per-guest memory the host pays above the cap: measured at
+// 175 MB for 1 and 2 GiB guests; the floor is 0.3 GB.
 const VMOverhead = 300 << 20
 
-// CI is the CI job class as the elders set it from the measurements
-// (ruling r12 §2): 2 vCPU, 2 GiB plus the VM overhead, a 3 GiB disk peak.
-// The 1-vCPU shape was refused for the measured gate: single-vCPU guests
-// failed its timing tests under load.
+// CI is the CI job class based on the measurements: 2 vCPU, 2
+// GiB plus the VM overhead, a 3 GiB disk peak. The 1-vCPU shape was refused
+// for the measured gate: single-vCPU guests failed its timing tests under
+// load.
 var CI = Class{Name: "ci", VCPU: 2, MemoryBytes: 2 * GiB, VMOverheadBytes: VMOverhead, DiskPeakBytes: 3 * GiB, Measured: true,
 	// The CI gate takes about 6 minutes, 7 at once, on the host it was measured on.
 	TimeLimitSeconds: 30 * 60, LogCapBytes: 16 << 20}
@@ -175,13 +175,11 @@ const (
 	// ReasonMirrorUnavailable: the start's mirror could not be synced, or is
 	// not there. ReasonCommitUnknown: the mirror does not have the commit, or
 	// does not reach it from a synced branch or pull request (a base, from its
-	// branch). Both are decided before capacity is claimed (the elders'
-	// ruling of 2026-09-27 17:21Z §4).
+	// branch). Both are decided before capacity is claimed.
 	ReasonMirrorUnavailable = "mirror-unavailable"
 	ReasonCommitUnknown     = "commit-unknown"
 	// ReasonDraining: the owner has set the manager draining. Attempts already
-	// live finish; no new one is admitted until the drain is lifted (the
-	// elders' ruling of 2026-09-27 17:21Z §2 item 2; a precondition of CI-4).
+	// live finish; no new one is admitted until the drain is lifted.
 	ReasonDraining = "draining"
 )
 
@@ -229,8 +227,7 @@ func Fits(c Class, h Host, d Disk) int {
 func gib(b int64) string { return strconv.FormatFloat(float64(b)/float64(GiB), 'f', 1, 64) + " GiB" }
 
 // ReasonHostBudget names a start refused because it would exceed the host-wide
-// CI budget, in vCPUs or memory, across every class (the elders' ruling of
-// 2026-09-27 §1.2).
+// CI budget, in vCPUs or memory, across every class.
 const ReasonHostBudget = "host-budget"
 
 // WithBudget returns the host's slots cut to a CI budget of vcpu and mem. The

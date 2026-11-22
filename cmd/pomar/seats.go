@@ -18,12 +18,12 @@ import (
 	"github.com/rodriveracom/pomar/internal/seatapi"
 )
 
-// The operator's seat commands (POMAR-CC SOW 15 §4): `pomar seats` lists
-// every declared seat and, on a terminal, offers a numbered menu; `pomar
-// seat status SEAT` prints one seat's record as JSON. They read the
-// development host's seat routes over its owner-only socket and change
-// nothing. Starting, attaching and stopping a seat come with the routes
-// that do them; until then the menu says so instead of pretending.
+// The operator's seat commands: `pomar seats` lists every declared seat and, on
+// a terminal, offers a numbered menu; `pomar seat status SEAT` prints one
+// seat's record as JSON. They read the development host's seat routes over its
+// owner-only socket and change nothing. Starting, attaching and stopping a seat
+// come with the routes that do them; until then the menu says so instead of
+// pretending.
 
 func seatHostRoot(fs *flag.FlagSet) *string {
 	return fs.String("root", os.Getenv("POMAR_AGENT_HOST_ROOT"), "the development host's data root (its host.sock is used)")

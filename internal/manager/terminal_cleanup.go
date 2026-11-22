@@ -1,7 +1,7 @@
 package manager
 
-// sow: pomar-SOW-87. Terminal compute and completion evidence have distinct
-// lifetimes. No publication state requires retaining the disposable VM object.
+// Terminal compute and completion evidence have distinct lifetimes. No
+// publication state requires retaining the disposable VM object.
 
 // cleanupTerminalVMs reserves original entries before dropping m.mu. Remove
 // cannot erase a reserved entry and allow a new same-name attempt to be mistaken

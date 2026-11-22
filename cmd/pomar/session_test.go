@@ -157,7 +157,7 @@ func TestTheAttachStatusTitleIsPrintableOnly(t *testing.T) {
 }
 
 // Ctrl-^ asks for control back without a detach: an attached operator must
-// never be locked out by whoever took it (council M4).
+// never be locked out by whoever took it.
 func TestTakeKeyReaderAsksForControlAndNeverForwardsTheKey(t *testing.T) {
 	req := make(chan seatterm.ControlMsg, 1)
 	r := &takeKeyReader{r: strings.NewReader("ab\x1ecd"), req: req}

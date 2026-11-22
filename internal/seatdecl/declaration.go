@@ -1,7 +1,7 @@
 // Package seatdecl reads a seat declaration: the owner-supplied, immutable
-// statement of one seat's sources, environment, provider and identity
-// (POMAR-CC SOW 15 §3 as corrected by SOW 16 §1). It is kept beside the
-// environment profile and compiled into one; its sha256 is its identity.
+// statement of one seat's sources, environment, provider and identity. It is
+// kept beside the environment profile and compiled into one; its sha256 is its
+// identity.
 //
 // A declaration is data, never authority: it grants nothing and starts
 // nothing. Its mutable companions, the seat's location (location.go) and
@@ -29,8 +29,8 @@ const Schema = "pomar.seat-declaration/v1"
 // Limit bounds a declaration's bytes.
 const Limit = 64 << 10
 
-// NotEstablished marks an allocation the organisation hasn't made yet: a
-// seat's role or provider account. It is never inferred (SOW 16 §1.5).
+// NotEstablished marks an allocation the organisation hasn't made yet: a seat's
+// role or provider account. It is never inferred.
 const NotEstablished = "NOT_ESTABLISHED"
 
 type Declaration struct {
@@ -48,10 +48,9 @@ type Declaration struct {
 	HostOnly  []HostOnly           `json:"host_only"`
 }
 
-// Source is one repository the seat's workspace is built from, at a full
-// pin. A writable source (the work lane, and the records lane if there is
-// one) is cloned and pushed on its fork; a read-only one is owner-supplied
-// data (SOW 16 §2).
+// Source is one repository the seat's workspace is built from, at a full pin. A
+// writable source (the work lane, and the records lane if there is one) is
+// cloned and pushed on its fork; a read-only one is owner-supplied data.
 type Source struct {
 	Role        string `json:"role"`
 	Repository  string `json:"repository"`
@@ -90,8 +89,8 @@ type Resume struct {
 	HandoverSOW string `json:"handover_sow"`
 }
 
-// Identity is the seat's R-36 identity: its role's App on the architect
-// account's forks. An unbound role carries no App (SOW 16 §8).
+// Identity is the seat's role and the GitHub App bound to its forks. An
+// unbound role carries no App.
 type Identity struct {
 	Role           string            `json:"role"`
 	AppID          int64             `json:"app_id,omitempty"`
@@ -144,7 +143,8 @@ func Parse(raw []byte) (Declaration, string, error) {
 }
 
 // Validate refuses a declaration that is malformed or that asks for more
-// than R-36 and SOW 16 allow. It never consults the network or GitHub.
+// authority than the supported identity and source policy permits. It never
+// consults the network or GitHub.
 func (d Declaration) Validate() error {
 	if d.Schema != Schema {
 		return fmt.Errorf("schema must be %s", Schema)
@@ -314,11 +314,11 @@ func (d Declaration) validateIdentity() error {
 	return nil
 }
 
-// pushAllowed admits only the seat's own branches, as an exact ref or a
-// pattern ending in "/*": refs/heads/<seat>/..., and its records lane,
+// pushAllowed admits only the seat's own branches, as an exact ref or a pattern
+// ending in "/*": refs/heads/<seat>/..., and its records lane,
 // refs/heads/records/<seat> or below it. Never the default branch, a tag, or
-// another seat's lane. This is policy, which the fork's rulesets enforce
-// (POMAR-CC SOW 17 §1), not a boundary.
+// another seat's lane. This is policy, which the fork's rulesets enforce, not a
+// boundary.
 func pushAllowed(seat, ref string) bool {
 	name := strings.TrimSuffix(ref, "/*")
 	if name == "" || strings.Contains(name, "..") || strings.Contains(name, "//") || strings.ContainsAny(name, "*?[ ") || strings.HasSuffix(name, "/") {

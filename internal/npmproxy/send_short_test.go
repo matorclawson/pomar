@@ -17,10 +17,9 @@ import (
 	"testing"
 )
 
-// failAfterWriter is an http.ResponseWriter whose Write fails once allow
-// bytes have gone out, simulating a client/tunnel that stops reading
-// partway through a response — exactly the gap PROFROD-SOW-330/pomar#83
-// named: io.Copy's error, previously discarded, must now be reported.
+// failAfterWriter is an http.ResponseWriter whose Write fails once allow bytes
+// have gone out, simulating a client/tunnel that stops reading partway through
+// a response. io.Copy's error, previously discarded, must now be reported.
 type failAfterWriter struct {
 	header  http.Header
 	allow   int
@@ -220,13 +219,12 @@ func TestSendFileReportsNothingExtraOnACleanSend(t *testing.T) {
 	}
 }
 
-// council P3-2 on #138: the zero-byte-count fix was only ever tested at
-// the Go-struct level (the test's own callback records an int64), never
-// against the real serialized JSON line -- none of the existing tests
-// even exercised a send_short with n==0, so reverting the pointer back
-// to a plain int64 with omitempty (silently dropping a genuine zero)
-// would pass every one of them. This drives the real Handler, with a
-// real log io.Writer, and parses the actual JSON line it wrote.
+// the zero-byte-count fix was only ever tested at the Go-struct level (the
+// test's own callback records an int64), never against the real serialized JSON
+// line -- none of the existing tests even exercised a send_short with n==0, so
+// reverting the pointer back to a plain int64 with omitempty (silently dropping
+// a genuine zero) would pass every one of them. This drives the real Handler,
+// with a real log io.Writer, and parses the actual JSON line it wrote.
 func TestSendShortsZeroByteCountSurvivesRealJSONEncoding(t *testing.T) {
 	content := []byte("a whole, uninterrupted tarball")
 	sum := sha512.Sum512(content)
@@ -298,14 +296,13 @@ func TestSendFileNeverReportsSendShortOnHEAD(t *testing.T) {
 	}
 }
 
-// council M18a-d (round 6 mutation re-run at 0c2f536): send_short_test.go
-// only ever exercised shortReason's default "write failed" bucket (a plain
-// errors.New, never one of the five explicitly classified cases) -- a
-// mutant swapping, dropping or misordering any of EPIPE/ECONNRESET/
-// ErrClosed/Canceled/DeadlineExceeded would still pass every existing
-// test. Each is asserted directly here, wrapped (via fmt.Errorf's %w) as a
-// real io.Copy failure would actually arrive, to also confirm
-// errors.Is-based matching is used rather than a bare ==.
+// send_short_test.go only ever exercised shortReason's default "write failed"
+// bucket (a plain errors.New, never one of the five explicitly classified
+// cases) -- a mutant swapping, dropping or misordering any of EPIPE/ECONNRESET/
+// ErrClosed/Canceled/DeadlineExceeded would still pass every existing test.
+// Each is asserted directly here, wrapped (via fmt.Errorf's %w) as a real
+// io.Copy failure would actually arrive, to also confirm errors.Is-based
+// matching is used rather than a bare ==.
 func TestShortReasonClassifiesEachKnownErrorExactly(t *testing.T) {
 	tests := []struct {
 		name string

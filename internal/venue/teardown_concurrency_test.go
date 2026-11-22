@@ -1,6 +1,6 @@
 package venue
 
-// sow: pomar-SOW-87. Pause the real deletion boundary, not a manager wrapper.
+// Pause the real deletion boundary, not a manager wrapper.
 import (
 	"os"
 	"path/filepath"

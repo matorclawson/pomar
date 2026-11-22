@@ -305,18 +305,16 @@ func (w *failAfterWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// council P3-3 on #138: this package's own registry-progress reader
-// silently dropped send_short lines entirely (not in the switch that
-// decides which events are even counted) and treated every 2xx
-// "completed" as proof of a clean transfer, regardless of whether the
-// same request also logged a send_short -- exactly the gap
-// docs/job-failure-diagnostics.md names: the status line is already on
-// the wire before the body copy can fail, so a 2xx completed line alone
-// is this host's own write succeeding, never the guest's receipt. This
-// drives a real cache-hit request through a writer that fails partway,
-// producing a genuine send_short alongside its 2xx completed line, and
-// checks that this reader neither drops the event nor counts that
-// request's completion as evidence of a transfer.
+// this package's own registry-progress reader silently dropped send_short lines
+// entirely (not in the switch that decides which events are even counted) and
+// treated every 2xx "completed" as proof of a clean transfer, regardless of
+// whether the same request also logged a send_short -- exactly the gap
+// docs/job-failure-diagnostics.md names: the status line is already on the wire
+// before the body copy can fail, so a 2xx completed line alone is this host's
+// own write succeeding, never the guest's receipt. This drives a real cache-hit
+// request through a writer that fails partway, producing a genuine send_short
+// alongside its 2xx completed line, and checks that this reader neither drops
+// the event nor counts that request's completion as evidence of a transfer.
 func TestRegistryProgressNeverCountsASendShortCompletionAsATransfer(t *testing.T) {
 	m, _, v := openSigning(t, false)
 	id := "registry-progress-short"
@@ -353,17 +351,15 @@ func TestRegistryProgressNeverCountsASendShortCompletionAsATransfer(t *testing.T
 	}
 }
 
-// pomar's review of #139 (round three, maintainer source review): a
-// bounded tail window can retain a request's "completed" 2xx line while
-// its own send_short fell in the dropped-or-untruncated-away first
-// fragment (progressFile's partial read drops exactly one leading,
-// possibly-truncated line). shortRequests would then have no entry for
-// that request, so its orphaned completion would be credited as a
-// transfer -- exactly the false-positive this package exists to avoid.
-// This drives registryProgress directly with partial=true and a window
-// whose only evidence for a request is its own completed line, no
-// received/cache/send_short visible at all, matching pomar's named
-// fixture precisely.
+// a bounded tail window can retain a request's "completed" 2xx line while its
+// own send_short fell in the dropped-or-untruncated-away first fragment
+// (progressFile's partial read drops exactly one leading, possibly-truncated
+// line). shortRequests would then have no entry for that request, so its
+// orphaned completion would be credited as a transfer -- exactly the
+// false-positive this package exists to avoid. This drives registryProgress
+// directly with partial=true and a window whose only evidence for a request is
+// its own completed line, no received/cache/send_short visible at all,
+// matching pomar's named fixture precisely.
 func TestRegistryProgressTreatsAnOrphanedCompletionInATruncatedWindowAsPossiblyShort(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	// The first line is a truncated fragment of the real send_short line
@@ -385,10 +381,9 @@ func TestRegistryProgressTreatsAnOrphanedCompletionInATruncatedWindowAsPossiblyS
 	}
 }
 
-// council P3 on #139 (round three): shortRequests was never cleared on a
-// fresh "received", so a request ID reused for a second, genuinely clean
-// transfer after an earlier short one would still have its clean
-// completion wrongly suppressed by the first use's stale entry.
+// shortRequests was never cleared on a fresh "received", so a request ID reused
+// for a second, genuinely clean transfer after an earlier short one would still
+// have its clean completion wrongly suppressed by the first use's stale entry.
 func TestRegistryProgressClearsShortRequestsOnAReusedRequestID(t *testing.T) {
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	log := strings.Join([]string{
@@ -407,13 +402,10 @@ func TestRegistryProgressClearsShortRequestsOnAReusedRequestID(t *testing.T) {
 	}
 }
 
-// POMAR-CC-SOW-37 (the install-stall collector): registryProgress's new
-// fields -- first/last event times, the single largest gap, truncation and
-// up to 3 send_short evidence records -- must come straight out of the
-// same reviewed parse of the log, passed through verbatim (the path
-// council's amendment 5 asked to be verified as passthrough, never
-// reconstructed): whatever string the log line already carries for "path"
-// is exactly what shows up here, no matter what it is.
+// RegistryProgress's new fields -- first/last event times, the single largest
+// gap, truncation and up to 3 send_short evidence records -- must come
+// from the same parse of the log. The report carries the trace's path value
+// verbatim.
 func TestRegistryProgressNewFieldsForInstallStall(t *testing.T) {
 	now := time.Date(2026, 10, 18, 12, 1, 0, 0, time.UTC)
 	log := strings.Join([]string{
@@ -441,9 +433,9 @@ func TestRegistryProgressNewFieldsForInstallStall(t *testing.T) {
 	if p.ShortRequests[0].Path != "/left-pad/-/left-pad-1.3.0.tgz" || p.ShortRequests[0].Bytes == nil || *p.ShortRequests[0].Bytes != 100 || p.ShortRequests[0].Want == nil || *p.ShortRequests[0].Want != 10000 {
 		t.Fatalf("first send_short evidence not passed through verbatim: %+v", p.ShortRequests[0])
 	}
-	// council amendment 5: whatever the log line's own path field says --
-	// including an already-redacted "[redacted]" -- comes through exactly
-	// as written, never reconstructed or re-derived here.
+	// whatever the log line's own path field says -- including an
+	// already-redacted "[redacted]" -- comes through exactly as written, never
+	// reconstructed or re-derived here.
 	if p.ShortRequests[1].Path != "[redacted]" {
 		t.Fatalf("an already-redacted path must pass through unchanged, not be reconstructed: %+v", p.ShortRequests[1])
 	}
@@ -480,10 +472,10 @@ func TestRegistryProgressBoundsShortRequestEvidence(t *testing.T) {
 	}
 }
 
-// council P2-2 on #141: events outside [windowStart, windowEnd] or out of
-// chronological order must be counted as their own facts and excluded
-// from FirstEventAt/LastEventAt/gap tracking/EventsSinceGuestQuiet --
-// never silently widen or narrow an "observed" interval.
+// events outside [windowStart, windowEnd] or out of chronological order must be
+// counted as their own facts and excluded from FirstEventAt/LastEventAt/gap
+// tracking/EventsSinceGuestQuiet -- never silently widen or narrow an
+// "observed" interval.
 func TestRegistryProgressBindsEventsToTheirWindow(t *testing.T) {
 	now := time.Date(2026, 10, 18, 13, 0, 0, 0, time.UTC)
 	windowStart := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
@@ -520,11 +512,11 @@ func TestRegistryProgressBindsEventsToTheirWindow(t *testing.T) {
 	}
 }
 
-// council P1-3 on #141 / pomar's review: bounds applied before JSON
-// escaping let adversarial content (control characters, '<') blow past
-// the documented cap once marshaled, since each such byte can expand to
-// a 6-character \u00XX escape. sanitizeEvidenceText/closedEvidence must
-// remove that risk at the source, not just bound raw byte length.
+// bounds applied before JSON escaping let adversarial content (control
+// characters, '<') blow past the documented cap once marshaled, since each such
+// byte can expand to a 6-character \u00XX escape.
+// sanitizeEvidenceText/closedEvidence must remove that risk at the source, not
+// just bound raw byte length.
 func TestClosedEvidenceSanitizesAdversarialContent(t *testing.T) {
 	adversarial := "/\x01\x01\x01<<<pkg/-/pkg-1.0.0.tgz"
 	e := closedEvidence(ShortRequestEvidence{Request: 1, Path: adversarial, Reason: "some made-up reason that isn't in the closed set"})
@@ -545,9 +537,9 @@ func TestClosedEvidenceSanitizesAdversarialContent(t *testing.T) {
 	}
 }
 
-// council P1-3: pomar's exact adversarial construction (3501-byte path,
-// at the log line's own 4096-byte parser maximum) must still come out
-// bounded and sanitized, not merely "shortened."
+// pomar's exact adversarial construction (3501-byte path, at the log line's own
+// 4096-byte parser maximum) must still come out bounded and sanitized, not
+// merely "shortened."
 func TestClosedEvidenceBoundsAtParserMaxima(t *testing.T) {
 	adversarial := make([]byte, 3501)
 	for i := range adversarial {
@@ -583,11 +575,11 @@ func TestClosedEvidenceReasonIsAClosedSet(t *testing.T) {
 	}
 }
 
-// council P1-3: pomar's exact end-to-end counterexample -- three real
-// send_short log lines, each with a ~3650-byte adversarial path, whose
-// unbounded evidence subset alone serialized to ~10803 bytes. Run through
-// the real registryProgress parser (not a direct struct literal), the
-// resulting ShortRequests must already be bounded and sanitized.
+// pomar's exact end-to-end counterexample -- three real send_short log lines,
+// each with a ~3650-byte adversarial path, whose unbounded evidence subset
+// alone serialized to ~10803 bytes. Run through the real registryProgress
+// parser (not a direct struct literal), the resulting ShortRequests must
+// already be bounded and sanitized.
 func TestRegistryProgressBoundsAndSanitizesRealAdversarialLines(t *testing.T) {
 	now := time.Date(2026, 10, 18, 12, 1, 0, 0, time.UTC)
 	// Shorter than pomar's own 3501-byte construction: JSON-escaping (Go's
@@ -675,10 +667,9 @@ func TestClosedEvidenceSanitizesNULBytes(t *testing.T) {
 	}
 }
 
-// council N1 (round five on #141): ordinary scheduling jitter between
-// concurrent requests (npmproxy stamps time.Now() before acquiring its
-// own log lock) must NOT count as out of order -- only a materially
-// earlier timestamp, past outOfOrderTolerance, does.
+// ordinary scheduling jitter between concurrent requests (npmproxy stamps
+// time.Now() before acquiring its own log lock) must NOT count as out of order
+// -- only a materially earlier timestamp, past outOfOrderTolerance, does.
 func TestRegistryProgressToleratesOrdinaryConcurrencyJitter(t *testing.T) {
 	now := time.Date(2026, 10, 18, 12, 1, 0, 0, time.UTC)
 	log := strings.Join([]string{
@@ -693,10 +684,9 @@ func TestRegistryProgressToleratesOrdinaryConcurrencyJitter(t *testing.T) {
 	}
 }
 
-// council N1: a real concurrent Handler, not a synthetic log, must still
-// produce a usable (non-INSUFFICIENT_EVIDENCE-forced) registry trace --
-// this is council's own measurement that the strict version made a real,
-// concurrent install (the ordinary case) unable to ever produce an
+// a real concurrent Handler, not a synthetic log, must still produce a usable
+// (non-INSUFFICIENT_EVIDENCE-forced) registry trace -- the strict check made a
+// real, concurrent install (the ordinary case) unable to ever produce an
 // evidential indication.
 func TestRegistryProgressHandlesARealConcurrentHandler(t *testing.T) {
 	now := time.Now().Add(time.Hour)
@@ -735,19 +725,18 @@ func TestRegistryProgressHandlesARealConcurrentHandler(t *testing.T) {
 	}
 }
 
-// council N8 (round six on #141): a run of small backward steps, each
-// individually within outOfOrderTolerance of the one right before it, must
-// not be able to accumulate unbounded net drift that an out-of-order check
-// based on "the previous event" alone would never catch -- council's own
-// probe, reproduced here exactly: 90s of accumulated drift in 0.9s steps,
+// a run of small backward steps, each individually within outOfOrderTolerance
+// of the one right before it, must not be able to accumulate unbounded net
+// drift that an out-of-order check based on "the previous event" alone would
+// never catch. This fixture uses 90s of accumulated drift in 0.9s steps,
 // comparing each step only to its immediate predecessor, never trips
 // EventsOutOfOrder, and a correct, real-time event arriving afterward then
-// computes its gap against the drifted-away previous timestamp instead of
-// the true high point, producing a false large gap. Comparing against the
-// watermark (the highest-timestamp accepted event so far) instead means
-// the drifting run is itself excluded once it's past tolerance from the
-// true high point, and the later real event's gap is computed from that
-// true high point, not from wherever the drift happened to end up.
+// computes its gap against the drifted-away previous timestamp instead of the
+// true high point, producing a false large gap. Comparing against the
+// watermark (the highest-timestamp accepted event so far) instead means the
+// drifting run is itself excluded once it's past tolerance from the true high
+// point, and the later real event's gap is computed from that true high point,
+// not from wherever the drift happened to end up.
 func TestRegistryProgressOutOfOrderComparesAgainstTheWatermarkNotJustThePreviousEvent(t *testing.T) {
 	base := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	now := base.Add(time.Hour)
@@ -774,11 +763,10 @@ func TestRegistryProgressOutOfOrderComparesAgainstTheWatermarkNotJustThePrevious
 	if p.EventsOutOfOrder < 90 {
 		t.Fatalf("EventsOutOfOrder = %d, want at least 90: accumulated sub-tolerance drift must still be caught against the watermark, not hidden by comparing only to the immediately preceding (already-drifted) event: %+v", p.EventsOutOfOrder, p)
 	}
-	// The real gap between the watermark (base) and the later genuine
-	// event (base+5s) is exactly 5 seconds -- never the ~94s a
-	// drifted-away "previous event" baseline would have produced. Council
-	// N8c: pin the exact value and the From/To identity, not just a loose
-	// upper bound.
+	// The real gap between the watermark (base) and the later genuine event
+	// (base+5s) is exactly 5 seconds -- never the ~94s a drifted-away
+	// "previous event" baseline would have produced. The assertions pin the
+	// exact value and the From/To identity, not just a loose upper bound.
 	if p.LongestGapSeconds == nil || *p.LongestGapSeconds != 5 {
 		t.Fatalf("LongestGapSeconds = %v, want exactly 5: comparing against the watermark instead of the drifted previous event must not fabricate a large false gap: %+v", p.LongestGapSeconds, p)
 	}
@@ -793,12 +781,12 @@ func TestRegistryProgressOutOfOrderComparesAgainstTheWatermarkNotJustThePrevious
 	}
 }
 
-// council C8: FirstEventAt is documented as "first accepted in arrival
-// order", not "earliest by timestamp" -- an accepted event can carry a
-// timestamp a little behind the one right before it (ordinary jitter,
-// within tolerance), so pin that documented behavior directly: the
-// SECOND line here has the lower timestamp, but FirstEventAt must still
-// be the FIRST line's (later) timestamp, not re-sorted to the lower one.
+// FirstEventAt is documented as "first accepted in arrival order", not
+// "earliest by timestamp" -- an accepted event can carry a timestamp a little
+// behind the one right before it (ordinary jitter, within tolerance), so pin
+// that documented behavior directly: the SECOND line here has the lower
+// timestamp, but FirstEventAt must still be the FIRST line's (later) timestamp,
+// not re-sorted to the lower one.
 func TestRegistryProgressFirstEventAtIsFirstAcceptedNotEarliestTimestamp(t *testing.T) {
 	now := time.Date(2026, 10, 18, 13, 0, 0, 0, time.UTC)
 	log := strings.Join([]string{
@@ -831,8 +819,8 @@ func (w syncWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
-// council N3: a future-stamped event must be counted, not silently
-// dropped and indistinguishable from a line that was never there.
+// a future-stamped event must be counted, not silently dropped and
+// indistinguishable from a line that was never there.
 func TestRegistryProgressCountsFutureStampedEvents(t *testing.T) {
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	log := `{"schema":"pomar.npm-request/v1","request":1,"event":"received","time":"2026-10-18T13:00:00Z"}` + "\n"
@@ -845,10 +833,9 @@ func TestRegistryProgressCountsFutureStampedEvents(t *testing.T) {
 	}
 }
 
-// council N5/M05b/M06: registryProgress's own ChangedDuringRead output
-// must actually come from the changedDuringRead parameter it was given
-// -- a wiring-level test, not just install_stall's own downstream
-// handling of an already-set field.
+// registryProgress's own ChangedDuringRead output must actually come from the
+// changedDuringRead parameter it was given -- a wiring-level test, not just
+// install_stall's own downstream handling of an already-set field.
 func TestRegistryProgressSetsChangedDuringReadFromItsOwnParameter(t *testing.T) {
 	now := time.Now()
 	p := registryProgress([]byte("{}\n"), false, now, nil, true, time.Time{}, nil)
@@ -861,10 +848,10 @@ func TestRegistryProgressSetsChangedDuringReadFromItsOwnParameter(t *testing.T) 
 	}
 }
 
-// council M08/M08b: an all-'<' adversarial path -- the exact case the
-// first sanitizer version missed, since '<' is printable ASCII and
-// survived it unchanged, then Go's default json.Marshal HTML-escapes it
-// 6x -- must still come out bounded after sanitization.
+// an all-'<' adversarial path -- the exact case the first sanitizer version
+// missed, since '<' is printable ASCII and survived it unchanged, then Go's
+// default json.Marshal HTML-escapes it 6x -- must still come out bounded after
+// sanitization.
 func TestClosedEvidenceSanitizesHTMLEscapedCharacters(t *testing.T) {
 	allLessThan := strings.Repeat("<", 500)
 	e := closedEvidence(ShortRequestEvidence{Request: 1, Path: allLessThan, Reason: "write failed"})
@@ -880,11 +867,10 @@ func TestClosedEvidenceSanitizesHTMLEscapedCharacters(t *testing.T) {
 	}
 }
 
-// council (round 6 mutation re-run at 0c2f536): M08/M08b's fix added '<',
-// '>', '&', '"' and '\\' to jsonEscapes together, but the only test that
-// ever ran was all-'<' -- a mutant dropping '>', '&', '"' or '\\' alone
-// from the map would still pass every existing test. Each of the other
-// four is pinned here individually, the same way.
+// M08/M08b's fix added '<', '>', '&', '"' and '\\' to jsonEscapes together, but
+// the only test that ever ran was all-'<' -- a mutant dropping '>', '&', '"' or
+// '\\' alone from the map would still pass every existing test. Each of the
+// other four is pinned here individually, the same way.
 func TestClosedEvidenceSanitizesEachJSONEscapedCharacterIndividually(t *testing.T) {
 	for _, c := range []byte{'>', '&', '"', '\\'} {
 		adversarial := strings.Repeat(string(c), 500)

@@ -1,7 +1,7 @@
-// Command pomar-feed-key is the fixed ENG feed custodian operation designated
-// by Architect on 2026-11-04. It has no path, identity or key-id overrides and
-// provides no arbitrary-byte signing operation. Private seed bytes are confined
-// to the designated custodian process and are never part of its output.
+// Command pomar-feed-key is the fixed release-feed custodian. It has no path,
+// identity or key-id overrides and provides no arbitrary-byte signing
+// operation. Private seed bytes are confined to the designated custodian
+// process and are never part of its output.
 package main
 
 import (
@@ -113,8 +113,8 @@ func run(c config, operation string, output io.Writer) error {
 		return err
 	}
 	if rehearsal {
-		// Architect A1: a separate key never adopted by production trust.
-		// The only extra path is this fixed child of the checked custody home.
+		// A separate key never adopted by production trust. The only extra path
+		// is this fixed child of the checked custody home.
 		if operation == "generate-rehearsal" {
 			if err := os.Mkdir(c.home+"/rehearsal", 0700); err != nil {
 				return errors.New("rehearsal custody directory exists or unavailable; reconcile")
