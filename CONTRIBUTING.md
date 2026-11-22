@@ -65,5 +65,4 @@ an install, account change, release publication or deployment. See
 [release preparation](docs/releases.md) for artifact verification and
 publication.
 
-Contributions are licensed under [Apache 2.0](LICENSE). Section 6 of that
-license describes the separate treatment of names and marks.
+Contributions are licensed under the [MIT License](LICENSE).

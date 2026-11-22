@@ -1,5 +1,11 @@
 Pomar
-Copyright 2026 Rod Rivera
+Copyright (c) 2026 Dreamhuggers Pte. Ltd.
 
-This product is licensed under the Apache License, Version 2.0 (see LICENSE).
-The Pomar name and marks are not licensed under it.
+Pomar's own code and documentation are licensed under the MIT License.
+See LICENSE for the terms. Dreamhuggers reserves the Pomar name and marks.
+
+The original Swift ignore rules at the start of .gitignore come from
+github/gitignore's Swift.gitignore and retain their CC0-1.0 terms.
+Source: https://github.com/github/gitignore/blob/eeb775f7cbd229e8cd487ef06a1176dc239201d9/Swift.gitignore
+
+See THIRD-PARTY.md for the external package license inventory.
