@@ -42,6 +42,9 @@ func Execute(ctx context.Context, action, bundle, sha, archive string) (any, err
 		if err = n.Lock(); err != nil {
 			return nil, err
 		}
+		if n.M.migrating() {
+			return apply(ctx, n, sha, n.recoverMigration)
+		}
 		return Apply(ctx, n, sha)
 	case "rollback":
 		if archive == "" {

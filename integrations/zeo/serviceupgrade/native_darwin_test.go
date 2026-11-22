@@ -150,7 +150,7 @@ func TestMissingLaunchdLabelRequiresACompleteSuccessfulInventory(t *testing.T) {
 	if e := serviceAbsentFromTable([]byte("PID\tStatus\tLabel\n123\t0\tother.service\n")); e != nil {
 		t.Fatal(e)
 	}
-	for _, bad := range []string{"", "Could not find service", "PID Status Label\n- 0 " + label + "\n", "PID Status Label\nmalformed\n"} {
+	for _, bad := range []string{"", "Could not find service", "PID Status Label\n- 0 " + legacyLabel + "\n", "PID Status Label\n- 0 " + neutralLabel + "\n", "PID Status Label\nmalformed\n"} {
 		if e := serviceAbsentFromTable([]byte(bad)); e == nil {
 			t.Fatal("absence inferred from uncertain evidence")
 		}

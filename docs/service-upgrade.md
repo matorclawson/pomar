@@ -2,8 +2,8 @@
 
 `pomar install` installs a complete user-prefix release. `pomar upgrade` is a
 separate administrator operation for an **already provisioned** macOS service.
-It does not create accounts, install a daemon, change grants, create a class,
-submit a job or admit a runtime actor.
+It works on an existing daemon and keeps existing accounts, grants, classes
+and job and runtime state. A v2 manifest can authorize a service label change.
 
 The v1 service upgrade profile binds one existing service layout, including
 its owner and caller, manager label, binaries, caller policy, grant, classes
@@ -61,7 +61,8 @@ manager's atomic owner drain prevents new admission; only the matched idle
 manager is unloaded. The control directory is closed across restart. Directory
 modes change through a no-follow descriptor; the manager-created socket is never
 chmodded by the administrator. No other
-process is signalled. Only the two pinned binaries and install record change.
+process is signalled. The two pinned binaries and install record are
+replaced. An explicit v2 migration also changes the launch plist.
 Prior concurrency/reboot/check qualifications are explicitly invalidated before
 replacement and never inferred from a successful restart.
 
@@ -70,8 +71,9 @@ control path for actual caller GET readbacks. The command verifies installed
 file hashes/signatures, retained files, every terminal history record (including
 unknown evidence fields), public-key binding and owner/caller class/budget
 identity. Only after all checks does it lift admission's drain. A failed check
-retains its journal/archive and holds admission for reconciliation. Ordinary
-host reservation/admission and full native site qualification remain separate.
+retains its journal and archive. A failed label migration can reopen admission
+only after it has recovered and verified the original service. Ordinary host
+reservation and full native site qualification remain separate.
 
 ## Recovery and rollback
 
@@ -86,12 +88,13 @@ sudo /path/to/verified/pomar upgrade rollback -bundle ROOT_STAGE -manifest-sha25
 ```
 
 Rollback refuses a different manifest, arbitrary archive, unknown installed
-binary/record bytes, active work or uncertain process identity. It restores only
-the archived baseline binaries and exact old record, restarts the unchanged
-service, repeats post-install readbacks and then reopens admission. It does not
-rewrite result history or replace signing keys, images, kernel/rootfs, caller,
-policy, grants, classes or launch configuration. If those bindings changed or a
-new job was admitted, stop and reconcile with the service owner.
+binary/record bytes, active work or uncertain process identity. It restores
+the archived baseline binaries and exact old record, restarts the service,
+repeats post-install readbacks and then reopens admission. The migration also
+restores the archived launch plist. Result history, signing keys, images,
+kernel/rootfs, caller, policy, grants and classes stay in place. If those
+bindings changed or a new job was admitted, stop and reconcile with the service
+owner.
 
 Both archived binaries are hash-checked when the original rollback journal is
 loaded and again before stopping the current manager. The exact signing policy is
@@ -108,3 +111,59 @@ root-owned service transition. An installable recipe also needs the exact
 sealed payload under the applicable reviewed signing policy, qualified CLI, current owner observations,
 review and an attended administrator execution result. Retain those receipts
 before updating any dependent release acceptance policy.
+
+## Runtime identifier migration
+
+The manager label changes from `org.zeroemployee.pomar.manager` to
+`io.github.rodriveracom.pomar.manager`. The `pomar` and `pomar-host` binary
+signing identifiers move from the `ac.zeo.pomar.` prefix to
+`io.github.rodriveracom.pomar.`. Use `pomar.service-upgrade/v2` with
+`identifiers.mode` set to `legacy_to_neutral`. Include
+`manager-target.plist` in the payload and pin its exact bytes and SHA256 as
+`identifiers.target_plist`. Pin the exact currently installed plist using
+`retained.plist` and both versions of the binaries using the existing build
+bindings. The baseline plist must have root:wheel custody with ordinary
+permissions. The target plist may change only `Label`. The upgrade checks
+each binary against the signing identifier for its transition side, including
+for an explicitly selected development transition.
+If an existing ad-hoc installation used linker-generated identifiers, record
+the independently observed values for both binaries in
+`identifiers.legacy_development_identifiers`. This field is accepted only
+for a development migration and applies only to its archived baseline.
+Use the Darwin bundle produced by `tools/build-release.sh` for an ad-hoc
+development target. The Makefile's gate signs the Swift helper and leaves the
+Go coordinator with its linker-generated identifier.
+
+After draining and unloading the matched manager, the upgrade proves both
+labels absent and checks for surviving writers. It leaves the legacy startup
+plist in place while it replaces the binaries and record. Then it atomically
+replaces the plist contents and renames that sole file to the neutral filename.
+Either interruption point leaves one startup plist. A reboot can still
+interrupt binary replacement. If apply encounters an error during stopping
+or later, it attempts a bounded rollback under the same lock and reports both
+outcomes. If the process or host stops before recovery, or the receipt reports
+incomplete recovery, inspect the original archive and use explicit rollback.
+
+Rollback drains and stops a matched running replacement. It can also unload
+a registered job with no PID when its installed plist, binaries and record
+match the frozen generation and no writers remain. During fenced startup, a
+replacement can have a PID before its owner API responds. Recovery can then
+unload the pinned replacement through launchd and confirm that its PID and
+writers are gone. Later phases still require replacement owner readbacks.
+Rollback restores the archived binary and record bytes and original plist
+permissions, then bootstraps and verifies the legacy service before
+reopening admission. The
+manager key, data and control socket paths stay in place. Keep dependent jobs
+held until the host owner has reconciled an interrupted upgrade or reboot.
+
+Subsequent upgrades on a migrated service use v2 with
+`identifiers.mode` set to `neutral`, omit `identifiers.target_plist`, and
+pin the installed neutral plist as `retained.plist`. Legacy v1 payloads
+continue to target the legacy layout.
+
+New Keychain probes use the service `io.github.rodriveracom.pomar.key-probe`
+and a unique scratch account for each run. Each probe deletes only the item
+it created. An interrupted old probe may leave a scratch item under
+`org.zeroemployee.pomar.key-probe` with account `probe`. The account owner
+can inspect or remove that item separately after confirming it is from the
+probe. Keychain items stay in their original locations during migration.

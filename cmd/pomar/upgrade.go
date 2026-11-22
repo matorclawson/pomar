@@ -18,9 +18,11 @@ const upgradeHelp = `Usage:
 
 Administrator operations for an existing, explicitly bound macOS service.
 check is read-only. stage creates only a private verified payload stage.
-apply replaces only the two frozen binaries after an idle owner drain.
-rollback restores only the manifest-bound original archive after idle checks.
-They do not provision accounts, grants, keys, images, classes or a new daemon.
+apply replaces the two frozen binaries after an idle owner drain.
+An explicit v2 migration also switches the existing manager's launchd label.
+After an unload failure or a later failure, migration attempts original-archive recovery.
+rollback restores the manifest-bound original archive after idle checks.
+These operations keep existing accounts, grants, keys, images and classes.
 An explicit reviewed signing policy and retained manifest SHA256 are required.
 An incomplete transaction retains its archive/journal; do not replay apply.
 See docs/service-upgrade.md for prerequisites, evidence and recovery limits.

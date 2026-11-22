@@ -29,8 +29,7 @@ const recordPath = serviceRoot + "/install-record"
 const runDir = serviceRoot + "/run"
 const ownerSocket = serviceRoot + "/data/manager/manager.sock"
 const ctlSocket = runDir + "/ctl.sock"
-const label = "org.zeroemployee.pomar.manager"
-const plistPath = "/Library/LaunchDaemons/" + label + ".plist"
+const launchDaemons = "/Library/LaunchDaemons"
 const archiveRoot = "/private/var/pomar-p-archive"
 
 // Native is deliberately fixed to an already provisioned Pomar service. It
@@ -40,6 +39,7 @@ type Native struct {
 	SHA, Bundle, ArchivePath string
 	rollback                 bool
 	fenced                   bool
+	stopIssued               bool
 	beforeRecord             []byte
 	original                 Journal
 	Progress                 io.Writer
@@ -120,7 +120,7 @@ func owner(ctx context.Context, step string, extra ...string) ([]byte, error) {
 	return command(ctx, nil, "/usr/bin/sudo", args...)
 }
 func retainedPath(name string) string {
-	return map[string]string{"shim": bindir + "/pomar-shim-linux-arm64", "caller": bindir + "/pomar-ci-caller", "caller-policy": "/usr/local/etc/pomar/callers/65020.json", "caller-grant": "/private/etc/sudoers.d/pomar-profrod-caller", "classes": serviceRoot + "/config/profrod-classes-v1.json", "plist": plistPath}[name]
+	return map[string]string{"shim": bindir + "/pomar-shim-linux-arm64", "caller": bindir + "/pomar-ci-caller", "caller-policy": "/usr/local/etc/pomar/callers/65020.json", "caller-grant": "/private/etc/sudoers.d/pomar-profrod-caller", "classes": serviceRoot + "/config/profrod-classes-v1.json"}[name]
 }
 func (n *Native) retainedCheck() error {
 	// The v1 product profile deliberately does not select arbitrary caller paths.
@@ -128,6 +128,9 @@ func (n *Native) retainedCheck() error {
 		return fmt.Errorf("unsupported existing service profile")
 	}
 	for _, name := range retained {
+		if name == "plist" {
+			continue
+		}
 		p := retainedPath(name)
 		if err := directory(filepath.Dir(p), 0, 0); err != nil {
 			return err
@@ -151,13 +154,18 @@ func record(raw []byte) (map[string]string, error) {
 	}
 	return out, nil
 }
-func (n *Native) targetSignature(ctx context.Context, path, name string) error {
+func (n *Native) signature(ctx context.Context, path, name string, target bool) error {
+	id := n.M.signingID(name, target)
 	if n.M.SigningPolicy == "development_transition" {
 		if err := developmentSignature(ctx, path); err != nil {
 			return err
 		}
+		if n.M.Identifiers != nil {
+			if _, err := command(ctx, nil, "/usr/bin/codesign", "--verify", "--strict", "-R", inlineRequirement(fmt.Sprintf(`identifier "%s"`, id)), path); err != nil {
+				return fmt.Errorf("development signing identifier differs for %s", name)
+			}
+		}
 	} else {
-		id := "ac.zeo.pomar." + name
 		requirement := fmt.Sprintf(`identifier "%s" and certificate leaf = H"%s"`, id, n.M.CertificateSHA1)
 		if _, err := command(ctx, nil, "/usr/bin/codesign", "--verify", "--strict", "-R", inlineRequirement(requirement), path); err != nil {
 			return fmt.Errorf("internally signed %s candidate required", name)
@@ -223,11 +231,14 @@ func (n *Native) Check(ctx context.Context) error {
 		if _, err := pinnedFile(filepath.Join(n.Bundle, name), n.M.Target.Binaries[name]); err != nil {
 			return err
 		}
-		if err := n.targetSignature(ctx, filepath.Join(n.Bundle, name), name); err != nil {
+		if err := n.signature(ctx, filepath.Join(n.Bundle, name), name, true); err != nil {
 			return err
 		}
 	}
 	if err := n.retainedCheck(); err != nil {
+		return err
+	}
+	if err := n.checkTransitionPlists(ctx); err != nil {
 		return err
 	}
 	for _, p := range []string{bindir, filepath.Dir(recordPath), archiveRoot} {
@@ -272,14 +283,15 @@ func (n *Native) Check(ctx context.Context) error {
 			return err
 		}
 		old, next := n.M.Baseline.Binaries[name], n.M.Target.Binaries[name]
-		if digest(b) != old.SHA256 || int64(len(b)) != old.Bytes {
+		isTarget := digest(b) != old.SHA256 || int64(len(b)) != old.Bytes
+		if isTarget {
 			if !n.rollback || digest(b) != next.SHA256 || int64(len(b)) != next.Bytes {
 				return fmt.Errorf("unknown installed %s bytes", name)
 			}
 		}
-		if n.M.SigningPolicy == "development_transition" {
-			if err := n.targetSignature(ctx, bindir+"/"+name, name); err != nil {
-				return fmt.Errorf("development transition baseline signature differs: %w", err)
+		if n.M.SigningPolicy == "development_transition" || n.M.Identifiers != nil {
+			if err := n.signature(ctx, bindir+"/"+name, name, isTarget); err != nil {
+				return fmt.Errorf("installed signature differs: %w", err)
 			}
 		}
 	}
@@ -334,6 +346,14 @@ func isDevelopmentSignature(info string) bool {
 var pidPattern = regexp.MustCompile(`(?m)^\s*"PID"\s*=\s*([0-9]+);`)
 
 func (n *Native) process(ctx context.Context) (int, string, error) {
+	label, err := n.currentService(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	return n.processForLabel(ctx, label)
+}
+
+func (n *Native) processForLabel(ctx context.Context, label string) (int, string, error) {
 	b, err := command(ctx, nil, "/bin/launchctl", "list", label)
 	if err != nil {
 		return 0, "", err
@@ -641,6 +661,22 @@ func (n *Native) Archive(ctx context.Context, before Observation) (string, error
 	if err = durableWrite(filepath.Join(path, "install-record"), b, 0600); err != nil {
 		return path, err
 	}
+	if n.M.migrating() {
+		installed, err := n.launchPlists().current()
+		if err != nil || installed.label != legacyLabel {
+			return path, fmt.Errorf("original legacy plist is not installed")
+		}
+		old, mode, err := n.originalPlist(installed.path)
+		if err != nil {
+			return path, err
+		}
+		if err = durableWrite(filepath.Join(path, originalPlistName), old, mode); err != nil {
+			return path, err
+		}
+		if _, savedMode, err := n.originalPlist(filepath.Join(path, originalPlistName)); err != nil || savedMode != mode {
+			return path, fmt.Errorf("archived legacy plist custody or permissions differ")
+		}
+	}
 	raw, err := readFile(filepath.Join(n.Bundle, "upgrade.json"), 64<<10, 0)
 	if err != nil || digest(raw) != n.SHA {
 		return path, fmt.Errorf("manifest changed before archive")
@@ -666,15 +702,25 @@ func (n *Native) Save(j Journal) error {
 func (n *Native) Fence(ctx context.Context) error {
 	// Drain is atomic with admission. Existing clients cannot race an admitted
 	// start past it; filesystem fencing follows only once the manager is idle.
+	if n.rollback {
+		job, _, err := n.recoveryService(ctx)
+		if err != nil {
+			return err
+		}
+		if job.pid == 0 {
+			return n.closeControl()
+		}
+		if recoverBeforeReadiness(n.M.migrating(), n.original, job) {
+			return directory(runDir, n.M.OwnerUID, 0700)
+		}
+	} else {
+		if _, err := n.currentService(ctx); err != nil {
+			return err
+		}
+	}
 	b, err := owner(ctx, "drain")
 	if err != nil {
-		if !n.rollback {
-			return err
-		}
-		if err = n.absent(ctx); err != nil {
-			return err
-		}
-		return n.closeControl()
+		return err
 	}
 	var c manager.Capacity
 	if json.Unmarshal(b, &c) != nil || !c.Draining || c.Live != 0 {
@@ -690,14 +736,25 @@ func (n *Native) closeControl() error {
 	return controlDirectoryMode(runDir, n.M.OwnerUID, 0700)
 }
 func (n *Native) noWriters(ctx context.Context, pid int) error {
+	return n.checkWriters(ctx, pid, false)
+}
+
+func (n *Native) checkWriters(ctx context.Context, pid int, strict bool) error {
 	b, err := command(ctx, nil, "/bin/ps", "-axww", "-o", "pid=,ppid=,uid=,comm=")
 	if err != nil {
 		return err
 	}
-	return writerInventory(b, pid, n.M.OwnerUID)
+	return checkWriterInventory(b, pid, n.M.OwnerUID, strict)
 }
 
 func writerInventory(b []byte, pid int, ownerUID uint32) error {
+	return checkWriterInventory(b, pid, ownerUID, false)
+}
+
+func checkWriterInventory(b []byte, pid int, ownerUID uint32, strict bool) error {
+	if len(bytes.TrimSpace(b)) == 0 {
+		return fmt.Errorf("empty process inventory")
+	}
 	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
 		if len(f) == 0 {
@@ -714,19 +771,27 @@ func writerInventory(b []byte, pid int, ownerUID uint32) error {
 		if e != nil {
 			return fmt.Errorf("process inventory malformed")
 		}
+		uid, e := strconv.ParseUint(f[2], 10, 32)
+		if e != nil {
+			return fmt.Errorf("process inventory user malformed")
+		}
 		name := strings.Join(f[3:], " ")
 		base := filepath.Base(name)
 		// A pre-drain source sync can survive its parent's exit. Prove those
 		// writers absent too; do not signal them or treat PID1 as safe custody.
 		writer := name == bindir+"/pomar" || base == "pomar-host" || strings.Contains(name, "Virtualization") || base == "git" || strings.HasPrefix(base, "git-") || base == "ssh"
-		if (pid > 0 && pp == pid) || (f[2] == strconv.FormatUint(uint64(ownerUID), 10) && p != pid && writer) {
+		if (pid > 0 && pp == pid) || (uid == uint64(ownerUID) && p != pid && (writer || strict)) {
 			return fmt.Errorf("service has surviving or unaccounted writers; no process was signalled")
 		}
 	}
 	return nil
 }
 func (n *Native) Stop(ctx context.Context, before Observation) error {
-	pid, birth, err := n.process(ctx)
+	label, err := n.currentService(ctx)
+	if err != nil {
+		return err
+	}
+	pid, birth, err := n.processForLabel(ctx, label)
 	if err != nil || pid != before.PID || birth != before.Birth {
 		return fmt.Errorf("matched service process changed before stop")
 	}
@@ -744,17 +809,30 @@ func (n *Native) Stop(ctx context.Context, before Observation) error {
 	if err = n.closeControl(); err != nil {
 		return err
 	}
-	pid, birth, err = n.process(ctx)
+	selected, err := n.currentService(ctx)
+	if err != nil || selected != label {
+		return fmt.Errorf("service label changed at stop")
+	}
+	pid, birth, err = n.processForLabel(ctx, label)
 	if err != nil || pid != before.PID || birth != before.Birth {
 		return fmt.Errorf("process identity changed at stop")
 	}
+	n.stopIssued = true
 	if _, err = command(ctx, nil, "/bin/launchctl", "bootout", "system/"+label); err != nil {
 		return err
 	}
+	return n.waitAbsent(ctx, 0)
+}
+
+func (n *Native) waitAbsent(ctx context.Context, pid int) error {
+	var err error
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if err = n.absent(ctx); err == nil {
-			return nil
+			if pid == 0 || syscall.Kill(pid, 0) == syscall.ESRCH {
+				return nil
+			}
+			err = fmt.Errorf("recovery cannot prove pinned PID %d has exited", pid)
 		}
 		if time.Now().After(deadline) {
 			return err
@@ -782,18 +860,12 @@ func (n *Native) absent(ctx context.Context) error {
 	return nil
 }
 func serviceAbsentFromTable(raw []byte) error {
-	rows := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(rows) == 0 || strings.Join(strings.Fields(rows[0]), " ") != "PID Status Label" {
-		return fmt.Errorf("launchd inventory incomplete")
+	job, err := loadedService(raw)
+	if err != nil {
+		return err
 	}
-	for _, row := range rows[1:] {
-		f := strings.Fields(row)
-		if len(f) != 3 {
-			return fmt.Errorf("launchd inventory malformed")
-		}
-		if f[2] == label {
-			return fmt.Errorf("service is still loaded")
-		}
+	if job.label != "" {
+		return fmt.Errorf("service is still loaded")
 	}
 	return nil
 }
@@ -805,12 +877,20 @@ func targetRecord(raw []byte, m Manifest, archive string) ([]byte, error) {
 	var lines []string
 	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
 		k, _, _ := strings.Cut(line, "=")
-		if strings.HasPrefix(k, "prev_") || k == "pin" || k == "retained_host_pin" || k == "signing_policy" || k == "check_ok" || k == "reboot_ok" || k == "concurrency" || k == "validation" || k == "upgraded" || k == "sha256_pomar" || k == "sha256_pomar-host" || strings.HasPrefix(k, "cdhash_") {
+		if strings.HasPrefix(k, "prev_") || k == "pin" || k == "retained_host_pin" || k == "signing_policy" || k == "check_ok" || k == "reboot_ok" || k == "concurrency" || k == "validation" || k == "upgraded" || k == "sha256_pomar" || k == "sha256_pomar-host" || (m.Identifiers != nil && k == "launchd_label") || strings.HasPrefix(k, "cdhash_") {
 			continue
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "pin="+m.Target.Pin, "retained_host_pin="+m.Target.HostPin, "signing_policy="+m.SigningPolicy, "sha256_pomar="+m.Target.Binaries["pomar"].SHA256, "sha256_pomar-host="+m.Target.Binaries["pomar-host"].SHA256, "prev_pin="+r["pin"], "prev_archive="+archive, "validation=product binary replacement; prior qualification invalidated; independent host qualification required")
+	lines = append(lines, "pin="+m.Target.Pin, "retained_host_pin="+m.Target.HostPin, "signing_policy="+m.SigningPolicy, "sha256_pomar="+m.Target.Binaries["pomar"].SHA256, "sha256_pomar-host="+m.Target.Binaries["pomar-host"].SHA256, "prev_pin="+r["pin"], "prev_archive="+archive)
+	change := "product binary replacement"
+	if m.Identifiers != nil {
+		lines = append(lines, "launchd_label="+m.serviceLabel(true))
+	}
+	if m.migrating() {
+		change += " and service label migration"
+	}
+	lines = append(lines, "validation="+change+"; prior qualification invalidated; independent host qualification required")
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 func invalidatedRecord(raw []byte) ([]byte, error) {
@@ -840,6 +920,10 @@ func (n *Native) Replace(ctx context.Context) error {
 	if _, err := pinnedFile(recordPath, n.M.InstallRecord); err != nil {
 		return err
 	}
+	p := n.launchPlists()
+	if err := n.checkTransitionPlists(ctx); err != nil {
+		return err
+	}
 	pending, err := invalidatedRecord(n.beforeRecord)
 	if err != nil {
 		return err
@@ -855,7 +939,7 @@ func (n *Native) Replace(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err = n.targetSignature(ctx, filepath.Join(n.Bundle, name), name); err != nil {
+		if err = n.signature(ctx, filepath.Join(n.Bundle, name), name, true); err != nil {
 			return err
 		}
 		if err = durableWrite(bindir+"/"+name, b, 0755); err != nil {
@@ -869,7 +953,17 @@ func (n *Native) Replace(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return durableWrite(recordPath, b, 0644)
+	if err := durableWrite(recordPath, b, 0644); err != nil {
+		return err
+	}
+	if n.M.migrating() {
+		next, err := pinnedFile(filepath.Join(n.Bundle, targetPlistName), *n.M.Identifiers.TargetPlist)
+		if err != nil {
+			return err
+		}
+		return p.publish(neutralLabel, next, 0644)
+	}
+	return nil
 }
 func (n *Native) Start(ctx context.Context) error {
 	if err := n.absent(ctx); err != nil {
@@ -881,7 +975,12 @@ func (n *Native) Start(ctx context.Context) error {
 	if err := n.retainedCheck(); err != nil {
 		return err
 	}
-	if _, err := command(ctx, nil, "/bin/launchctl", "bootstrap", "system", plistPath); err != nil {
+	label := n.expectedLabel()
+	installed, err := n.launchPlists().current()
+	if err != nil || installed.label != label {
+		return fmt.Errorf("expected startup plist is not installed")
+	}
+	if _, err := command(ctx, nil, "/bin/launchctl", "bootstrap", "system", installed.path); err != nil {
 		return err
 	}
 	ready, cancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -898,6 +997,9 @@ func (n *Native) Start(ctx context.Context) error {
 	}
 	// The replacement manager starts with fresh in-memory drain state. Keep
 	// the directory private until its new drain is explicitly confirmed.
+	if current, err := n.currentService(ctx); err != nil || current != label {
+		return fmt.Errorf("replacement launchd identity unconfirmed")
+	}
 	b, err := owner(ctx, "drain")
 	if err != nil {
 		return err
@@ -916,12 +1018,15 @@ func (n *Native) Verify(ctx context.Context, before Observation) (err error) {
 	if err = n.retainedCheck(); err != nil {
 		return err
 	}
+	if err = n.launchPlists().require(n.expectedLabel()); err != nil {
+		return err
+	}
 	for _, name := range binaries {
 		if _, err = pinnedFile(bindir+"/"+name, build.Binaries[name]); err != nil {
 			return err
 		}
-		if !n.rollback {
-			if err = n.targetSignature(ctx, bindir+"/"+name, name); err != nil {
+		if !n.rollback || n.M.Identifiers != nil {
+			if err = n.signature(ctx, bindir+"/"+name, name, !n.rollback); err != nil {
 				return err
 			}
 		}
@@ -976,6 +1081,9 @@ func (n *Native) Open(ctx context.Context) error {
 	if err := n.retainedCheck(); err != nil {
 		return err
 	}
+	if label, err := n.currentService(ctx); err != nil || label != n.expectedLabel() {
+		return fmt.Errorf("expected launchd identity required before opening")
+	}
 	if err := directory(runDir, n.M.OwnerUID, 0750); err != nil {
 		return err
 	}
@@ -1005,7 +1113,32 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 	if err := archivedBinaries(n.ArchivePath, n.M.Baseline, 0); err != nil {
 		return err
 	}
-	if pid, birth, err := n.process(ctx); err == nil {
+	var oldPlist []byte
+	var oldMode os.FileMode
+	p := n.launchPlists()
+	if n.M.migrating() {
+		var err error
+		oldPlist, oldMode, err = n.originalPlist(filepath.Join(n.ArchivePath, originalPlistName))
+		if err != nil {
+			return err
+		}
+	}
+	if n.M.Identifiers != nil {
+		for _, name := range binaries {
+			if err := n.signature(ctx, filepath.Join(n.ArchivePath, name), name, false); err != nil {
+				return fmt.Errorf("archived baseline signature differs: %w", err)
+			}
+		}
+	}
+	job, birth, err := n.recoveryService(ctx)
+	if err != nil {
+		return err
+	}
+	if recoverBeforeReadiness(n.M.migrating(), j, job) {
+		if err := n.unloadForRecovery(ctx, job, birth); err != nil {
+			return err
+		}
+	} else if job.pid != 0 {
 		b, err := owner(ctx, "list")
 		if err != nil {
 			return err
@@ -1014,10 +1147,15 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 		if err != nil || h != j.Before.History {
 			return fmt.Errorf("history changed since upgrade; rollback refused")
 		}
-		if err = n.Stop(ctx, Observation{PID: pid, Birth: birth}); err != nil {
+		if err = n.Stop(ctx, Observation{PID: job.pid, Birth: birth}); err != nil {
 			return err
 		}
-	} else if err = n.absent(ctx); err != nil {
+	} else if job.label != "" {
+		if err := n.unloadForRecovery(ctx, job, ""); err != nil {
+			return err
+		}
+	}
+	if err := n.absent(ctx); err != nil {
 		return err
 	}
 	if err := n.retainedCheck(); err != nil {
@@ -1040,7 +1178,13 @@ func (n *Native) Restore(ctx context.Context, j Journal) error {
 			return err
 		}
 	}
-	return durableWrite(recordPath, n.beforeRecord, 0644)
+	if err := durableWrite(recordPath, n.beforeRecord, 0644); err != nil {
+		return err
+	}
+	if n.M.migrating() {
+		return p.publish(legacyLabel, oldPlist, oldMode)
+	}
+	return nil
 }
 func (n *Native) LoadRollback(path string) (Journal, error) {
 	var j Journal
@@ -1060,6 +1204,9 @@ func (n *Native) LoadRollback(path string) (Journal, error) {
 	}
 	if uniqueJSON(b) != nil || json.Unmarshal(b, &j) != nil || j.Archive != path || j.ManifestSHA != n.SHA || j.Schema != "pomar.service-upgrade-journal/v1" || j.SigningPolicy != n.M.SigningPolicy {
 		return j, fmt.Errorf("archive journal binding differs")
+	}
+	if j.FromStartup && j.Phase != "rolling-back" {
+		return j, fmt.Errorf("archive startup recovery binding differs")
 	}
 	if j.Before.Pin != n.M.Baseline.Pin || j.Before.KeyID != n.M.KeyID || !hex64.MatchString(j.Before.History) || !hex64.MatchString(j.Before.Capacity) || !hex64.MatchString(j.Before.OwnerCapacity) || !hex64.MatchString(j.Before.CallerCapacity) || !hex64.MatchString(j.Before.CallerHistory) || j.Before.PID <= 1 || j.Before.Birth == "" {
 		return j, fmt.Errorf("archive original observation binding differs")
@@ -1093,15 +1240,21 @@ func (n *Native) LoadRollback(path string) (Journal, error) {
 }
 
 func (n *Native) recoveryObservation(ctx context.Context, j Journal) (any, error) {
-	pid, birth, err := n.process(ctx)
+	job, birth, err := n.recoveryService(ctx)
 	if err != nil {
-		if err = n.absent(ctx); err != nil {
+		return nil, err
+	}
+	if job.pid == 0 {
+		if job.label == "" {
+			return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "absent", "journal": j}, nil
+		}
+		return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "loaded_without_process", "label": job.label, "journal": j}, nil
+	}
+	if recoverBeforeReadiness(n.M.migrating(), j, job) {
+		if err := directory(runDir, n.M.OwnerUID, 0700); err != nil {
 			return nil, err
 		}
-		return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "absent", "journal": j}, nil
-	}
-	if err = n.noWriters(ctx, pid); err != nil {
-		return nil, err
+		return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "startup_recovery", "label": job.label, "pid": job.pid, "birth": birth, "journal": j}, nil
 	}
 	b, err := owner(ctx, "list")
 	if err != nil {
@@ -1126,18 +1279,18 @@ func (n *Native) recoveryObservation(ctx context.Context, j Journal) (any, error
 	if err != nil || cap != j.Before.OwnerCapacity {
 		return nil, fmt.Errorf("owner class/budget changed since original operation")
 	}
-	end, endBirth, err := n.process(ctx)
-	if err != nil || pid != end || birth != endBirth {
+	end, endBirth, err := n.recoveryService(ctx)
+	if err != nil || job != end || birth != endBirth {
 		return nil, fmt.Errorf("service changed during recovery check")
 	}
 	var cp manager.Capacity
 	if json.Unmarshal(b, &cp) != nil {
 		return nil, fmt.Errorf("capacity malformed")
 	}
-	return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "running", "pid": pid, "birth": birth, "draining": cp.Draining, "history_preserved": true, "key_preserved": true, "owner_capacity_preserved": true, "caller_readback_performed": false, "journal": j}, nil
+	return map[string]any{"schema": "pomar.service-recovery-check/v1", "read_only": true, "service": "running", "pid": job.pid, "birth": birth, "draining": cp.Draining, "history_preserved": true, "key_preserved": true, "owner_capacity_preserved": true, "caller_readback_performed": false, "journal": j}, nil
 }
 
-// Stage converts only the four frozen payload files into a private root-owned
+// Stage converts only the frozen payload files into a private root-owned
 // stage. It neither creates a service nor touches the installed service state.
 func Stage(ctx context.Context, bundle, sha string) (string, error) {
 	if os.Geteuid() != 0 || !filepath.IsAbs(bundle) {
@@ -1177,13 +1330,16 @@ func Stage(ctx context.Context, bundle, sha string) (string, error) {
 		return stage, err
 	}
 	pins := map[string]FilePin{"pomar": m.Target.Binaries["pomar"], "pomar-host": m.Target.Binaries["pomar-host"], "pomar-host.entitlements": m.Entitlements}
+	if m.migrating() {
+		pins[targetPlistName] = *m.Identifiers.TargetPlist
+	}
 	for name, pin := range pins {
 		b, err := readFile(filepath.Join(bundle, name), pin.Bytes, ^uint32(0))
 		if err != nil || int64(len(b)) != pin.Bytes || digest(b) != pin.SHA256 {
 			return stage, fmt.Errorf("staged payload binding refused")
 		}
 		mode := os.FileMode(0600)
-		if name != "pomar-host.entitlements" {
+		if name == "pomar" || name == "pomar-host" {
 			mode = 0700
 		}
 		if err = durableWrite(filepath.Join(stage, name), b, mode); err != nil {
@@ -1191,7 +1347,16 @@ func Stage(ctx context.Context, bundle, sha string) (string, error) {
 		}
 	}
 	for _, name := range binaries {
-		if err = n.targetSignature(ctx, filepath.Join(stage, name), name); err != nil {
+		if err = n.signature(ctx, filepath.Join(stage, name), name, true); err != nil {
+			return stage, err
+		}
+	}
+	if m.migrating() {
+		data, err := pinnedFile(filepath.Join(stage, targetPlistName), *m.Identifiers.TargetPlist)
+		if err != nil {
+			return stage, err
+		}
+		if _, err := plistWithoutLabel(ctx, data, neutralLabel); err != nil {
 			return stage, err
 		}
 	}

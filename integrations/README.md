@@ -24,8 +24,10 @@ The command binaries assemble optional features at their entry points.
 - **Existing deployment and seat policy** remains available through the
   compatibility integration. It keeps the current seat commands, records and
   upgrades for installed deployments. Standalone workloads use the manager
-  and environment commands. The installed runtime identifiers will have an
-  explicit migration and rollback path.
+  and environment commands. The site qualification harness, including its
+  process inventory and mail fixtures, lives alongside the deployment policy.
+  Existing macOS services have an explicit
+  [identifier migration and rollback path](../docs/service-upgrade.md#runtime-identifier-migration).
 
 The architecture test checks Go files across the repository, including tests,
 with exceptions for command entry points, integrations, and hidden build trees.

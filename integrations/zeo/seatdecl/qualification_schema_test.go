@@ -3,8 +3,8 @@ package seatdecl_test
 import (
 	"testing"
 
+	"github.com/rodriveracom/pomar/integrations/zeo/prequal"
 	"github.com/rodriveracom/pomar/integrations/zeo/seatdecl"
-	"github.com/rodriveracom/pomar/integrations/zeomessenger/prequal"
 )
 
 // seat profile/up compile only declarations and their class catalogue. Even a

@@ -40,7 +40,9 @@ swift_release
 host_bin=$(swift_release --show-bin-path)/pomar-host
 cp "$host_bin" "$scratch/bin/pomar-host"
 /usr/bin/strip -S -x "$scratch/bin/pomar-host"
-codesign --force --sign - --entitlements host/pomar-host.entitlements "$scratch/bin/pomar-host"
+codesign --force --sign - --identifier io.github.rodriveracom.pomar.pomar "$scratch/bin/pomar"
+codesign --force --sign - --identifier io.github.rodriveracom.pomar.pomar-host --entitlements host/pomar-host.entitlements "$scratch/bin/pomar-host"
+codesign --verify --strict "$scratch/bin/pomar"
 codesign --verify --strict "$scratch/bin/pomar-host"
 codesign -d --entitlements - --xml "$scratch/bin/pomar-host" 2>/dev/null | grep -q com.apple.security.virtualization
 [ -z "$(git status --porcelain)" ] || { echo 'Source changed during build.' >&2; exit 1; }

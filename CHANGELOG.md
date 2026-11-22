@@ -11,3 +11,7 @@
 - Upgrade and roll back the Swift host, Go host and guest as one bundle so
   that the guest can interpret the host's `-notification-channel` flag.
 - Provide an owner-pinned signed release feed interface for independent producers.
+- Use the `io.github.rodriveracom.pomar` namespace for macOS binary signing
+  and scratch Keychain probes. A manifest-bound service upgrade can switch
+  existing launchd installs to the neutral label and restore the exact legacy
+  plist and binaries on rollback.

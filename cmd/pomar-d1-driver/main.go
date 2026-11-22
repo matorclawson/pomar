@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rodriveracom/pomar/integrations/zeomessenger/prequal"
+	"github.com/rodriveracom/pomar/integrations/zeo/prequal"
 )
 
 const observationLimit = 1 << 20
