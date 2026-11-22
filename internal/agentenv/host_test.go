@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
 func TestHostMailChannelBindsSeatAndRevokesWithNetwork(t *testing.T) {

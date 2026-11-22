@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // startController is startHeld with the environment's controller
@@ -267,7 +267,7 @@ func TestServeMCPControllerTool(t *testing.T) {
 }
 
 // Request IDs carry the actor's nonce, so the broker's permission IDs differ
-// across actors (incarnations) for the same first request (SOW 06 finding 2).
+// across actors (incarnations) for the same first request.
 func TestPermissionIDsDifferAcrossActors(t *testing.T) {
 	ids := map[string]bool{}
 	for i := 0; i < 2; i++ {

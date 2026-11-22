@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/manager"
 	"strings"
 	"testing"
 )
@@ -32,8 +32,8 @@ func TestHistoryRetainsUnknownEvidenceAndRefusesLiveOrDuplicateEntries(t *testin
 	}
 }
 
-// ProfRod's independently executed counterexample: float64 decoding merged
-// these adjacent retained integers even though the history evidence changed.
+// This regression covers an observed failure: float64 decoding merged these
+// adjacent retained integers even though the history evidence changed.
 func TestHistoryDoesNotRoundUnknownLargeIntegerEvidence(t *testing.T) {
 	a := []byte(`[{"attempt":"original","state":"exited","future_evidence":9007199254740992}]`)
 	b := []byte(`[{"attempt":"original","state":"exited","future_evidence":9007199254740993}]`)

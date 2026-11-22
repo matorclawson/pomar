@@ -6,12 +6,12 @@
 //
 // It is integrity-locked. An attempt carries its lock, read on the host from
 // the repository at the attempt's exact commit, never from the guest; a
-// tarball is served only if the lock names its path, and its bytes are
-// checked against the lock's sha512 before they are cached or served.
-// Tarballs are kept in a cache directory by that sha512. `npm ci` with a
-// complete lock fetches each tarball by its resolved URL, which npm rewrites
-// to the configured registry, so no package metadata (packument) is needed,
-// and none is served (DESIGN-03 §2; the elders' ruling of 2026-09-27 §3.3).
+// tarball is served only if the lock names its path, and its bytes are checked
+// against the lock's sha512 before they are cached or served. Tarballs are
+// kept in a cache directory by that sha512. `npm ci` with a complete lock
+// fetches each tarball by its resolved URL, which npm rewrites to the
+// configured registry, so no package metadata (packument) is needed, and none
+// is served.
 package npmproxy
 
 import (
@@ -241,11 +241,10 @@ func (p *Proxy) Handler(log io.Writer) http.Handler {
 				Status    int    `json:"status,omitempty"`
 				// Bytes and Want are both pointers, omitted entirely for the
 				// lifecycle markers (received, cache, upstream_*) where byte
-				// counts are meaningless -- only completed and send_short
-				// set them, so a genuine zero byte count from either of
-				// those (council P3 on #138: send_short's own zero was
-				// being silently dropped) still serializes, distinct from
-				// "not applicable to this event at all".
+				// counts are meaningless -- only completed and send_short set
+				// them, so a genuine zero byte count from either of those
+				// still serializes, distinct from "not applicable to this
+				// event at all".
 				Bytes  *int64 `json:"bytes,omitempty"`
 				Want   *int64 `json:"want,omitempty"` // send_short only: the size the write fell short of
 				Reason string `json:"reason,omitempty"`
@@ -336,18 +335,16 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, writeEvent func(ev
 	return sendFile(w, r, f, false, writeEvent)
 }
 
-// sendFile writes f's whole content as the response body. The status line
-// and Content-Length are already on the wire by the time io.Copy can fail,
-// so a write that falls short can't change what the client was already
-// told -- HTTP offers no way to revise a status after WriteHeader. What it
-// can do is say so: a short or erroring copy is reported as its own
-// "send_short" event (never silently folded into "completed" as if the
-// guest received every byte), naming how many bytes this host's own
-// write actually completed and why, for whoever reads the log afterward.
-// This was a real gap (profrod, PROFROD-SOW-330/pomar#83): io.Copy's
-// error was discarded entirely, and "completed" was logged regardless,
-// making a truncated delivery indistinguishable from a clean one from the
-// log alone.
+// sendFile writes f's whole content as the response body. The status line and
+// Content-Length are already on the wire by the time io.Copy can fail, so a
+// write that falls short can't change what the client was already told -- HTTP
+// offers no way to revise a status after WriteHeader. What it can do is say so:
+// a short or erroring copy is reported as its own "send_short" event (never
+// silently folded into "completed" as if the guest received every byte), naming
+// how many bytes this host's own write actually completed and why, for whoever
+// reads the log afterward. This was a real gap: io.Copy's error was discarded
+// entirely, and "completed" was logged regardless, making a truncated delivery
+// indistinguishable from a clean one from the log alone.
 func sendFile(w http.ResponseWriter, r *http.Request, f *os.File, hit bool, writeEvent func(event, cache string, status int, bytes, want *int64, reason string)) (int, int64, bool) {
 	want := int64(-1)
 	if fi, err := f.Stat(); err == nil {

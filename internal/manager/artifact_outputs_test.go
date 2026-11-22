@@ -3,8 +3,8 @@ package manager
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/artifactreturn"
+	"github.com/rodriveracom/pomar/internal/capacity"
 	"os"
 	"path/filepath"
 	"reflect"

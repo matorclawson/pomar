@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 func TestParseChallenge(t *testing.T) {

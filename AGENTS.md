@@ -1,7 +1,7 @@
 # Pomar for agents
 
-Changing Pomar? Read the [contributors charter](CONTRIBUTING.md) first: propose
-to the owner, build on your seat's fork branch and retain the exact gate evidence.
+Changing Pomar? Read [CONTRIBUTING.md](CONTRIBUTING.md) for the fork and
+topic-branch workflow.
 
 This is for any program that drives Pomar: a coding agent, a script, a CI
 caller. `pomar help -json` lists commands, actual output formats, job exit
@@ -12,14 +12,16 @@ and `health`; `logs` emits job bytes and `result verify` emits text.
 
 Pomar runs a command in a fresh, disposable Linux micro-VM on an Apple
 silicon Mac, with pinned inputs, no host credentials and controlled egress.
-It returns a signed result.
+A signing-enabled manager returns a signed result.
 
 You don't need the Pomar source to use it, only the `pomar` client and a
 manager's control socket.
 
 ## 1. Find your manager
 
-Your host owner gives you a control socket. Pomar never guesses one.
+For a local development manager, follow the
+[quickstart](docs/operations.md#development-manager). For an existing
+signing-enabled manager, use the exact control socket supplied by its owner.
 
 ```sh
 export POMAR_SOCKET=/path/your/owner/gave/you.sock
@@ -70,7 +72,7 @@ pomar attempt result -id build-1                # the signed result document
 
 ## 4. Trust the result, not the exit code alone
 
-The result is signed by the manager. Verify it with the owner's public key,
+For a signing-enabled manager, verify the result with the owner's public key,
 which you got from them independently, not from the manager you're checking:
 
 ```sh

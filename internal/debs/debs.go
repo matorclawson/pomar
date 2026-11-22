@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // Package is one pinned .deb.

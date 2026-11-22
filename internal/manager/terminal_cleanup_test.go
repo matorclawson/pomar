@@ -1,6 +1,6 @@
 package manager
 
-// sow: pomar-SOW-87. No VM or permanent service is started by these fixtures.
+// No VM or permanent service is started by these fixtures.
 import (
 	"bytes"
 	"encoding/json"
@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/cache"
-	"github.com/zeroemployeeorg/pomar/internal/result"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/cache"
+	"github.com/rodriveracom/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 func terminalVMFixture(t *testing.T, m *Manager, v *venue.Venue, id string) string {

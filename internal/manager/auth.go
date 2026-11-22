@@ -8,12 +8,12 @@ import (
 	"slices"
 )
 
-// Caller-specific class authorisation on the control socket (the council's
-// ruling of 2026-10-01 23:11Z §3). The caller is the uid the kernel recorded
-// for the connecting process (peerUID), never anything the client says. A
-// class with an allow list may be started, read and stopped through the
-// control socket only by the uids on it; the owner's socket is the operator's
-// and is not scoped. A uid names a local OS account, not a seat that shares it.
+// Caller-specific class authorisation on the control socket. The caller is the
+// uid the kernel recorded for the connecting process (peerUID), never anything
+// the client says. A class with an allow list may be started, read and stopped
+// through the control socket only by the uids on it; the owner's socket is the
+// operator's and is not scoped. A uid names a local OS account, not a seat
+// that shares it.
 
 // ReasonClassNotAllowed: the caller's uid is not on the class's allow list.
 const ReasonClassNotAllowed = "class-not-allowed"

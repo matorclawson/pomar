@@ -11,11 +11,11 @@ import (
 	"time"
 )
 
-// council P2: a when-ready send refused for some OTHER reason after it
-// waited for readiness (control held by someone else, here) must not burn
-// the readiness it waited for. The adapter never reports twice in this
-// test; the only way a second when-ready send can succeed quickly is if
-// the first one's claim was given back.
+// a when-ready send refused for some OTHER reason after it waited for readiness
+// (control held by someone else, here) must not burn the readiness it waited
+// for. The adapter never reports twice in this test; the only way a second
+// when-ready send can succeed quickly is if the first one's claim was given
+// back.
 func TestARefusedWhenReadySendGivesBackTheReadinessItClaimed(t *testing.T) {
 	_, c := serve(t, root(t))
 	req := shell("op-giveback", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
@@ -100,15 +100,14 @@ func TestARefusedWhenReadySendGivesBackTheReadinessItClaimed(t *testing.T) {
 	waitScreen(t, c, "agent", "got:hi")
 }
 
-// council P3 on #137: a give-back used to update the bookkeeping without
-// waking anyone already blocked in awaitReady's own select -- a second
-// when-ready send, already waiting when the first one's claim is given
-// back, would sit out its whole wait bound instead of noticing the
-// readiness is available again right away. Driven directly against
-// awaitReady/unclaimReady (same package, the actual functions under
-// test), not through two concurrent HTTP sends: a real send's claim is
-// given back the instant Control fails, with no way to hold it open from
-// outside, so there'd be no real window to put a second send to sleep in
+// a give-back used to update the bookkeeping without waking anyone already
+// blocked in awaitReady's own select -- a second when-ready send, already
+// waiting when the first one's claim is given back, would sit out its whole
+// wait bound instead of noticing the readiness is available again right away.
+// Driven directly against awaitReady/unclaimReady (same package, the actual
+// functions under test), not through two concurrent HTTP sends: a real send's
+// claim is given back the instant Control fails, with no way to hold it open
+// from outside, so there'd be no real window to put a second send to sleep in
 // first.
 func TestABlockedAwaitReadyWakesOnAGiveBackNotJustATimeout(t *testing.T) {
 	s, c := serve(t, root(t))

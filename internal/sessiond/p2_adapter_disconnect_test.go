@@ -8,12 +8,11 @@ import (
 	"time"
 )
 
-// council P2: a disconnected adapter's last report is no longer anyone's
-// word for the program's current state. Before this fix, a state channel
-// that disconnected (the adapter crashed, or was never going to report
-// again) left whatever it last said — including "waiting-input" — showing
-// forever, which a -when-ready send would have trusted as if the program
-// were still actually ready.
+// a disconnected adapter's last report is no longer anyone's word for the
+// program's current state. Before this fix, a state channel that disconnected
+// (the adapter crashed, or was never going to report again) left whatever it
+// last said — including "waiting-input" — showing forever, which a -when-ready
+// send would have trusted as if the program were still actually ready.
 func TestAdapterDisconnectResetsAgentStateToUnknown(t *testing.T) {
 	_, c := serve(t, root(t))
 	req := shell("op-disc", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
@@ -73,22 +72,20 @@ func TestAdapterDisconnectResetsAgentStateToUnknown(t *testing.T) {
 	}
 }
 
-// council P2-1 on #137: the first version of this fix tracked stateConn
-// separately from conn, but still reset state whenever the stateConn
-// connection disconnected for ANY reason — including merely being
-// superseded. serve() closes whatever was the single latest connection
-// the instant any new one is accepted, so a short-lived op-only hook
-// call (begin/finish, never an AdapterReport) forcibly evicted a
-// long-lived real reporter, whose read loop then ended and whose
-// disconnect still fired a reset — every such hook call wiped real
-// state; only the moment moved from "hook exits" to "hook arrives". The
-// fix requires a reset to ALSO be this connection's own genuine end
-// (error, EOF, the program closing it) — never merely having been
-// superseded, which is instead distinguishable because a.conn no longer
-// names it by the time disconnected runs. This test drives exactly that:
-// a real reporter superseded by a later connection keeps its last
-// reported state, and only a later, genuinely unsuperseded close of a
-// state-reporting connection resets anything.
+// the first version of this fix tracked stateConn separately from conn, but
+// still reset state whenever the stateConn connection disconnected for ANY
+// reason — including merely being superseded. serve() closes whatever was the
+// single latest connection the instant any new one is accepted, so a
+// short-lived op-only hook call (begin/finish, never an AdapterReport) forcibly
+// evicted a long-lived real reporter, whose read loop then ended and whose
+// disconnect still fired a reset — every such hook call wiped real state; only
+// the moment moved from "hook exits" to "hook arrives". The fix requires a
+// reset to ALSO be this connection's own genuine end (error, EOF, the program
+// closing it) — never merely having been superseded, which is instead
+// distinguishable because a.conn no longer names it by the time disconnected
+// runs. This test drives exactly that: a real reporter superseded by a later
+// connection keeps its last reported state, and only a later, genuinely
+// unsuperseded close of a state-reporting connection resets anything.
 func TestAnOpOnlyConnectionNeverResetsAgentState(t *testing.T) {
 	_, c := serve(t, root(t))
 	req := shell("op-oponly", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
@@ -170,15 +167,14 @@ func TestAnOpOnlyConnectionNeverResetsAgentState(t *testing.T) {
 	}
 }
 
-// council P2-2 on #137: ResetAgentUnknown used to rebuild the whole
-// AgentState, losing Accepted along with State and Detail. An acceptance
-// is a past fact (the program already confirmed it took an input), not a
-// claim about the program's current state; a disconnected adapter no
-// longer vouches for "running", but it never un-confirms an input it
-// already said was accepted. Before the fix, a disconnect right after an
-// acceptance would flip a live input-status read from "yes" back to
-// "pending", and a send already waiting in awaitAccepted could settle
-// without ever seeing the acceptance it was actually told about.
+// ResetAgentUnknown used to rebuild the whole AgentState, losing Accepted along
+// with State and Detail. An acceptance is a past fact (the program already
+// confirmed it took an input), not a claim about the program's current state; a
+// disconnected adapter no longer vouches for "running", but it never
+// un-confirms an input it already said was accepted. Before the fix, a
+// disconnect right after an acceptance would flip a live input-status read from
+// "yes" back to "pending", and a send already waiting in awaitAccepted could
+// settle without ever seeing the acceptance it was actually told about.
 func TestResetAgentUnknownKeepsAcceptedButClearsState(t *testing.T) {
 	_, c := serve(t, root(t))
 	req := shell("op-keep-accepted", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)
@@ -218,18 +214,17 @@ func TestResetAgentUnknownKeepsAcceptedButClearsState(t *testing.T) {
 	}
 }
 
-// council P3-3 on #137 (round three): statically, the mutant
-// `resetDue := stillLatest` (dropping the `&& wasStateConn` half of the
-// guard entirely) survives the whole existing suite -- nothing actually
-// drives an op-only connection's OWN, unsuperseded close while it is the
-// single latest connection, after a real reporter already set state and
-// was itself superseded away. That mutant would wrongly reset state on
-// every hook's own exit, exactly the original round-one bug, just
-// reached a different way. This drives precisely that shape: a reporter
-// sets state, an op-only connection supersedes it (state must survive,
-// as the test above already checks), and then THAT op-only connection's
-// own close (nothing superseding it) must likewise leave state alone --
-// it was never stateConn, regardless of being the latest.
+// statically, the mutant `resetDue:= stillLatest` (dropping the `&&
+// wasStateConn` half of the guard entirely) survives the whole existing suite
+// -- nothing actually drives an op-only connection's OWN, unsuperseded close
+// while it is the single latest connection, after a real reporter already set
+// state and was itself superseded away. That mutant would wrongly reset state
+// on every hook's own exit, exactly the original round-one bug, just reached a
+// different way. This drives precisely that shape: a reporter sets state, an
+// op-only connection supersedes it (state must survive, as the test above
+// already checks), and then THAT op-only connection's own close (nothing
+// superseding it) must likewise leave state alone -- it was never stateConn,
+// regardless of being the latest.
 func TestAnOpOnlyConnectionsOwnUnsupersededExitNeverResetsAgentState(t *testing.T) {
 	_, c := serve(t, root(t))
 	req := shell("op-oponly-own-exit", "agent", `printf '%s\n' "$POMAR_SESSION_STATE"; while read l; do printf 'got:%s\n' "$l"; done`)

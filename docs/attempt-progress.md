@@ -35,7 +35,7 @@ The response includes a short `summary` and these structured fields:
 | `registry.longest_gap_seconds`, `longest_gap_from_event`, `longest_gap_from_at`, `longest_gap_to_event`, `longest_gap_to_at` | The registry trace's own single largest gap between two consecutive recognized events, with both endpoints named; empty when fewer than two were observed. `install_stall.longest_registry_gap_seconds` below is this same value, re-exposed with its own source status and unknown-reason when it isn't available |
 | `resources.observed_at`, `peaks`, `disk_scope` | Measurement time and historical VM peaks; the disk figure is a shared-filesystem delta, not per-job I/O |
 | `stall_assessment` | `NOT_DETERMINED`: silence, heartbeats and low CPU alone do not prove a stall or its cause |
-| `install_stall` | A fact-only diagnostic for PROFROD-SOW-330's install-stall question (POMAR-CC-SOW-37), computed on this same read. See below. |
+| `install_stall` | A diagnostic of observed install progress, computed on this same read. See below. |
 
 ### `install_stall`: fact-only, never a verified cause
 
@@ -67,11 +67,9 @@ no Created time, or the two are inconsistent (window end precedes
 Created) -- not knowing, or not trusting, where the window begins and
 ends is itself a trigger below, distinct from having observed the
 window's full extent. This field is a schema change from an earlier,
-narrower `window_end_unknown`/`window_end_unknown_reason` pair (council's
-review of pomar#141, round six): the JSON keys themselves were renamed to
-`attempt_interval_unknown`/`attempt_interval_unknown_reason`, not just
-broadened in meaning -- a consumer matching the old key names will see
-neither key present.
+narrower `window_end_unknown`/`window_end_unknown_reason` pair. Consumers
+should read `attempt_interval_unknown` and `attempt_interval_unknown_reason`
+for the current schema.
 
 `indication` is OPTIONAL: a one-word, evidential-named summary
 (`PROXY_SHORT_DELIVERY_OBSERVED`, `REGISTRY_GAP_OVER_THRESHOLD`,
@@ -136,9 +134,7 @@ blocking on FIFOs. Class authorization applies before any progress read. The
 registry projection is mostly aggregates (counts, timestamps, gaps), never
 request headers or upstream bodies; its one exception is
 `send_short_requests`, whose `path` is a real, individual path from the
-log, not an aggregate -- but always bounded and sanitized at the source
-(council C9 on #141: this line previously read as if no paths at all were
-carried, which `send_short_requests` contradicts). Its coverage is a trace
+log, bounded and sanitized at the source. Its coverage is a trace
 window, not a complete request ledger; reused legacy request IDs are
 identified explicitly. Resource sample age can remain unknown after a
 manager restart.

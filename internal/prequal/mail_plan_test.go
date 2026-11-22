@@ -11,11 +11,13 @@ import (
 	"time"
 )
 
+const legacyDenialHint = "; zmsg inbox --all lists every message it has"
+
 func fixtureDenial(id string) MailDenial {
 	b, _ := json.Marshal(struct {
 		Exit   int    `json:"exit"`
 		Output string `json:"output"`
-	}{2, "zmail: no message " + id + " in pomar-d1-disposable-20261102's inbox; zmsg inbox --all lists every message it has\n"})
+	}{2, "zmail: no message " + id + " in pomar-d1-disposable-20261102's inbox" + legacyDenialHint + "\n"})
 	b = append(b, '\n')
 	return MailDenial{Status: 422, Headers: []MailHeader{{"Content-Type", "application/json"}, {"Date", "first"}, {"Content-Length", strconv.Itoa(len(b))}}, Body: b}
 }
@@ -45,6 +47,22 @@ func TestMailDenialsExactIDComparisonRetainsRaw(t *testing.T) {
 	}
 	if !bytes.Equal(f.Body, beforeF) || !bytes.Equal(m.Body, beforeM) {
 		t.Fatal("comparison modified retained raw evidence")
+	}
+}
+
+func TestMailDenialsAcceptCanonicalResponseWithoutLegacyHint(t *testing.T) {
+	template := fixtureTemplate()
+	foreign, missing := fixtureDenial("msg-foreign-existing"), fixtureDenial("msg-missing")
+	hint := []byte(legacyDenialHint)
+	template.Body = bytes.Replace(template.Body, hint, nil, 1)
+	sum := sha256.Sum256(template.Body)
+	template.SHA256 = hex.EncodeToString(sum[:])
+	for _, denial := range []*MailDenial{&foreign, &missing} {
+		denial.Body = bytes.Replace(denial.Body, hint, nil, 1)
+		fixLength(denial)
+	}
+	if _, err := CompareMailDenials(template, "msg-foreign-existing", "msg-missing", foreign, missing); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -142,6 +160,11 @@ func TestMailDenialsRejectUnpinnedOrDifferentCallerTemplate(t *testing.T) {
 		func(t *MailDenialTemplate) { t.Headers[0].Value = "text/plain" },
 		func(t *MailDenialTemplate) { t.Version = "unreviewed-version" },
 		func(t *MailDenialTemplate) { t.CallerSeat = "another-seat" },
+		func(t *MailDenialTemplate) {
+			t.Body = bytes.Replace(t.Body, []byte("zmsg inbox"), []byte("different hint"), 1)
+			h := sha256.Sum256(t.Body)
+			t.SHA256 = hex.EncodeToString(h[:])
+		},
 		func(t *MailDenialTemplate) {
 			t.Body = append(t.Body, ' ')
 			h := sha256.Sum256(t.Body)

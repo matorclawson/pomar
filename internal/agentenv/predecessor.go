@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/localclient"
 )
 
 func syncDirectory(path string) error {

@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/cicaller"
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/cicaller"
+	"github.com/rodriveracom/pomar/internal/manager"
 )
 
 const bindir = "/usr/local/libexec/pomar"

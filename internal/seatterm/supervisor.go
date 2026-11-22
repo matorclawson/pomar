@@ -16,12 +16,12 @@ import (
 	"time"
 )
 
-// Supervisor is the program in a seat's tmux session (SOW 16 §3.1). It
-// never starts the actor by itself: it shows an idle prompt, and starts
-// Claude Code only when the operator asks, and never again after it exits
-// until asked again. The first start records a fresh session ID and uses
-// --session-id; every later start resumes that recorded ID, so a seat is
-// one conversation, not "the newest one in this folder".
+// Supervisor is the program in a seat's tmux session. It never starts the actor
+// by itself: it shows an idle prompt, and starts Claude Code only when the
+// operator asks, and never again after it exits until asked again. The first
+// start records a fresh session ID and uses --session-id; every later start
+// resumes that recorded ID, so a seat is one conversation, not "the newest one
+// in this folder".
 //
 // A second actor is refused while the first lives: the actor holds an
 // exclusive lock on StateDir/actor.lock through a descriptor it inherits,

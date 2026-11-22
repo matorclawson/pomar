@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/cache"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/cache"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // CacheReport is the budgets' state and what an eviction pass removed.

@@ -243,10 +243,9 @@ func TestShowListsHeldOperationsWithAge(t *testing.T) {
 	}
 }
 
-// zeocouncil's B1 fix: while any operation is held, a send (raw or
-// when-ready) refuses unless AckUnknown is given, so a wake or a typed
-// "continue" can't be the thing that resumes past an unresolved action.
-// AckUnknown never clears the hold itself.
+// while any operation is held, a send (raw or when-ready) refuses unless
+// AckUnknown is given, so a wake or a typed "continue" can't be the thing that
+// resumes past an unresolved action. AckUnknown never clears the hold itself.
 func TestSendRefusesWhileHeldUnlessAcknowledged(t *testing.T) {
 	_, c := serve(t, root(t))
 	o, path, _ := newAgentSession(t, c, "agent")

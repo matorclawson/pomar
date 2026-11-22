@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/smoke"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/smoke"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 type fixture struct {

@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // Name identifies this adapter in the userAgent it reports.

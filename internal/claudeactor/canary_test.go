@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // The adviser's §3.5 item 1 (r40 rev 2), proposal P3: a canary credential in

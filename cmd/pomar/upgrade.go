@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/zeroemployeeorg/pomar/internal/serviceupgrade"
+	"github.com/rodriveracom/pomar/internal/serviceupgrade"
 	"io"
 	"time"
 )

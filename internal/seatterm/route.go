@@ -10,17 +10,17 @@ import (
 	"time"
 )
 
-// Route serves POST /v1/terminal in a seat's guest: an upgrade to
-// Protocol, bound to the environment's exact session and incarnation
-// (SOW 16 §3.2). The host's agent proxy carries it from the owner-only
-// socket. The first frame must be the client's window size; then the fixed
-// attach command runs on a terminal for the rest of the stream.
+// Route serves POST /v1/terminal in a seat's guest: an upgrade to Protocol,
+// bound to the environment's exact session and incarnation. The host's agent
+// proxy carries it from the owner-only socket. The first frame must be the
+// client's window size; then the fixed attach command runs on a terminal for
+// the rest of the stream.
 type Route struct {
 	// Binding reports whether session and incarnation are this
 	// environment's current ones; a stale or foreign binding is refused.
 	Binding func(session, incarnation string) bool
 	// Ensure makes the seat's tmux session exist, holding only the idle
-	// supervisor; it never starts the actor (SOW 16 §3.1).
+	// supervisor; it never starts the actor.
 	Ensure func() error
 	// Attach is the tmux client for the seat's session.
 	Attach Command

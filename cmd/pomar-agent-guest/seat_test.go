@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
-	"github.com/zeroemployeeorg/pomar/internal/claudeactor"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/claudeactor"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // The tmux session's program is the supervisor, never Claude Code itself:
-// nothing starts the actor but the operator (SOW 16 §3.1).
+// nothing starts the actor but the operator.
 func TestTheSeatsSessionHoldsOnlyTheSupervisor(t *testing.T) {
 	argv := tmuxEnsure(seatConfig{Seat: "zeocreator", Claude: "/opt/pomar-claude/bin/claude", Self: "/opt/pomar/pomar-agent-guest"})
 	i := slices.Index(argv, "--")

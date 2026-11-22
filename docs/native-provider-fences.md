@@ -36,7 +36,7 @@ under an existing lock is a recovery error, not a new empty namespace.
 ## Gates still required before a custodian can act
 
 - Authenticate the principal and validate the complete immutable request before
-  hashing it, including seat/SOW, job/attempt, repository/commit/tree, tools,
+  hashing it, including seat and owner reference, job and attempt, repository/commit/tree, tools,
   argv/environment/profile, class/resources and host incarnation/generation.
 - Establish independently verified clock quality and the live monotonic lease
   deadline. The injected wall clock here only records/tests absolute expiry;

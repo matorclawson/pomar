@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentartifact"
+	"github.com/rodriveracom/pomar/internal/agentartifact"
 )
 
 func main() {

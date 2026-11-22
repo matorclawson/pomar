@@ -15,9 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
-	"github.com/zeroemployeeorg/pomar/internal/codexseat"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/codexseat"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 const codexStateDir = "/var/lib/pomar-agent/codex-seat"

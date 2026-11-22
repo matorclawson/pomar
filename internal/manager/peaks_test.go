@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/proc"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 func TestParseFootprint(t *testing.T) {

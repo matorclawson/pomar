@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/manager"
 )
 
 // fakeManager answers like a manager whose one job runs for a few polls,

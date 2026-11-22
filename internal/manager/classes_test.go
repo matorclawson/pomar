@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // The class fixtures already model CPU/memory. Model a healthy shared disk
@@ -102,7 +102,7 @@ func TestStartChoosesTheNamedClass(t *testing.T) {
 }
 
 // Class names follow the attempt-id pattern: lower-case letters, digits and
-// dashes (the elders' ruling of 2026-09-27 §1.3).
+// dashes.
 func TestJobClassNamesArePatternChecked(t *testing.T) {
 	v, _ := openFixtureVenue(t.TempDir())
 	v.Init()

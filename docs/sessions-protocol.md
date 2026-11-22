@@ -1,7 +1,7 @@
 # Pomar sessions: the protocol
 
 This is the wire protocol of a Pomar session service, for any client: the
-`pomar` CLI, ZEOAPP's console, or a seat's runtime. It has two parts on one
+`pomar` CLI, a console client or a seat's runtime. It has two parts on one
 socket: a JSON API, and the `pomar-terminal/v2` attach stream. What sessions
 are, and what they don't claim, is in [sessions.md](sessions.md).
 
@@ -123,11 +123,8 @@ Every `possible_*` field is a fixed, documented substring match against that
 text, nothing more: diagnostic only, never authoritative, never fed back
 into any control or readiness decision, and never a substitute for agent
 state (below) when an adapter can speak at all. **It never raises an alarm
-by itself** — the acceptance's four alarm conditions (a failed canary, a
-declared/live mismatch, no tool success in 30 minutes while a SOW is
-ACTIVE, or a missed heartbeat with a stale record) are what an alarm
-consumer (zeo-rt's orgchart) actually fires on; these fields only enrich
-that alarm's text with what the screen showed. `pattern_version` names
+by itself.** Monitoring clients may include these observations in an alert
+raised under their own policy. `pattern_version` names
 which pattern list matched, since the lists change over time and an older
 alarm shouldn't be read against today's. This route exports no screen
 content, transcript or title: exactly the fields above, nothing else.

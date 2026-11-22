@@ -36,9 +36,9 @@ type AttemptProgress struct {
 	Resources      ProgressResources `json:"resources"`
 	// Absence of stdout or a low CPU sample is not proof of a stall.
 	StallAssessment string `json:"stall_assessment"`
-	// InstallStall is PROFROD-SOW-330/POMAR-CC-SOW-37's own diagnosis,
-	// computed on read from the same Log/Registry/times above -- never a
-	// verified cause, never retry/config/egress authority.
+	// InstallStall is a diagnosis computed on read from the same
+	// Log/Registry/times above -- never a verified cause, never
+	// retry/config/egress authority.
 	InstallStall InstallStallDiagnostic `json:"install_stall"`
 }
 
@@ -83,13 +83,13 @@ type RegistryProgress struct {
 	Events       map[string]int `json:"event_counts"`
 	CacheHits    int            `json:"cache_hits_observed"`
 	CacheMisses  int            `json:"cache_misses_observed"`
-	// FirstEventAt is the first ACCEPTED event encountered in arrival
-	// (line) order, not necessarily the lowest timestamp among accepted
-	// events (council C8 on #141): an accepted event can itself be a few
-	// milliseconds behind the one just before it (ordinary concurrency
-	// jitter, within outOfOrderTolerance of the watermark), so a later
-	// line can in principle carry an earlier timestamp than the one that
-	// already set FirstEventAt. It is never re-sorted or replaced once set.
+	// FirstEventAt is the first ACCEPTED event encountered in arrival (line)
+	// order, not necessarily the lowest timestamp among accepted events: an
+	// accepted event can itself be a few milliseconds behind the one just
+	// before it (ordinary concurrency jitter, within outOfOrderTolerance of the
+	// watermark), so a later line can in principle carry an earlier timestamp
+	// than the one that already set FirstEventAt. It is never re-sorted or
+	// replaced once set.
 	FirstEventAt   *time.Time `json:"first_event_at"`
 	LastEventAt    *time.Time `json:"last_event_at"`
 	LastTransferAt *time.Time `json:"last_transfer_at"`
@@ -121,34 +121,34 @@ type RegistryProgress struct {
 	// own LastOutputAt) -- a fact a caller can read for itself, not a
 	// boolean conclusion this package draws about whose fault a stall is.
 	EventsSinceGuestQuiet int `json:"events_since_guest_quiet"`
-	// ChangedDuringRead mirrors ProgressLog.ChangedDuringRead for this
-	// same npmproxy.log read (council P1-2 on #141: previously computed
-	// by progressFile and silently discarded for this source) -- a
-	// non-atomic tail read, taken while the file was still being written.
+	// ChangedDuringRead mirrors ProgressLog.ChangedDuringRead for this same
+	// npmproxy.log read (previously computed by progressFile and silently
+	// discarded for this source) -- a non-atomic tail read, taken while the
+	// file was still being written.
 	ChangedDuringRead bool `json:"changed_during_read"`
-	// EventsBeforeWindowStart/EventsAfterWindowEnd/EventsOutOfOrder
-	// (council P2-2 on #141) count recognized events that fall outside
-	// [windowStart, windowEnd] or arrive with a timestamp earlier than an
-	// already-accepted one, when registryProgress was given a window to
-	// bind against. Such events are facts on their own (a non-zero count
-	// is itself worth surfacing) but are excluded from FirstEventAt,
-	// LastEventAt, the gap tracking and EventsSinceGuestQuiet -- an event
-	// that can't be trusted to belong to this attempt's own timeline
-	// must never silently widen or narrow an "observed" gap.
+	// EventsBeforeWindowStart/EventsAfterWindowEnd/EventsOutOfOrder count
+	// recognized events that fall outside [windowStart, windowEnd] or arrive
+	// with a timestamp earlier than an already-accepted one, when
+	// registryProgress was given a window to bind against. Such events are
+	// facts on their own (a non-zero count is itself worth surfacing) but are
+	// excluded from FirstEventAt, LastEventAt, the gap tracking and
+	// EventsSinceGuestQuiet -- an event that can't be trusted to belong to this
+	// attempt's own timeline must never silently widen or narrow an "observed"
+	// gap.
 	EventsBeforeWindowStart int `json:"events_before_window_start"`
 	EventsAfterWindowEnd    int `json:"events_after_window_end"`
 	// EventsOutOfOrder only counts an event whose timestamp is more than
-	// outOfOrderTolerance earlier than one already accepted -- council N1:
-	// npmproxy stamps time.Now() before acquiring its own log lock, so
-	// ordinary concurrent requests (the normal case for a real install,
-	// not an edge case) can legitimately land a few milliseconds out of
-	// strict order; treating that as corrupted data made a real,
-	// concurrent install unable to ever produce an evidential indication.
+	// outOfOrderTolerance earlier than one already accepted because npmproxy
+	// stamps time.Now() before acquiring its own log lock, so ordinary
+	// concurrent requests (the normal case for a real install, not an edge
+	// case) can legitimately land a few milliseconds out of strict order;
+	// treating that as corrupted data made a real, concurrent install unable
+	// to ever produce an evidential indication.
 	EventsOutOfOrder int `json:"events_out_of_order"`
-	// EventsInFuture counts a recognized event timestamped after `now`
-	// (council N3): previously silently dropped and indistinguishable
-	// from a line that simply wasn't there; now a fact in its own right
-	// (a clock problem, or a read racing a still-landing write).
+	// EventsInFuture counts a recognized event timestamped after `now`:
+	// previously silently dropped and indistinguishable from a line that simply
+	// wasn't there; now a fact in its own right (a clock problem, or a read
+	// racing a still-landing write).
 	EventsInFuture int `json:"events_in_future"`
 }
 
@@ -199,22 +199,20 @@ var evidenceReasons = map[string]bool{
 
 // sanitizeEvidenceText replaces anything outside printable ASCII with a
 // placeholder (so no amount of JSON-escaping-expansion can make a
-// bounded-byte-length string marshal larger than a small, predictable
-// multiple of its own length -- pomar's U+0001/'<' counterexample),
-// then bounds the result to maxLen. The returned bool is true if the
-// text was altered in either way.
-// jsonEscapes is every byte that doesn't marshal to exactly one byte of
-// JSON output -- not just control characters and non-ASCII. Council M08/
-// M08b (round five on #141): the first version of this function treated
-// any printable-ASCII byte (0x20-0x7e) as already safe, which includes
-// '<', '>', '&', '"' and '\\'. Go's encoding/json, by default, HTML-escapes
-// '<'/'>'/'&' to six-byte \u00XX sequences, and '"'/'\\' always need a
-// two-byte escape -- an all-'<' adversarial path, bounded only by raw
-// byte count, still marshaled to well over this report's 4 KiB cap.
-// Replacing these five too, alongside the already-excluded control/
-// non-ASCII bytes, makes every surviving byte cost exactly one byte in
-// the real marshaled output, so the raw-length bound below is an actual
-// bound on the escaped size too, regardless of json.Marshal's own
+// bounded-byte-length string marshal larger than a small, predictable multiple
+// of its own length -- pomar's U+0001/'<' counterexample), then bounds the
+// result to maxLen. The returned bool is true if the text was altered in
+// either way. jsonEscapes is every byte that doesn't marshal to exactly one
+// byte of JSON output -- not just control characters and non-ASCII. The first
+// version of this function treated any printable-ASCII byte (0x20-0x7e) as
+// already safe, which includes '<', '>', '&', '"' and '\\'. Go's
+// encoding/json, by default, HTML-escapes '<'/'>'/'&' to six-byte \u00XX
+// sequences, and '"'/'\\' always need a two-byte escape -- an all-'<'
+// adversarial path, bounded only by raw byte count, still marshaled to well
+// over this report's 4 KiB cap. Replacing these five too, alongside the
+// already-excluded control/ non-ASCII bytes, makes every surviving byte cost
+// exactly one byte in the real marshaled output, so the raw-length bound below
+// is an actual bound on the escaped size too, regardless of json.Marshal's own
 // HTML-escaping setting.
 var jsonEscapes = map[byte]bool{'<': true, '>': true, '&': true, '"': true, '\\': true}
 
@@ -367,10 +365,10 @@ func (m *Manager) progressOf(e Entry, now time.Time) *AttemptProgress {
 	} else if os.IsNotExist(err) {
 		p.Log.Availability = "NOT_CREATED"
 	}
-	// windowEnd is nil only when this attempt is terminal but never
-	// recorded an Ended time -- council P2-1 on #141: that must read as
-	// unknown everywhere it's used, never silently fall back to `now`
-	// and manufacture a growing fact out of wall-clock time.
+	// windowEnd is nil only when this attempt is terminal but never recorded
+	// an Ended time. That must read as unknown everywhere it's used, never
+	// silently fall back to `now` and manufacture a growing fact out of
+	// wall-clock time.
 	var windowEnd *time.Time
 	var windowEndUnknownReason string
 	switch {
@@ -471,10 +469,10 @@ func workloadPhase(b []byte, partial bool) *WorkloadPhase {
 	return latest
 }
 
-// windowStart/windowEnd (council P2-2 on #141) bind recognized events to
-// the attempt's own timeline: windowEnd nil means the end of that
-// timeline isn't known for this read (a terminal attempt with no
-// recorded Ended), in which case only windowStart still applies.
+// windowStart/windowEnd bind recognized events to the attempt's own timeline:
+// windowEnd nil means the end of that timeline isn't known for this read (a
+// terminal attempt with no recorded Ended), in which case only windowStart
+// still applies.
 func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *time.Time, changedDuringRead bool, windowStart time.Time, windowEnd *time.Time) RegistryProgress {
 	p := RegistryProgress{Availability: "AVAILABLE", Coverage: "TAIL_WINDOW", Statuses: map[int]int{}, Events: map[string]int{}, WindowTruncated: partial, ChangedDuringRead: changedDuringRead}
 	lines := bytes.Split(b, []byte{'\n'})
@@ -482,48 +480,45 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 		lines = lines[1:]
 	}
 	states := map[uint64]string{}
-	// maxAcceptedAt/maxAcceptedName track the highest-timestamp accepted
-	// event seen so far (a watermark), never the literal previous line in
-	// arrival order. Council N8 (round six on #141): the first version of
-	// this check compared against the previous event alone, so a run of
-	// small, each-individually-within-tolerance backward steps (e.g. 0.9s
-	// at a time, the normal concurrency jitter outOfOrderTolerance exists
-	// to absorb) could accumulate unbounded net drift without ever
-	// tripping EventsOutOfOrder -- council's own probe: 90s of accumulated
-	// backward drift in 0.9s steps, none flagged, then a correct,
-	// real-time event arriving afterward computed its gap against the
+	// maxAcceptedAt/maxAcceptedName track the highest-timestamp accepted event
+	// seen so far (a watermark), never the literal previous line in arrival
+	// order. The first version of this check compared against the previous
+	// event alone, so a run of small, each-individually-within-tolerance
+	// backward steps (e.g. 0.9s at a time, the normal concurrency jitter
+	// outOfOrderTolerance exists to absorb) could accumulate unbounded net
+	// drift without ever tripping EventsOutOfOrder. The regression test uses
+	// 90s of accumulated backward drift in 0.9s steps, none flagged, then a
+	// correct, real-time event arriving afterward computed its gap against the
 	// drifted-away previous timestamp instead of the true high point,
 	// producing a false REGISTRY_GAP_OVER_THRESHOLD. Comparing against the
 	// watermark instead means a genuinely drifting run is itself correctly
-	// excluded once it's past tolerance from the highest point actually
-	// seen, not merely from whatever its own last (already-drifted) step
-	// happened to be.
+	// excluded once it's past tolerance from the highest point actually seen,
+	// not merely from whatever its own last (already-drifted) step happened to
+	// be.
 	var maxAcceptedAt time.Time
 	var maxAcceptedName string
 	var longestGap time.Duration
-	// council P3-3 on #138: a "completed" 2xx is this host's own write
-	// already having reported success on the wire before the copy ran; it
-	// was never proof the guest received every byte (docs/job-failure-
-	// diagnostics.md). shortRequests tracks which request IDs also logged
-	// a send_short, so such a request's "completed" line never counts as
-	// evidence of a clean transfer here, even though its status is still
-	// 2xx. send_short always precedes its request's completed line within
-	// the SAME window (the relay writes it from inside serve(), before
-	// Handler's own "completed" write).
+	// a "completed" 2xx is this host's own write already having reported
+	// success on the wire before the copy ran; it was never proof the guest
+	// received every byte (docs/job-failure- diagnostics.md). shortRequests
+	// tracks which request IDs also logged a send_short, so such a request's
+	// "completed" line never counts as evidence of a clean transfer here, even
+	// though its status is still 2xx. send_short always precedes its request's
+	// completed line within the SAME window (the relay writes it from inside
+	// serve(), before Handler's own "completed" write).
 	//
-	// Two refinements (pomar's and council's own review of #139, round
-	// three): a reused request ID (the REQUEST_ID_REUSE_OBSERVED case
-	// below) must not let a stale entry from the id's PREVIOUS use poison
-	// its new one, so a fresh "received" clears it. And this is a bounded
-	// TAIL window, not the whole log (progressFile's own partial flag,
-	// and this function's own `lines = lines[1:]` above, which drops a
-	// possibly-truncated first fragment): a request whose own send_short
-	// fell in a dropped-or-never-retained part of the window, while its
-	// later completed line is still inside it, would otherwise look
-	// identical to one that never had a send_short at all. Any request
-	// first observed here via something other than "received" is one this
-	// window may have incomplete lifecycle for; treat it as possibly
-	// short rather than credit a transfer from an orphaned completion.
+	// Two refinements: a reused request ID (the REQUEST_ID_REUSE_OBSERVED case
+	// below) must not let a stale entry from the id's PREVIOUS use poison its
+	// new one, so a fresh "received" clears it. And this is a bounded TAIL
+	// window, not the whole log (progressFile's own partial flag, and this
+	// function's own `lines = lines[1:]` above, which drops a
+	// possibly-truncated first fragment): a request whose own send_short fell
+	// in a dropped-or-never-retained part of the window, while its later
+	// completed line is still inside it, would otherwise look identical to one
+	// that never had a send_short at all. Any request first observed here via
+	// something other than "received" is one this window may have incomplete
+	// lifecycle for; treat it as possibly short rather than credit a transfer
+	// from an orphaned completion.
 	shortRequests := map[uint64]bool{}
 	for _, line := range lines {
 		if len(line) > 4096 {
@@ -550,10 +545,10 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 		}
 		t = t.UTC()
 		if t.After(now) {
-			// Council N3: a future-stamped event is itself a fact worth
-			// surfacing (a clock problem, or a read racing a write that
-			// hasn't finished landing), not silently indistinguishable
-			// from a line that simply isn't there.
+			// A future-stamped event is itself a fact worth surfacing (a clock
+			// problem, or a read racing a write that hasn't finished landing),
+			// not silently indistinguishable from a line that simply isn't
+			// there.
 			p.EventsInFuture++
 			continue
 		}
@@ -588,24 +583,21 @@ func registryProgress(b []byte, partial bool, now time.Time, guestQuietSince *ti
 		// or widen an "observed" interval using a timestamp this
 		// function can't vouch for.
 		//
-		// Council N1 (round five on #141): npmproxy's own writeEvent
-		// calls time.Now() BEFORE acquiring logMu (internal/npmproxy/
-		// npmproxy.go), so under real concurrency -- many npm requests
-		// in flight at once, the ordinary case for an actual install,
-		// not an edge case -- two goroutines can race between stamping
-		// their own time and acquiring the lock to write it, letting a
-		// line land in the file slightly out of timestamp order relative
-		// to one just before it, with NOTHING wrong with either event.
-		// A strict t.Before(prevEventAt) check (this function's first
-		// version) flagged every such ordinary race as "out of order",
-		// which -- combined with a non-zero count being an
-		// INSUFFICIENT_EVIDENCE trigger -- meant a real, concurrent
-		// install could never produce an evidential indication at all
-		// (council's own measurement: 0/60 trials did, at 16 concurrent
-		// requests). outOfOrderTolerance absorbs exactly that scheduling
-		// jitter without absorbing a genuinely corrupted or reordered
-		// log: only a timestamp materially earlier than what's already
-		// been accepted -- past the tolerance, not merely a few
+		// Npmproxy's own writeEvent calls time.Now() BEFORE acquiring logMu
+		// (internal/npmproxy/ npmproxy.go), so under real concurrency -- many
+		// npm requests in flight at once, the ordinary case for an actual
+		// install, not an edge case -- two goroutines can race between
+		// stamping their own time and acquiring the lock to write it, letting
+		// a line land in the file slightly out of timestamp order relative to
+		// one just before it, with NOTHING wrong with either event. A strict
+		// t.Before(prevEventAt) check (this function's first version) flagged
+		// every such ordinary race as "out of order", which -- combined with a
+		// non-zero count being an INSUFFICIENT_EVIDENCE trigger -- meant a
+		// real, concurrent install could never produce an evidential
+		// indication at all. outOfOrderTolerance absorbs exactly that
+		// scheduling jitter without absorbing a genuinely corrupted or
+		// reordered log: only a timestamp materially earlier than what's
+		// already been accepted -- past the tolerance, not merely a few
 		// milliseconds behind it -- counts as out of order.
 		beforeStart := !windowStart.IsZero() && t.Before(windowStart)
 		afterEnd := windowEnd != nil && t.After(*windowEnd)

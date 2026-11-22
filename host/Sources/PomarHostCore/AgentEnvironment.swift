@@ -230,11 +230,10 @@ public enum AgentEnvironment {
             // A bundle recorded under its own branch name (the common case:
             // internal/mirror.Bundle names refs/heads/<branch>, never a
             // literal HEAD) has no ref literally called "HEAD" -- fetching
-            // "HEAD" by name then fails with "couldn't find remote ref HEAD"
-            // (the real bug POMAR-CC-SOW-37 traced). The wildcard refspec
-            // already used by Helper.swift's own bundle unpack takes
-            // whatever ref the bundle actually has, by any name, and the
-            // checkout below pins the exact commit regardless.
+            // "HEAD" by name then fails with "couldn't find remote ref HEAD".
+            // The wildcard refspec already used by Helper.swift's own bundle
+            // unpack takes whatever ref the bundle actually has, by any name,
+            // and the checkout below pins the exact commit regardless.
             + "git init -q /work; git -C /work fetch -q --tags /pomar/source.bundle 'refs/heads/*:refs/remotes/origin/*'; "
             + "git -C /work -c advice.detachedHead=false checkout -q --detach " + sourceSHA + "; "
             + "test \"$(git -C /work rev-parse HEAD)\" = " + sourceSHA + "; "

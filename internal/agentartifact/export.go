@@ -16,7 +16,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 const (

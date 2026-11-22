@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/mirror"
-	"github.com/zeroemployeeorg/pomar/internal/sign"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/mirror"
+	"github.com/rodriveracom/pomar/internal/sign"
 )
 
 func TestClassCannotFetchAnotherProjectsMirror(t *testing.T) {

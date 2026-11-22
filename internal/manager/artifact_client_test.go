@@ -6,7 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
+	"github.com/rodriveracom/pomar/internal/artifactreturn"
 	"io"
 	"net/http"
 	"os"

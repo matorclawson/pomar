@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // Server is one session service, serving one root.
@@ -79,9 +79,8 @@ type opResult struct {
 
 // opFingerprint binds an operation's dedupe record to exactly what it was
 // asked to do: its target and its content. Without this, the same ID reused
-// against a different session, or with different text, silently replays
-// the first call's result onto the second target instead of being refused
-// (the Architect's review of #128's stack, H1).
+// against a different session, or with different text, silently replays the
+// first call's result onto the second target instead of being refused
 func opFingerprint(parts ...string) string {
 	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(h[:])
@@ -382,12 +381,11 @@ type SendRequest struct {
 	// Paste marks Text as a bulk payload, never a typed line: the server
 	// bounds it separately from an ordinary send (maxPasteBytes, not
 	// maxSendBytes) and, unless Raw, refuses any ESC byte in it before
-	// wrapping it in bracketed-paste markers itself. The client never
-	// wraps or scans; a caller can't construct a request that bypasses
-	// this by doing its own wrapping first (the Architect's and
-	// zeocouncil's BLOCKER on #128's stack: a paste containing an
-	// embedded ESC[201~ ended bracketed-paste mode early, so the rest of
-	// the payload arrived as TYPED input, not pasted text).
+	// wrapping it in bracketed-paste markers itself. The client never wraps or
+	// scans; a caller can't construct a request that bypasses this by doing
+	// its own wrapping first (a paste containing an embedded ESC[201~ ended
+	// bracketed-paste mode early, so the rest of the payload arrived as TYPED
+	// input, not pasted text).
 	Paste bool `json:"paste,omitempty"`
 	// Raw, with Paste, sends the payload exactly as given: no ESC scan, no
 	// bracketing. The caller is asking for arbitrary bytes and accepts
@@ -707,15 +705,14 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		// The host made a fresh program. s.creates is never pruned to match
 		// the host's own, independently bounded memory of an operation
 		// (internal/seatterm/host.go's byOp), so a retry can reach here
-		// believing it's a retry (the running-name check above was
-		// skipped) when the host's own record of the original operation
-		// has since been evicted and it genuinely started a second one.
-		// Caught here, not before: if the name is already held by a
-		// DIFFERENT running session, this fresh one can never be named
-		// (overwriting s.named would orphan the real holder, running but
-		// unreachable by name), so it's stopped and refused instead,
-		// exactly as a fresh create is refused when the name is taken
-		// (the Architect's review of #128's stack, H2).
+		// believing it's a retry (the running-name check above was skipped)
+		// when the host's own record of the original operation has since been
+		// evicted and it genuinely started a second one. Caught here, not
+		// before: if the name is already held by a DIFFERENT running session,
+		// this fresh one can never be named (overwriting s.named would orphan
+		// the real holder, running but unreachable by name), so it's stopped
+		// and refused instead, exactly as a fresh create is refused when the
+		// name is taken
 		s.mu.Lock()
 		held := s.named[req.Name]
 		s.mu.Unlock()
@@ -831,14 +828,13 @@ func (s *Server) recorded(w http.ResponseWriter, r *opResult) {
 	reply(w, outcomeStatus(out.Outcome), out)
 }
 
-// outcomeStatus is the status a settled outcome replays as, on every retry
-// of the operation that settled it: 409 for partial or uncertain (the
-// caller must not mistake a retry for a clean success it never was), 200
-// for everything else (written, accepted, stopped, already-exited).
-// Without this, a retry of an operation that originally settled as
-// partial or uncertain silently replayed as a plain 200 -- the ONE
-// situation where a retry answering differently from the original call
-// would matter most (council's P1-2).
+// outcomeStatus is the status a settled outcome replays as, on every retry of
+// the operation that settled it: 409 for partial or uncertain (the caller must
+// not mistake a retry for a clean success it never was), 200 for everything
+// else (written, accepted, stopped, already-exited). Without this, a retry of
+// an operation that originally settled as partial or uncertain silently
+// replayed as a plain 200 -- the ONE situation where a retry answering
+// differently from the original call would matter most.
 func outcomeStatus(outcome string) int {
 	switch outcome {
 	case "partial", "uncertain":
@@ -893,14 +889,13 @@ func waitMS(ms int, def time.Duration) time.Duration {
 	return min(time.Duration(ms)*time.Millisecond, maxWait)
 }
 
-// awaitReady waits for the session's adapter to report it waiting for
-// input in a report no send has used, and claims that report, so two sends
-// never take one readiness. It gives up at the wait's end, or when the
-// program exits. The claimed StateSeq is returned so the caller can give
-// it back with unclaimReady if the send goes on to be refused for some
-// other reason: the readiness itself was real and still holds, and must
-// stay available to whatever send comes next, not be spent on one that
-// never actually wrote anything (council P2).
+// awaitReady waits for the session's adapter to report it waiting for input in
+// a report no send has used, and claims that report, so two sends never take
+// one readiness. It gives up at the wait's end, or when the program exits. The
+// claimed StateSeq is returned so the caller can give it back with unclaimReady
+// if the send goes on to be refused for some other reason: the readiness itself
+// was real and still holds, and must stay available to whatever send comes
+// next, not be spent on one that never actually wrote anything.
 func (s *Server) awaitReady(t *seatterm.TermSession, wait time.Duration) (uint64, bool) {
 	timeout := time.After(wait)
 	for {
@@ -925,13 +920,13 @@ func (s *Server) awaitReady(t *seatterm.TermSession, wait time.Duration) (uint64
 }
 
 // unclaimReady gives back a readiness claim awaitReady made, but only if
-// nothing has claimed past it since: a newer report (a real state change)
-// must never be un-claimed by a late give-back racing behind it. t may be
-// nil in tests that exercise only the bookkeeping; a live caller always
-// has the session at hand to wake anyone else already waiting on it
-// (council P3 on #137: this used to update readyUsed without waking a
-// different when-ready send blocked in awaitReady's own select, leaving
-// it to sit out its whole wait bound instead of re-checking at once).
+// nothing has claimed past it since: a newer report (a real state change) must
+// never be un-claimed by a late give-back racing behind it. t may be nil in
+// tests that exercise only the bookkeeping; a live caller always has the
+// session at hand to wake anyone else already waiting on it (updating
+// readyUsed alone left a different when-ready send blocked in awaitReady's own
+// select, leaving it to sit out its whole wait bound instead of re-checking at
+// once).
 func (s *Server) unclaimReady(t *seatterm.TermSession, id string, seq uint64) {
 	s.mu.Lock()
 	gaveBack := s.readyUsed[id] == seq
@@ -1257,11 +1252,10 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A group left behind is never reported as a clean 200, whether the
-	// session had already exited or this stop just ended it: a straggler
-	// still holding the PTY is exactly what Terminate's own audit already
-	// calls uncertain (internal/seatterm/host.go:306), and the caller must
-	// see that, not a false "stopped" (the Architect's review of #128's
-	// stack, H3).
+	// session had already exited or this stop just ended it: a straggler still
+	// holding the PTY is exactly what Terminate's own audit already calls
+	// uncertain (internal/seatterm/host.go:306), and the caller must see that,
+	// not a false "stopped".
 	exited := func() {
 		out := opResult{Session: t.ID, Outcome: "already-exited", Leader: "reaped", Group: "gone"}
 		code := http.StatusOK

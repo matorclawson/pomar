@@ -13,38 +13,35 @@ const (
 	sourceUnavailable = "unavailable"
 )
 
-// maxReportBytes is this report's own documented cap, enforced on the
-// actual marshaled bytes (council P1-3 on #141: bounding fields before
-// JSON-escaping, or asserting a cap without ever measuring the real
-// serialization, isn't enforcement) -- never assumed from field shapes.
+// maxReportBytes is this report's own documented cap, enforced on the actual
+// marshaled bytes (bounding fields before JSON-escaping, or asserting a cap
+// without ever measuring the real serialization, isn't enforcement) -- never
+// assumed from field shapes.
 const maxReportBytes = 4 << 10
 
 // InstallStallDiagnostic is a FACT-ONLY report of what's already recorded
-// about one attempt's install, for PROFROD-SOW-330/POMAR-CC-SOW-37 --
-// never a verified cause, never retry/config/egress authority, never a
-// replacement for the signed final result. It is computed on read, behind
-// the same authorization as the rest of AttemptProgress, from sources
-// already read and bounded elsewhere in this package (the guest log tail,
-// the registry trace via registryProgress -- extended in place, not
-// re-parsed -- status.json and the attempt's own recorded times). It
-// introduces no new guest-side capture, no new file and no new socket,
-// and writes nothing into the attempt's own record directory.
+// about one attempt's install. It is never a verified cause, never
+// retry/config/egress authority, never a replacement for the signed final
+// result. It is computed on read, behind the same authorization as the rest of
+// AttemptProgress, from sources already read and bounded elsewhere in this
+// package (the guest log tail, the registry trace via registryProgress --
+// extended in place, not re-parsed -- status.json and the attempt's own
+// recorded times). It introduces no new guest-side capture, no new file and no
+// new socket, and writes nothing into the attempt's own record directory.
 //
-// Council's arbitration (zc-pcc-collector-v1 amendment 1, after pomar's
-// review): the first version of this type named classes causally
-// (REGISTRY_GAP_EXCEEDS_FETCH_TIMEOUT, GUEST_QUIET_NO_REGISTRY_ACTIVITY)
-// from evidence that can't actually support that certainty. Every
-// measured value below is a fact plus its own source status; every
-// optional numeric fact is still SERIALIZED (null, not omitted) when
-// unknown, paired with its own *_unknown_reason (council P1-4 on #141 --
-// round two's omitempty made an unknown fact indistinguishable from one
-// that was never measured at all). Indication is OPTIONAL and
-// evidential-named, by a fixed precedence in which INSUFFICIENT_EVIDENCE
-// is checked FIRST and wins outright whenever it applies -- round two had
-// it last, so a truncated or unknown source sitting alongside a genuine
-// gap still read as a confident REGISTRY_GAP_OVER_THRESHOLD (council
-// P1-1); every fact still appears in the document regardless of which
-// Indication won, so a reader can always see what else was true.
+// The first version of this type named classes causally
+// (REGISTRY_GAP_EXCEEDS_FETCH_TIMEOUT, GUEST_QUIET_NO_REGISTRY_ACTIVITY) from
+// evidence that can't actually support that certainty. Every measured value
+// below is a fact plus its own source status; every optional numeric fact is
+// still SERIALIZED (null, not omitted) when unknown, paired with its own
+// *_unknown_reason (omitempty would make an unknown fact indistinguishable
+// from one that was never measured at all). Indication is OPTIONAL and
+// evidential-named, by a fixed precedence in which INSUFFICIENT_EVIDENCE is
+// checked FIRST and wins outright whenever it applies -- round two had it
+// last, so a truncated or unknown source sitting alongside a genuine gap still
+// read as a confident REGISTRY_GAP_OVER_THRESHOLD; every fact still appears in
+// the document regardless of which Indication won, so a reader can always see
+// what else was true.
 type InstallStallDiagnostic struct {
 	Contract    string    `json:"contract"`
 	Attempt     string    `json:"attempt"`
@@ -63,25 +60,23 @@ type InstallStallDiagnostic struct {
 	RegistryWindowTruncated   bool   `json:"registry_window_truncated"`
 	RegistryChangedDuringRead bool   `json:"registry_changed_during_read"`
 
-	// Events this function can't bind to the attempt's own timeline
-	// (council P2-2/N1/N3): a non-zero count here is itself a fact, and
-	// is why none of the time-based facts below ever include such an
-	// event. EventsOutOfOrder only counts a materially earlier timestamp
-	// (past outOfOrderTolerance), not the ordinary scheduling jitter of
-	// legitimate concurrent requests.
+	// Events this function can't bind to the attempt's own timeline: a non-zero
+	// count here is itself a fact, and is why none of the time-based facts
+	// below ever include such an event. EventsOutOfOrder only counts a
+	// materially earlier timestamp (past outOfOrderTolerance), not the ordinary
+	// scheduling jitter of legitimate concurrent requests.
 	EventsBeforeWindowStart int `json:"events_before_window_start"`
 	EventsAfterWindowEnd    int `json:"events_after_window_end"`
 	EventsOutOfOrder        int `json:"events_out_of_order"`
 	EventsInFuture          int `json:"events_in_future"`
 
-	// AttemptIntervalUnknown (council N2, broadened per pomar's review of
-	// 909bf31): true whenever this attempt's own [created, windowEnd]
-	// interval isn't actually known -- windowEnd is nil (a terminal
+	// AttemptIntervalUnknown: true whenever this attempt's own [created,
+	// windowEnd] interval isn't actually known -- windowEnd is nil (a terminal
 	// attempt with no recorded Ended time), Created itself is missing, or
 	// windowEnd precedes Created (an inconsistent pair, e.g. clock skew).
-	// NO_STALL_IN_WINDOW must never be read when this is true: not
-	// knowing the attempt's own interval is not the same as having
-	// observed its full extent and found nothing.
+	// NO_STALL_IN_WINDOW must never be read when this is true: not knowing the
+	// attempt's own interval is not the same as having observed its full extent
+	// and found nothing.
 	AttemptIntervalUnknown       bool   `json:"attempt_interval_unknown"`
 	AttemptIntervalUnknownReason string `json:"attempt_interval_unknown_reason,omitempty"`
 
@@ -108,11 +103,11 @@ type InstallStallDiagnostic struct {
 	LongestRegistryGapToEvent       string     `json:"longest_registry_gap_to_event,omitempty"`
 	LongestRegistryGapToAt          *time.Time `json:"longest_registry_gap_to_at,omitempty"`
 
-	// The end edge: the last recognized registry event to the attempt's
-	// own window end (Ended, or ObservedAt while still running). Named
-	// separately from the internal gap above. Unknown when the window
-	// end itself is unknown (a terminal attempt with no recorded Ended),
-	// never computed against `now` in that case (council P2-1).
+	// The end edge: the last recognized registry event to the attempt's own
+	// window end (Ended, or ObservedAt while still running). Named separately
+	// from the internal gap above. Unknown when the window end itself is
+	// unknown (a terminal attempt with no recorded Ended), never computed
+	// against `now` in that case.
 	TrailingRegistrySilenceSeconds       *int64     `json:"trailing_registry_silence_seconds"`
 	TrailingRegistrySilenceUnknownReason string     `json:"trailing_registry_silence_unknown_reason,omitempty"`
 	TrailingRegistrySilenceSinceAt       *time.Time `json:"trailing_registry_silence_since_at,omitempty"`
@@ -139,11 +134,11 @@ type InstallStallDiagnostic struct {
 	Indication string `json:"indication"`
 }
 
-// defaultFetchTimeoutSeconds is this package's own fallback, not a
-// recorded value: no existing status.json or Entry field names the
-// install's actual fetch-timeout today (a named gap, not hidden -- see
-// ThresholdSource). It matches npm's own conventional default and the
-// value profrod's own install-locked-v1.mjs configures.
+// defaultFetchTimeoutSeconds is this package's own fallback, not a recorded
+// value: no existing status.json or Entry field names the install's actual
+// fetch-timeout today (a named gap, not hidden -- see ThresholdSource). It
+// matches npm's own conventional default and the value configured by the
+// install workload.
 const defaultFetchTimeoutSeconds = 60
 
 // nearThresholdFraction: with only a default (never recorded) threshold,
@@ -340,11 +335,10 @@ func indicationFor(d InstallStallDiagnostic) string {
 			}
 		}
 	}
-	// Council P1-1: INSUFFICIENT_EVIDENCE is checked FIRST and wins
-	// outright whenever any of its triggers hold -- round two's version
-	// checked it last, so a truncated or unknown source sitting
-	// alongside a genuine-looking gap still read as a confident
-	// REGISTRY_GAP_OVER_THRESHOLD. Every fact still appears in the
+	// INSUFFICIENT_EVIDENCE is checked FIRST and wins outright whenever any of
+	// its triggers hold -- round two's version checked it last, so a truncated
+	// or unknown source sitting alongside a genuine-looking gap still read as a
+	// confident REGISTRY_GAP_OVER_THRESHOLD. Every fact still appears in the
 	// document regardless; only the one-word summary is preempted.
 	if anyUnknownSource || anyTruncated || anyUnbound || nearThreshold {
 		return indicationInsufficientEvidence

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/rodriveracom/pomar/internal/agentenv"
 )
 
 // fakeClaude is a scripted stand-in for one `claude -p` stream-json process:

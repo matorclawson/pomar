@@ -8,7 +8,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/manager"
 )
 
 // The agent experience: what lets a program, an agent or a script, use

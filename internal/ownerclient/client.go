@@ -8,7 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/zeroemployeeorg/pomar/internal/calljournal"
+	"github.com/rodriveracom/pomar/internal/calljournal"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,7 +17,7 @@ import (
 	"regexp"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/localclient"
 )
 
 const responseLimit = 8 << 20

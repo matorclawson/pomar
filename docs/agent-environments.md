@@ -146,8 +146,7 @@ Task/control lookup requires the original session and incarnation. It may
 return historical evidence for a known old operation. A missing operation is
 labelled `durable_non_acceptance` only in the matching, intact current journal.
 That legacy wire label means current journal absence, not proof that a delayed
-earlier POST cannot still commit. ZEO-RT calls this observation
-`CurrentJournalAbsence`; standalone controllers must preserve the same limitation.
+earlier POST cannot still commit. Controllers must preserve that limitation.
 Keep the original operation ID, input digest and incarnation for inspection.
 Absence alone grants neither replay nor release authority; this interface does
 not establish a stronger non-acceptance or general retry protocol. A missing
@@ -231,10 +230,10 @@ baseline and clean status/diff. Unexpected retained work holds the transition
 for assessment; it is never reset or discarded.
 
 `POST /v1/environments/{id}/continuations` projects an external controller's existing
-intent/lifecycle disposition into the retained broker journal. ZEO-RT is one
-consumer example; standalone controllers do not need ZEO-RT's authorisation.
-Pomar does not establish a separate approval authority. The owner supplies the disposition ID, intent and authority
-references, responsible owner, original operation/input/thread/turn identities,
+intent/lifecycle disposition into the retained broker journal. The controller
+supplies its existing decision. The owner supplies the disposition ID, intent
+and authority references, responsible owner, original operation, input, thread
+and turn identities,
 original and latest inspection fence operation IDs, the explicit new launch,
 inventory digest, disk-recovery description, scoped external-action inventory,
 and the new successor task. The host supplies its machine-owned fence receipts;
@@ -509,39 +508,6 @@ The v2 distribution includes the host-side `pomar-agent-host`,
 commit along with the Swift host and shim. Existing v1 distributions remain
 verifiable and installable for rollback. Installing bytes does not configure
 a guest, issue credentials, reserve capacity or authorize an actor launch.
-A native-seat move additionally needs the owning Runtime handoff, a positive
+A native-seat move additionally needs the owning controller's handoff, a positive
 source/backend fence, final native-history capture and exact target resume
 evidence; the inventory/plan command alone cannot perform that move.
-
-## Mail for a Codex seat
-
-An owner can set a fixed `mailOrigin` on the development host and `mail: true`
-on a seat profile. It creates that environment's private `mail.sock`, maps it
-into the VM and exposes it only at guest loopback `127.0.0.1:7074`. The Codex
-seat receives `ZMAIL_URL` for this local origin and its own `ZMAIL_INSTANCE`.
-A separately supplied maintained remote mail client uses that override without
-fallback; the relay does not install that client or any credential. With mail
-disabled, the local endpoint is unavailable rather than a direct service route.
-
-The relay fixes identity from the owner profile and scopes send retry keys to
-the seat and stable environment ID, preserving them across incarnation changes.
-It permits only the mail service's six minimal REST operations under `/v1/`,
-with explicit query and JSON fields. It forwards no guest headers, rejects
-another seat identity, and refuses redirects and unlisted operations. Network
-revocation also revokes mail and cancels in-flight relay calls. That cancellation
-is not proof that a remote send did not commit: retry the same original key.
-
-This source transport does not establish service-side node registration, guest
-client installation, native channel qualification, or a completed seat cutover.
-The owner must prove real guest identity and refusal of another seat before
-adoption. General egress retains its shared-address-space refusal.
-
-The fixed mail relay permits a burst of eight validated POST send/reply calls per
-owner-created guest incarnation, replenishing one write every two seconds. An
-empty bucket returns 429 with Retry-After without calling Messenger; reads do not
-consume write tokens. Every relay in the owner process shares four concurrent
-upstream calls, including response-body receiving, with at most two upstream calls per guest.
-The shared slot is released before writing the buffered response to the guest. At capacity it refuses with
-503 and Retry-After. Messenger's 429/503 Retry-After passes through without an
-internal retry; a 503 without that header receives Retry-After: 5. Only the owner can replace an incarnation; guests cannot reset
-these limits. These limits do not replace native identity and revocation proofs.

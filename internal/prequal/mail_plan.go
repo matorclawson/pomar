@@ -263,21 +263,22 @@ func validateMailDenialTemplate(t MailDenialTemplate) error {
 	if t.HeadersSHA256 != hex.EncodeToString(hh[:]) {
 		return errors.New("template header set hash mismatch")
 	}
-	// Architect ruling arch-pomar-m1-template-ruling-20261103 requires one
-	// canonical complete response, not equality between arbitrary denials.
-	want, err := json.Marshal(struct {
-		Exit   int    `json:"exit"`
-		Output string `json:"output"`
-	}{2, fmt.Sprintf("zmail: no message %s in %s's inbox; zmsg inbox --all lists every message it has\n", mailIDToken, t.CallerSeat)})
-	if err != nil || !bytes.Equal(t.Body, append(want, '\n')) || bytes.Count(t.Body, []byte(mailIDToken)) != 1 {
+	// The legacy service appends a fixed help hint. Pin those bytes without
+	// including the service's command in the canonical response template.
+	const legacyHintSHA256 = "2192501a950c363121766a6dbe7969969f1ae7e528f11f44fc62d975a87e332a"
+	prefix := fmt.Sprintf(`{"exit":2,"output":"zmail: no message %s in %s's inbox`, mailIDToken, t.CallerSeat)
+	rest, hasPrefix := bytes.CutPrefix(t.Body, []byte(prefix))
+	hint, hasSuffix := bytes.CutSuffix(rest, []byte("\\n\"}\n"))
+	hintSHA256 := sha256.Sum256(hint)
+	if !hasPrefix || !hasSuffix || (len(hint) != 0 && hex.EncodeToString(hintSHA256[:]) != legacyHintSHA256) ||
+		bytes.Count(t.Body, []byte(mailIDToken)) != 1 {
 		return errors.New("template must match the maintained canonical denial wire")
 	}
 	return nil
 }
 
-// CompareMailDenials implements Council ans_8dd01de9e47f46d0 and the later
-// Architect pinned-template ruling: instantiate the sole echoed input ID slot,
-// compare every remaining byte, and compare all observed headers except Date
+// CompareMailDenials instantiates the sole echoed input ID slot, compares
+// every remaining byte, and compares all observed headers except Date
 // and each body's own Content-Length. A no-echo product wire needs a newly
 // reviewed template; it cannot be accepted by pairwise equality alone.
 // The original bodies remain with the caller; errors never include payloads.

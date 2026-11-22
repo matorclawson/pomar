@@ -1,6 +1,6 @@
 package manager
 
-// sow: pomar-SOW-87. Persisted-boundary fixtures, not real VM or power-loss proof.
+// Persisted-boundary fixtures, not real VM or power-loss proof.
 import (
 	"bytes"
 	"context"
@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 func closureFixture(t *testing.T, m *Manager, id string) (Entry, string) {

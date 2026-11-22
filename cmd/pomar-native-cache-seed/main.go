@@ -18,8 +18,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/smoke"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/smoke"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 const maxManifest = 64 << 10

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/manager"
 )
 
 // These public schema types belong to health/v1, not the manager's evolving

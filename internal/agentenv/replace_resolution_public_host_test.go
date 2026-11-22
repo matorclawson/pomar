@@ -14,20 +14,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
-// POMAR-CC-SOW-37 rev3: a public-Host-API replacement->resolution regression
-// using genuine host-produced evidence -- every lifecycle step (create implied
-// by hand-built fixture, start, stop, reconcile, start again, continuations)
-// goes through the real h.Handler() HTTP routes and the real host.go/
+// A public-Host-API replacement->resolution regression using genuine
+// host-produced evidence -- every lifecycle step (create implied by hand-built
+// fixture, start, stop, reconcile, start again, continuations) goes through the
+// real h.Handler() HTTP routes and the real host.go/
 // reconcile.go/continuation.go code, exactly as in production. The only
 // substitutions are the package's own existing, long-established test seams:
 // h.probe (reconcile.go:114-115, used throughout reconcile_test.go/
 // retirement_test.go/preboot_reconcile_test.go) standing in for the native
 // Swift fence-probe subprocess, and a real, test-owned no-op executable
-// standing in for the Swift VM helper itself (so start() launches and
-// proc.Find locates a REAL process, never a synthetic Action literal).
+// standing in for the Swift VM helper itself (so start() launches and proc.Find
+// locates a REAL process, never a synthetic Action literal).
 //
 // This file does not touch host.go, reconcile.go or continuation.go.
 
@@ -153,12 +153,11 @@ func TestPublicHostStartLaunchesARealLocatableProcess(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("start failed: %d %s", w.Code, w.Body.String())
 	}
-	// pomar's review (POMAR147-CLEANUP-1): the pinned helper's cleanup must
-	// be registered immediately after a successful launch, before any
-	// fallible assertion -- otherwise a t.Fatal in one of those assertions
-	// leaks the real process, since Cleanup only runs what was already
-	// registered. snapshot() itself cannot fail/fatal, so it's safe to read
-	// before registering.
+	// the pinned helper's cleanup must be registered immediately after a
+	// successful launch, before any fallible assertion -- otherwise a t.Fatal
+	// in one of those assertions leaks the real process, since Cleanup only
+	// runs what was already registered. snapshot() itself cannot fail/fatal, so
+	// it's safe to read before registering.
 	snap := snapshot(h, e)
 	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap.PID, Start: snap.Start}) })
 
@@ -285,9 +284,9 @@ func TestPublicHostStopThenReconcileProducesRealReconciliationEvidence(t *testin
 	if w := hostActionCall(h, "env", "start", "start-1", ""); w.Code != 200 {
 		t.Fatalf("start failed: %d %s", w.Code, w.Body.String())
 	}
-	// pomar's review (POMAR147-CLEANUP-1): registered immediately after the
-	// successful launch, before the fallible WriteFile/kill/stop sequence
-	// below -- a pinned helper leaks if any of those fatal first.
+	// registered immediately after the successful launch, before the fallible
+	// WriteFile/kill/stop sequence below -- a pinned helper leaks if any of
+	// those fatal first.
 	snap1 := snapshot(h, e)
 	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap1.PID, Start: snap1.Start}) })
 	incarnation1 := snap1.Incarnation
@@ -386,8 +385,8 @@ func TestPublicHostReplaceResolutionTargetSequence(t *testing.T) {
 	if w := hostActionCall(h, "env", "start", "start-1", ""); w.Code != 200 {
 		t.Fatalf("start-1 failed: %d %s", w.Code, w.Body.String())
 	}
-	// pomar's review (POMAR147-CLEANUP-1): registered immediately after the
-	// successful launch, before the fallible Store/Broker setup below.
+	// registered immediately after the successful launch, before the fallible
+	// Store/Broker setup below.
 	snap1 := snapshot(h, e)
 	t.Cleanup(func() { killOwnedProcess(t, proc.Process{PID: snap1.PID, Start: snap1.Start}) })
 	incarnation1 := snap1.Incarnation
@@ -519,13 +518,12 @@ func TestKillOwnedProcessRefusesWhenIdentityNoLongerMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := cmd.Process.Pid
-	// pomar's review (POMAR147-CLEANUP-1): the single authoritative
-	// cmd.Wait() goroutine starts immediately after Start() succeeds, not
-	// later past fallible assertions -- an early t.Fatal before this point
-	// previously left no goroutine to ever join, so cleanup's kill alone
-	// could leave an unreaped zombie. Cleanup now kills and joins this SAME
-	// channel (never a second, concurrent Wait() call on the same *exec.Cmd,
-	// which is a documented misuse).
+	// the single authoritative cmd.Wait() goroutine starts immediately after
+	// Start() succeeds, not later past fallible assertions -- an early t.Fatal
+	// before this point previously left no goroutine to ever join, so cleanup's
+	// kill alone could leave an unreaped zombie. Cleanup now kills and joins
+	// this SAME channel (never a second, concurrent Wait() call on the same
+	// *exec.Cmd, which is a documented misuse).
 	stillRunning := make(chan error, 1)
 	go func() { stillRunning <- cmd.Wait() }()
 	t.Cleanup(func() {

@@ -3,7 +3,7 @@ package manager
 import (
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
 // Decision is what reconciliation concluded about one attempt or process.

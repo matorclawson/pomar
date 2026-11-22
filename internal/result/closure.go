@@ -2,9 +2,9 @@ package result
 
 import "crypto/ed25519"
 
-// sow: pomar-SOW-87. Closure is independent of the unchanged result/v1 wire.
-// Only the trusted manager assembles and freezes this evidence. This package
-// exposes no endpoint that imports manifests or signs actor-supplied claims.
+// Closure is independent of the unchanged result/v1 wire. Only the trusted
+// manager assembles and freezes this evidence. This package exposes no endpoint
+// that imports manifests or signs actor-supplied claims.
 
 const ClosureSchema = "pomar.closure/v1"
 const CleanupSchema = "pomar.vm-cleanup/v1"

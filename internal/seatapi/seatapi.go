@@ -1,9 +1,8 @@
-// Package seatapi serves the owner's seat routes (POMAR-CC SOW 15 §9 as
-// corrected by SOW 16 §1, §4 and §9), on the development host's owner-only
-// socket. A seat's declaration and its location are each add-only records,
-// changed only by compare-and-set: a declaration on its previous sha256, a
-// location on its revision. These routes record and report; they start,
-// stop and grant nothing. Starting a seat is a later route.
+// Package seatapi serves the owner's seat routes, on the development host's
+// owner-only socket. A seat's declaration and its location are each add-only
+// records, changed only by compare-and-set: a declaration on its previous
+// sha256, a location on its revision. These routes record and report; they
+// start, stop and grant nothing. Starting a seat is a later route.
 package seatapi
 
 import (
@@ -19,9 +18,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/calljournal"
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/internal/calljournal"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 // Store holds the seats under one private root:

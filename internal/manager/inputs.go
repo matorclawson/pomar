@@ -9,10 +9,9 @@ import (
 	"regexp"
 )
 
-// Input is a file the client sends with a start request, as bytes: the
-// manager never reads a path on the client's behalf. The helper copies the
-// attempt's inputs into its guest at /pomar/inputs before the command is
-// released (elders' ruling r14 §1: a document to lint goes in as a file).
+// Input is a file the client sends with a start request, as bytes: the manager
+// never reads a path on the client's behalf. The helper copies the attempt's
+// inputs into its guest at /pomar/inputs before the command is released.
 type Input struct {
 	Name   string `json:"name"`
 	Data   []byte `json:"data"`

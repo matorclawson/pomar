@@ -4,13 +4,12 @@ import (
 	"sort"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/rodriveracom/pomar/internal/proc"
 )
 
-// VMOrphan is a Virtualization VM service running under the manager's uid
-// that no live attempt accounts for (elders' ruling r9 §2.2). A killed
-// helper's VM service was seen to exit with it (POMAR-SOW-03 §30.3); this
-// records every time that did not happen.
+// VMOrphan is a Virtualization VM service running under the manager's uid that
+// no live attempt accounts for. A killed helper's VM service was seen to exit
+// with it; this records every time that did not happen.
 //
 // It is reported, never signalled: the same uid may run other
 // Virtualization users, and whether Pomar reaps a VM it did not link is a

@@ -5,8 +5,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/zeroemployeeorg/pomar/internal/releasefeedinput"
-	"github.com/zeroemployeeorg/pomar/internal/releasefeedobserver"
+	"github.com/rodriveracom/pomar/internal/releasefeedinput"
+	"github.com/rodriveracom/pomar/internal/releasefeedobserver"
 	"io"
 	"os"
 	"path/filepath"

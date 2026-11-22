@@ -13,15 +13,15 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
-// The attempt's output log (the elders' ruling r30 §4.2, and their note of
-// 2026-09-27): the guest's stdout and stderr, which the helper writes to
-// output.log in the record. When the attempt ends, the manager records the
-// log's size and the sha256 of what it will serve: the whole log, or its
-// first bytes up to its class's cap, marked truncated. The record goes in the entry and the
-// signed result, and GET /v1/attempts/{id}/log serves exactly those bytes.
+// The attempt's output log: the guest's stdout and stderr, which the helper
+// writes to output.log in the record. When the attempt ends, the manager
+// records the log's size and the sha256 of what it will serve: the whole log,
+// or its first bytes up to its class's cap, marked truncated. The record goes
+// in the entry and the signed result, and GET /v1/attempts/{id}/log serves
+// exactly those bytes.
 
 // DefaultLogCapBytes caps what is recorded and served of an attempt's output
 // log when its class sets no cap of its own.
@@ -117,12 +117,12 @@ func (m *Manager) logRoutes(mux *http.ServeMux) {
 }
 
 // Log fetches an ended attempt's log and checks it against the output_log of
-// the attempt's result document, never against anything the log's own
-// response says: a header travels with the bytes it describes, so it proves
-// nothing about them (the elders' ruling of 2026-09-27 17:21Z §4). With pub,
-// the result's signature is verified first, so the log is checked against
-// what the manager signed; without it, against the document as served. It
-// returns the bytes, their sha256, and whether the log was truncated.
+// the attempt's result document, never against anything the log's own response
+// says: a header travels with the bytes it describes, so it proves nothing
+// about them. With pub, the result's signature is verified first, so the log
+// is checked against what the manager signed; without it, against the document
+// as served. It returns the bytes, their sha256, and whether the log was
+// truncated.
 func (c *Client) Log(id string, pub []byte) ([]byte, string, bool, error) {
 	raw, err := c.Result(id)
 	if err != nil {

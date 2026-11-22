@@ -12,20 +12,20 @@ import (
 	"syscall"
 )
 
-// checkExpectedSHA256 opens path once, hashes it while copying its bytes
-// into a fresh private directory, and execs the copy, never path itself.
-// Darwin has no portable fexecve equivalent (no reliable /proc/self/fd-style
-// path that names an open descriptor's exact inode for exec), so unlike the
-// Linux version this cannot hand the kernel the exact already-hashed inode.
-// The copy instead closes the specific gap the council named — path being
-// replaced after the check, before the exec that follows — because what
-// actually runs is a file nothing but this process ever wrote, not path.
-// It is copied from the SAME open descriptor the hash was taken from, never
-// a second open of path, so the copy's bytes are exactly what was hashed.
-// This narrows, not eliminates, the window: a sufficiently privileged,
-// precisely timed replacement of path between this function's first open
-// and its first read could still substitute what gets hashed and copied.
-// That earlier, narrower window is real and is not claimed closed.
+// checkExpectedSHA256 opens path once, hashes it while copying its bytes into
+// a fresh private directory, and execs the copy, never path itself. Darwin has
+// no portable fexecve equivalent (no reliable /proc/self/fd-style path that
+// names an open descriptor's exact inode for exec), so unlike the Linux
+// version this cannot hand the kernel the exact already-hashed inode. The copy
+// instead closes the gap between checking a path and executing it, when the
+// path can be replaced — because what actually runs is a file nothing but this
+// process ever wrote, not path. It is copied from the SAME open descriptor the
+// hash was taken from, never a second open of path, so the copy's bytes are
+// exactly what was hashed. This narrows, not eliminates, the window: a
+// sufficiently privileged, precisely timed replacement of path between this
+// function's first open and its first read could still substitute what gets
+// hashed and copied. That earlier, narrower window is real and is not claimed
+// closed.
 //
 // One confirmed, named limit: this cannot pin a macOS platform binary (one
 // signed by Apple with a platform identifier, as every binary under

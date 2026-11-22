@@ -170,18 +170,17 @@ func fullLog(t *testing.T, c *Client, name string) []byte {
 	}
 }
 
-// Council's P1-3: on a gap (the log-drain goroutine falling behind the
-// retained ring, which a fast enough program forces), the old code wrote
-// the WHOLE retained snapshot again on every resnapshot, rather than only
-// the bytes genuinely new since the log's own last write -- duplicating
-// and corrupting the log. This feeds a long, fast sequence (seq 1..600000,
-// several megabytes, as fast as the kernel's PTY will take it -- the
-// Architect's own probe shape) through a real session and compares the
-// resulting log's bytes against ground truth: the exact sequence, with
-// each line's \n translated to \r\n (the PTY's own ONLCR, confirmed
-// separately, not something the log or this test undoes). logAppendHook
-// pinpoints the exact divergent chunk and its offset directly, rather than
-// only the final byte-for-byte comparison below.
+// On a gap (the log-drain goroutine falling behind the retained ring, which a
+// fast enough program forces), the old code wrote the WHOLE retained snapshot
+// again on every resnapshot, rather than only the bytes genuinely new since
+// the log's own last write -- duplicating and corrupting the log. This feeds a
+// long, fast sequence (seq 1..600000, several megabytes, as fast as the
+// kernel's PTY will take it) through a real session and compares the resulting
+// log's bytes against ground truth: the exact sequence, with each line's \n
+// translated to \r\n (the PTY's own ONLCR, confirmed separately, not something
+// the log or this test undoes). logAppendHook pinpoints the exact divergent
+// chunk and its offset directly, rather than only the final byte-for-byte
+// comparison below.
 //
 // KNOWN, SEPARATE FLAKE (not the bug this test was written to catch, and
 // not introduced by the P1-3 fix): under real disk I/O -- specifically,

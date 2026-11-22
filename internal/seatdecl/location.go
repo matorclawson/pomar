@@ -10,16 +10,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/calljournal"
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/calljournal"
+	"github.com/rodriveracom/pomar/internal/localclient"
 )
 
 // Location is one revision of where a seat is active, kept apart from its
-// immutable declaration (SOW 16 §1.2). Revisions are add-only: each is its
-// own file, and none is ever rewritten. A move names the evidence it
-// consumed (SOW 16 §4): the organisation's external hand-over receipt for
-// the predecessor, and Pomar's own mechanism binding for the successor.
-// This package records those references; it proves neither.
+// immutable declaration. Revisions are add-only: each is its own file, and none
+// is ever rewritten. A move names the evidence it consumed: the organisation's
+// external hand-over receipt for the predecessor, and Pomar's own mechanism
+// binding for the successor. This package records those references; it proves
+// neither.
 type Location struct {
 	Seat              string `json:"seat"`
 	Revision          uint64 `json:"revision"`

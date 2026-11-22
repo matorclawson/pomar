@@ -14,12 +14,12 @@ import (
 	"strings"
 )
 
-// Copy-out (POMAR-SOW-05 §7, PR 4): a start names the files it will leave in
-// its guest at /pomar/outputs/NAME. When the command exits, the guest stages
-// each named file that is a regular file within the cap, and the helper copies
-// the staged files into the attempt's record. The manager then checks each
-// one again on the host and records its name, size and sha256 in the entry
-// and the result document. Nothing but the named files comes out.
+// Copy-out: a start names the files it will leave in its guest at
+// /pomar/outputs/NAME. When the command exits, the guest stages each named file
+// that is a regular file within the cap, and the helper copies the staged files
+// into the attempt's record. The manager then checks each one again on the host
+// and records its name, size and sha256 in the entry and the result document.
+// Nothing but the named files comes out.
 
 // OutputRecord is what the entry and the result keep of a named output.
 type OutputRecord struct {

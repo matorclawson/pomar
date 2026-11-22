@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/zeroemployeeorg/pomar/internal/ocilayout"
-	"github.com/zeroemployeeorg/pomar/internal/sign"
-	"github.com/zeroemployeeorg/pomar/internal/smoke"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/ocilayout"
+	"github.com/rodriveracom/pomar/internal/sign"
+	"github.com/rodriveracom/pomar/internal/smoke"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // imageCmd checks an OCI image layout against a pinned linux/arm64 manifest

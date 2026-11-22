@@ -1,6 +1,5 @@
 // Package nativeworkload prepares fixed workload invocations for an owner
 // launcher. It does not authenticate a caller, admit or launch a process.
-// sow: dt-animated-comics-SOW-01
 package nativeworkload
 
 import (

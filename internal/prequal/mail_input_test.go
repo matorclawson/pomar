@@ -6,19 +6,31 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 func mailInputFixture(t *testing.T) (*os.Root, MailInputRootBinding, string, []byte, string) {
 	t.Helper()
 	parent, e := filepath.EvalSymlinks(t.TempDir())
 	if e != nil {
+		t.Fatal(e)
+	}
+	// Remove inherited ACLs only from the fixture-owned directory before
+	// creating descendants. Test cases add their own ACLs where needed.
+	if runtime.GOOS == "darwin" {
+		if out, err := exec.Command("/bin/chmod", "-N", parent).CombinedOutput(); err != nil {
+			t.Fatalf("clear inherited fixture ACL: %v: %s", err, out)
+		}
+	}
+	if e = os.Chmod(parent, 0700); e != nil {
 		t.Fatal(e)
 	}
 	dir := filepath.Join(parent, "root")
@@ -44,24 +56,15 @@ func mailInputFixture(t *testing.T) (*os.Root, MailInputRootBinding, string, []b
 		t.Fatal(e)
 	}
 	b := MailInputRootBinding{CanonicalPath: dir, Device: meta.Device, Inode: meta.Inode, OwnerUID: uint32(os.Geteuid()), HostControlsSHA256: strings.Repeat("a", 64)}
-	var ancestors []MailInputAncestor
-	for p := filepath.Dir(dir); ; p = filepath.Dir(p) {
-		info, e := os.Lstat(p)
-		if e != nil {
-			t.Fatal(e)
-		}
-		m, e := mailInputAncestorMetadata(info)
-		if e != nil {
-			t.Fatal(e)
-		}
-		ancestors = append(ancestors, MailInputAncestor{CanonicalPath: p, Metadata: m})
-		if p == filepath.Dir(p) {
-			break
-		}
+	parentInfo, e := os.Lstat(parent)
+	if e != nil {
+		t.Fatal(e)
 	}
-	for i := len(ancestors) - 1; i >= 0; i-- {
-		b.Ancestors = append(b.Ancestors, ancestors[i])
+	parentMeta, e := mailInputAncestorMetadata(parentInfo)
+	if e != nil {
+		t.Fatal(e)
 	}
+	b.Ancestors = []MailInputAncestor{{CanonicalPath: parent, Metadata: parentMeta}}
 	raw, e := json.Marshal(b.Ancestors)
 	if e != nil {
 		t.Fatal(e)
@@ -81,24 +84,28 @@ func requireMailInputRefusal(t *testing.T, data []byte, observation MailInputCus
 	}
 }
 
-// Ancestor policy is an explicit hermetic assumption for focused file/root
-// mutation cases. Production never receives this hook. Real root/file ACLs
-// still use the kernel checker; separate tests inspect production ancestors
-// and mutate only a disposable ancestor to exercise real ancestor ACL reads.
-func assumedFixtureAncestorACL(*os.File) bool { return true }
+// Positive controls verify the fixture's real owner, permissions and ACLs.
+// The exported path still walks all host ancestors to the filesystem root.
+func fixtureMailInputHooks(b MailInputRootBinding) mailInputHooks {
+	return mailInputHooks{
+		acl: hostpolicy.DescriptorACLSafe, ancestorACL: hostpolicy.DescriptorACLSafe,
+		ancestorRoot: filepath.Dir(b.CanonicalPath),
+	}
+}
 
 func acquireFixtureMailInput(root *os.Root, b MailInputRootBinding, name string, size int64, digest string) ([]byte, MailInputCustody, error) {
-	return acquireMailInput(root, b, name, size, digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: assumedFixtureAncestorACL})
+	return acquireMailInput(root, b, name, size, digest, fixtureMailInputHooks(b))
 }
 
 func TestMailInputAncestorSiblingChurnPreservesAcquisition(t *testing.T) {
 	root, b, _, data, digest := mailInputFixture(t)
 	sibling := filepath.Join(filepath.Dir(b.CanonicalPath), "unrelated-sibling")
-	hooks := mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: assumedFixtureAncestorACL, afterRead: func() {
+	hooks := fixtureMailInputHooks(b)
+	hooks.afterRead = func() {
 		if e := os.WriteFile(sibling, []byte("unrelated"), 0600); e != nil {
 			t.Fatal(e)
 		}
-	}}
+	}
 	got, _, e := acquireMailInput(root, b, "plan.json", int64(len(data)), digest, hooks)
 	if e != nil || !bytes.Equal(got, data) {
 		t.Fatalf("unrelated ancestor entry invalidated input: %v", e)
@@ -108,25 +115,36 @@ func TestMailInputAncestorSiblingChurnPreservesAcquisition(t *testing.T) {
 	}
 }
 
-func TestMailInputProductionChecksAncestorACLs(t *testing.T) {
+func TestAcquireMailInputRequiresCompleteAncestorBinding(t *testing.T) {
 	root, b, _, data, digest := mailInputFixture(t)
-	unsafe := false
-	for _, a := range b.Ancestors {
-		f, e := os.OpenFile(a.CanonicalPath, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
-		if e != nil {
-			t.Fatal(e)
-		}
-		if !hostpolicy.DescriptorACLSafe(f) {
-			unsafe = true
-		}
-		f.Close()
-	}
 	got, proof, e := AcquireMailInput(root, b, "plan.json", int64(len(data)), digest)
-	if unsafe {
-		requireMailInputRefusal(t, got, proof, e)
-	} else if e != nil || !bytes.Equal(got, data) {
-		t.Fatalf("ACL-free ancestor control: %v", e)
+	requireMailInputRefusal(t, got, proof, e)
+}
+
+func TestMailInputRejectsWritableAncestor(t *testing.T) {
+	root, b, _, data, digest := mailInputFixture(t)
+	parent := filepath.Dir(b.CanonicalPath)
+	if e := os.Chmod(parent, 0770); e != nil {
+		t.Fatal(e)
 	}
+	// Pin the new metadata so refusal exercises the permission policy
+	// rather than a mismatch against the previous mode.
+	info, e := os.Lstat(parent)
+	if e != nil {
+		t.Fatal(e)
+	}
+	b.Ancestors[0].Metadata, e = mailInputAncestorMetadata(info)
+	if e != nil {
+		t.Fatal(e)
+	}
+	raw, e := json.Marshal(b.Ancestors)
+	if e != nil {
+		t.Fatal(e)
+	}
+	sum := sha256.Sum256(raw)
+	b.AncestorsSHA256 = hex.EncodeToString(sum[:])
+	got, proof, e := acquireFixtureMailInput(root, b, "plan.json", int64(len(data)), digest)
+	requireMailInputRefusal(t, got, proof, e)
 }
 
 func TestMailInputAcquiresDescriptorBytes(t *testing.T) {
@@ -157,7 +175,9 @@ func TestMailInputRefusesNamesBeforeOpen(t *testing.T) {
 	root, b, _, data, digest := mailInputFixture(t)
 	for _, name := range []string{"", ".", "..", "/", "plan.json/child", "../plan.json", "a\x00b"} {
 		opened := false
-		got, proof, e := acquireMailInput(root, b, name, int64(len(data)), digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: assumedFixtureAncestorACL, beforeOpen: func() { opened = true }})
+		hooks := fixtureMailInputHooks(b)
+		hooks.beforeOpen = func() { opened = true }
+		got, proof, e := acquireMailInput(root, b, name, int64(len(data)), digest, hooks)
 		requireMailInputRefusal(t, got, proof, e)
 		if opened {
 			t.Fatal("invalid name reached open hook")
@@ -226,7 +246,7 @@ func TestMailInputRefusesSubstitutionAndMutation(t *testing.T) {
 	for _, kind := range []string{"symlink before open", "fifo before open", "file replacement", "same bytes rewritten", "unsafe final mode", "root replacement", "parent replacement", "ancestor record drift", "unknown ACL", "unknown file ACL", "unknown ancestor ACL"} {
 		t.Run(kind, func(t *testing.T) {
 			root, b, path, data, digest := mailInputFixture(t)
-			hooks := mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: assumedFixtureAncestorACL}
+			hooks := fixtureMailInputHooks(b)
 			switch kind {
 			case "symlink before open":
 				hooks.beforeOpen = func() {

@@ -9,7 +9,7 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
+	"github.com/rodriveracom/pomar/internal/artifactreturn"
 )
 
 // ReceiveArtifacts authenticates the original raw result before fetching any

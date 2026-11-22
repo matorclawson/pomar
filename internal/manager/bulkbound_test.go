@@ -10,10 +10,9 @@ import (
 )
 
 // A manager that accepts a connection and never answers must not hold a
-// raw/rawBulk caller forever (zeocouncil's P1 on #128: server.go's raw,
-// outputlog.go's log fetch and outputs.go's Output all used c.http.Get with
-// no context, on a client with no Timeout, so none of them were actually
-// bounded despite AGENTS.md's claim).
+// raw/rawBulk caller forever (server.go's raw, outputlog.go's log fetch and
+// outputs.go's Output all used c.http.Get with no context, on a client with no
+// Timeout, so none of them were actually bounded despite AGENTS.md's claim).
 func TestRawIsBoundedAgainstAHungManager(t *testing.T) {
 	dir, _ := os.MkdirTemp("/tmp", "pomarbulk")
 	t.Cleanup(func() { os.RemoveAll(dir) })

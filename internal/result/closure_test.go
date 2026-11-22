@@ -1,6 +1,6 @@
 package result
 
-// sow: pomar-SOW-87. Closure uses the same protected publication primitive.
+// Closure uses the same protected publication primitive.
 import (
 	"bytes"
 	"errors"

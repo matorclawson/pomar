@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/localclient"
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
-	"github.com/zeroemployeeorg/pomar/internal/termstate"
+	"github.com/rodriveracom/pomar/internal/localclient"
+	"github.com/rodriveracom/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/termstate"
 )
 
 // ErrNoService is a root with no service answering on its socket.
@@ -32,12 +32,11 @@ type Client struct {
 	http *http.Client
 }
 
-// NewClient returns a client for the service serving root. The client
-// itself carries no blanket timeout: Do bounds each call by its own
-// context, long enough for whatever it actually asked the server to wait
-// for (the Architect's review of #128's stack, M3) -- a flat client
-// timeout shorter than a send's own -ready-wait/-accept-wait would abort
-// the call while the server is still legitimately working on it.
+// NewClient returns a client for the service serving root. The client itself
+// carries no blanket timeout: Do bounds each call by its own context, long
+// enough for whatever it actually asked the server to wait for. A flat client
+// timeout shorter than a send's own -ready-wait/-accept-wait would abort the
+// call while the server is still legitimately working on it.
 func NewClient(root string) *Client {
 	root = canonical(root)
 	c := localclient.New(filepath.Join(root, SocketName), os.Geteuid())

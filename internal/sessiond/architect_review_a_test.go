@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
-// zeocouncil/the Architect's review of the #128 stack, part A.
+// Regression coverage for session input and lifecycle fencing.
 
 // H1: an operation ID's dedupe record must be bound to what it was asked to
 // do. Reusing the same ID against a different session (or with different
@@ -83,9 +83,9 @@ func TestStopRefusesAnOperationIDReusedAgainstADifferentSession(t *testing.T) {
 	}
 }
 
-// The TEST GAP the Architect found by mutation: forcing take=true in send
-// left the shipped suite green. A send without -take must be refused while
-// someone else controls the session, exactly like an attach is.
+// A mutation check exposed a gap: forcing take=true in send left the shipped
+// suite green. A send without -take must be refused while someone else
+// controls the session, exactly like an attach is.
 func TestSendRefusesWithoutTakeWhileAnotherClientControls(t *testing.T) {
 	r := root(t)
 	_, c := serve(t, r)
@@ -239,11 +239,10 @@ func TestStopReportsCleanlyWhenNothingRemains(t *testing.T) {
 	}
 }
 
-// zeocouncil's and the Architect's BLOCKER on #128's stack: a paste
-// containing an embedded ESC[201~ ended bracketed-paste mode early, so
-// everything after it arrived at the program as TYPED input, not pasted
-// text. The server now refuses any ESC byte in a paste (unless -raw),
-// rather than the client doing its own wrapping the server never checks.
+// a paste containing an embedded ESC[201~ ended bracketed-paste mode early, so
+// everything after it arrived at the program as TYPED input, not pasted text.
+// The server now refuses any ESC byte in a paste (unless -raw), rather than the
+// client doing its own wrapping the server never checks.
 func TestPasteRefusesAnEmbeddedBracketMarker(t *testing.T) {
 	s, c := serve(t, root(t))
 	if err := c.Do("POST", "/v1/sessions", shell("op-paste-1", "echo", "cat"), nil); err != nil {
@@ -301,12 +300,12 @@ func TestPasteRefusesOverItsOwnBound(t *testing.T) {
 	}
 }
 
-// zeocouncil's correction on cee2326: decodeLimit/sendBodyLimit applied the
-// paste-sized body allowance (maxPasteBytes*8) to EVERY send, not only
-// Paste ones, so a plain send's body could be as large as a paste's before
-// anything about Paste was even consulted. An ordinary send (Paste unset)
-// must still be held to decodeBodyLimit (1 MiB), by the raw body byte
-// count actually read, regardless of how small req.Text ends up being.
+// decodeLimit/sendBodyLimit applied the paste-sized body allowance
+// (maxPasteBytes*8) to EVERY send, not only Paste ones, so a plain send's body
+// could be as large as a paste's before anything about Paste was even
+// consulted. An ordinary send (Paste unset) must still be held to
+// decodeBodyLimit (1 MiB), by the raw body byte count actually read, regardless
+// of how small req.Text ends up being.
 func TestOrdinarySendRefusesABodyOverTheOrdinaryLimit(t *testing.T) {
 	_, c := serve(t, root(t))
 	if err := c.Do("POST", "/v1/sessions", shell("op-paste-5", "echo5", "cat"), nil); err != nil {

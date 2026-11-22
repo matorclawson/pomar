@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/seatterm"
 )
 
 // A session's live output is retained only in memory (seatterm's ring,
@@ -177,12 +177,11 @@ func (s *Server) logSession(t *seatterm.TermSession, op string) {
 					switch {
 					case logged < snap.From:
 						// A real gap: the ring evicted [logged, snap.From)
-						// before this log ever saw it. Those bytes cannot
-						// be recovered -- journaled below as an actual
-						// loss, not silently rewritten as if they were
-						// zero bytes (council's P1-3: the old code wrote
-						// the WHOLE retained ring again here, every time,
-						// duplicating whatever overlapped what was
+						// before this log ever saw it. Those bytes cannot be
+						// recovered -- journaled below as an actual loss, not
+						// silently rewritten as if they were zero bytes (an
+						// older implementation wrote the whole retained ring
+						// again here, duplicating whatever overlapped what was
 						// already logged).
 						tail, lost = snap.Data, snap.From-logged
 					case logged < snap.To:

@@ -16,17 +16,16 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/zeroemployeeorg/pomar/internal/termstate"
+	"github.com/rodriveracom/pomar/internal/termstate"
 )
 
 // SessionHost holds a seat's terminal sessions in its guest, in place of a
-// terminal multiplexer (POMAR-CC SOW 27, made agent-agnostic by SOW 28):
-// each session is one program on a PTY the host owns, so the program
-// outlives every client. Any number of clients, up to a bound, view a
-// session; at most one controls it. Only the controller's input and window
+// terminal multiplexer: each session is one program on a PTY the host owns, so
+// the program outlives every client. Any number of clients, up to a bound, view
+// a session; at most one controls it. Only the controller's input and window
 // size reach the PTY, and each is fenced at the write itself by the
-// controller's grant epoch, so a revoked controller's queued input never
-// lands. The host knows nothing about which program a session runs.
+// controller's grant epoch, so a revoked controller's queued input never lands.
+// The host knows nothing about which program a session runs.
 type SessionHost struct {
 	mu       sync.Mutex
 	sessions map[string]*TermSession
@@ -264,18 +263,17 @@ type StopReport struct {
 	GroupKilled bool   `json:"group_killed"` // a group member outlived the hangup and was killed
 }
 
-// Stop stops a session's program: a hangup to its process group, then a
-// kill if the leader still runs after the grace period. Viewing or
-// controlling a session grants no stop: the caller authorises it. It waits
-// on the leader's reap itself, so a slow journal never makes it uncertain,
-// and it signals the group only while the group is known to exist: a leader
-// reaped with its group empty leaves a pid that may be reused. Once the
-// leader is reaped, startSession's own goroutine has already killed any
-// member that outlived it (so pump sees EIO and the session is noticed to
-// have ended even without a Stop: zeocouncil's review of #126, LOW 3); Stop
-// only reads back whether that found one to kill, then confirms the group
-// is actually gone. A process that left the group (its own setsid or
-// setpgid) is outside what this reads.
+// Stop stops a session's program: a hangup to its process group, then a kill
+// if the leader still runs after the grace period. Viewing or controlling a
+// session grants no stop: the caller authorises it. It waits on the leader's
+// reap itself, so a slow journal never makes it uncertain, and it signals the
+// group only while the group is known to exist: a leader reaped with its group
+// empty leaves a pid that may be reused. Once the leader is reaped,
+// startSession's own goroutine has already killed any member that outlived it
+// (so pump sees EIO and the session is noticed to have ended even without a
+// Stop: otherwise the session appears live); Stop only reads back whether that
+// found one to kill, then confirms the group is actually gone. A process that
+// left the group (its own setsid or setpgid) is outside what this reads.
 func (h *SessionHost) Stop(operation, principal, id string) (StopReport, error) {
 	s, ok := h.Session(id)
 	if !ok {
@@ -289,12 +287,11 @@ func (h *SessionHost) Stop(operation, principal, id string) (StopReport, error) 
 	signal := func(sig syscall.Signal) {
 		select {
 		case <-s.reaped:
-			// The leader's pid is free for reuse. groupExists alone only
-			// asks "does any group with this id exist", which a reused pid
-			// answers yes to for someone else's unrelated session (the
-			// Architect's review of #128's stack, M1): confirm the group
-			// this PTY's own slave side currently has is still exactly
-			// this one before ever signalling it.
+			// The leader's pid is free for reuse. groupExists alone only asks
+			// "does any group with this id exist", which a reused pid answers
+			// yes to for someone else's unrelated session. Instead, confirm
+			// the group this PTY's own slave side currently has is still
+			// exactly this one before ever signalling it.
 			//
 			// s.reaped closing and pump's own EIO (host.go) are two
 			// independent observers of the same process death, racing with
@@ -524,14 +521,12 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (session *TermSes
 	// The leader is reaped as soon as it exits, not once its output is
 	// drained: a background child holding the terminal open never delays it.
 	// Reaping frees the leader's pid for reuse, so the group is killed
-	// immediately after, in the same goroutine, before anything else runs:
-	// a short, accepted hazard (the same the Architect noted on Terminate's
-	// own kill), traded for a real one it closes. Without it, a straggler
-	// the leader's own exit didn't take with it — a background child that
-	// ignores the kernel's automatic SIGHUP to the terminal's foreground
-	// group — keeps the PTY's slave side open, so pump's Read never sees
-	// EIO and the session is never noticed to have ended (zeocouncil's
-	// review of #126, LOW 3).
+	// immediately after, in the same goroutine, before anything else runs: a
+	// short, accepted hazard, traded for a real one it closes. Without it, a
+	// straggler the leader's own exit didn't take with it — a background child
+	// that ignores the kernel's automatic SIGHUP to the terminal's foreground
+	// group — keeps the PTY's slave side open, so pump's Read never sees EIO
+	// and the session is never noticed to have ended.
 	go func() {
 		s.waitErr = cmd.Wait()
 		// Whether anything was actually there to kill is recorded here,
@@ -939,16 +934,15 @@ drain:
 
 // Control asks for control. With take false it is granted only when nobody
 // controls the session. With take true the current controller is revoked
-// first, and control is granted only once that controller's write in
-// flight, if any, is confirmed ended; its queued writes never land. The
-// grant's intent is journaled before anything changes, and its outcome after
-// the session's lock is released. A write the take cuts short may already
-// have been partly delivered: Outcomes counts it as partial, and nothing of
-// it is resent. expectEpoch, if given, is compared against the session's
-// current epoch under its own lock, not as a separate check beforehand: a
-// caller that read the epoch, then called Control, must be refused if
-// control changed in between, not only if it had already changed before the
-// read (the Architect's review of #128's stack, M5).
+// first, and control is granted only once that controller's write in flight,
+// if any, is confirmed ended; its queued writes never land. The grant's intent
+// is journaled before anything changes, and its outcome after the session's
+// lock is released. A write the take cuts short may already have been partly
+// delivered: Outcomes counts it as partial, and nothing of it is resent.
+// expectEpoch, if given, is compared against the session's current epoch under
+// its own lock, not as a separate check beforehand: a caller that read the
+// epoch, then called Control, must be refused if control changed in between,
+// not only if it had already changed before the read.
 func (c *Client) Control(take bool, reason string, expectEpoch *uint64) (uint64, error) {
 	s := c.s
 	action := "grant"
@@ -1222,14 +1216,14 @@ type AgentState struct {
 var AgentStates = map[string]bool{"running": true, "waiting-input": true, "permission": true, "idle": true}
 
 // ReportAgent records an adapter's report and tells every client. An empty
-// state keeps the last one, so an adapter may report only an acceptance.
-// It returns the StateSeq this call left in place (unchanged if state was
-// empty), under the same lock that set it: council P3-2 on #137 found that
-// a caller re-reading it afterward, via a separate Agent() call outside
-// this lock, lets a differently-ordered concurrent report's StateSeq come
-// back instead of this call's own -- returning it here, from inside the
-// same critical section that assigned it, closes that gap at the source
-// rather than needing the caller to re-derive it.
+// state keeps the last one, so an adapter may report only an acceptance. It
+// returns the StateSeq this call left in place (unchanged if state was empty),
+// under the same lock that set it: a caller re-reading it afterward, via a
+// separate Agent() call outside this lock, lets a differently-ordered
+// concurrent report's StateSeq come back instead of this call's own --
+// returning it here, from inside the same critical section that assigned it,
+// closes that gap at the source rather than needing the caller to re-derive
+// it.
 func (s *TermSession) ReportAgent(state, detail, accepted string) (uint64, error) {
 	if state != "" && !AgentStates[state] {
 		return 0, fmt.Errorf("unknown agent state %q", state)
@@ -1263,30 +1257,26 @@ func (s *TermSession) Agent() (AgentState, <-chan struct{}) {
 
 // ResetAgentUnknown takes the agent state back to unknown, but only if its
 // StateSeq still equals ifStateSeq: a disconnected adapter's last report
-// is no longer anyone's word for the program's current state (council P2:
-// a stale "waiting-input" must not keep looking ready once whatever
-// reported it is gone, and a stale "running"/"permission" must not keep
-// looking busy either). The caller decides a reset is due, then calls
-// this with the StateSeq that decision was made against; if a fresh
-// report landed in between (a different connection, or the same one
-// reconnecting), StateSeq has already moved on, and this is a deliberate
-// no-op rather than clobbering a report newer than the disconnect that
-// prompted it (council P3 on #137 -- the two are decided under different
-// locks, by different goroutines, so "newer" can only be judged by
-// comparing the sequence number, not by how the caller's own code reads).
-// Unlike ReportAgent, this never goes through AgentStates — unknown isn't
-// a state an adapter reports, only the one nobody has reported since.
+// cannot keep the program looking ready or busy. The caller decides a reset is
+// due, then calls this with the StateSeq that decision was made against; if a
+// fresh report landed in between (a different connection, or the same one
+// reconnecting), StateSeq has already moved on, and this is a deliberate no-op
+// rather than clobbering a report newer than the disconnect that prompted it
+// (the two are decided under different locks, by different goroutines, so
+// "newer" can only be judged by comparing the sequence number, not by how the
+// caller's own code reads). Unlike ReportAgent, this never goes through
+// AgentStates — unknown isn't a state an adapter reports, only the one nobody
+// has reported since.
 func (s *TermSession) ResetAgentUnknown(ifStateSeq uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.agent.State == "unknown" || s.agent.StateSeq != ifStateSeq {
 		return // already unknown, or a fresher report already landed: no-op either way
 	}
-	// Accepted is a past fact (an input the program already confirmed),
-	// not a claim about the program's current state: a disconnected
-	// adapter no longer vouches for "running", but it never un-confirms
-	// an input it already said was accepted (council P2 on #137 -- this
-	// used to rebuild the whole struct and lose it, which could flip an
+	// Accepted is a past fact (an input the program already confirmed), not a
+	// claim about the program's current state: a disconnected adapter no
+	// longer vouches for "running", but it never un-confirms an input it
+	// already said was accepted (rebuilding the whole struct could flip an
 	// in-flight send's own acceptance read from "yes" back to "pending").
 	s.agent.State, s.agent.Detail = "unknown", ""
 	s.agent.StateSeq, s.agent.Seq = s.agent.Seq+1, s.agent.Seq+1
@@ -1298,13 +1288,12 @@ func (s *TermSession) ResetAgentUnknown(ifStateSeq uint64) {
 	}
 }
 
-// WakeAgentWaiters wakes anyone blocked in Agent()'s channel without
-// reporting anything new: a when-ready send waits there for the next
-// agent report, but a readiness it claimed being given back (council P3
-// on #137: a refused send's give-back didn't wake a DIFFERENT send
-// already waiting) isn't a report at all, just bookkeeping that makes
-// the same still-true readiness available again. Closing and remaking
-// the channel, with nothing else touched, lets that waiter re-check
+// WakeAgentWaiters wakes anyone blocked in Agent()'s channel without reporting
+// anything new: a when-ready send waits there for the next agent report, but a
+// readiness it claimed being given back (a refused send's give-back must wake
+// a different send already waiting) isn't a report at all, just bookkeeping
+// that makes the same still-true readiness available again. Closing and
+// remaking the channel, with nothing else touched, lets that waiter re-check
 // immediately instead of sitting out the rest of its own wait bound.
 func (s *TermSession) WakeAgentWaiters() {
 	s.mu.Lock()

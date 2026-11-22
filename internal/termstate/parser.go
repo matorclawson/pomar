@@ -171,22 +171,21 @@ func (p *parser) step(t *Terminal, c byte, fwd []byte) []byte {
 			break
 		}
 		// No backslash: the withheld ESC was never put on the wire, and the
-		// client has no model of its own, so it must be told the string
-		// ends here exactly where the model's does, or it keeps swallowing
-		// whatever comes next as string data (zeocouncil's residual LOW on
-		// #127: an intercepted query here forwards nothing, so without this
-		// the client stays inside the old string until some later BEL or ST,
-		// and applies all of it at once, say as a title). A synthesized ST
-		// closes it; the held ESC itself is never the one forwarded, so this
-		// can't double it onto the wire either. Same as the buffered case
-		// above, this byte is then reprocessed from a fresh escape state
-		// rather than resuming the string forever (without that, one
-		// aborted overlong string left the model believing every later byte
-		// was still inside it, so no further query was ever intercepted
+		// client has no model of its own, so it must be told the string ends
+		// here exactly where the model's does, or it keeps swallowing whatever
+		// comes next as string data (an intercepted query forwards nothing, so
+		// without this the client stays inside the old string until some later
+		// BEL or ST, and applies all of it at once, say as a title). A
+		// synthesized ST closes it; the held ESC itself is never the one
+		// forwarded, so this can't double it onto the wire either. Same as the
+		// buffered case above, this byte is then reprocessed from a fresh
+		// escape state rather than resuming the string forever (without that,
+		// one aborted overlong string left the model believing every later
+		// byte was still inside it, so no further query was ever intercepted
 		// again for the rest of the session). That reprocessed sequence
-		// reaches the client only as part of whatever its own dispatch forwards,
-		// exactly once, exactly when the reprocessed sequence itself isn't
-		// one the host answers in the model's place.
+		// reaches the client only as part of whatever its own dispatch
+		// forwards, exactly once, exactly when the reprocessed sequence itself
+		// isn't one the host answers in the model's place.
 		fwd = append(fwd, 0x1b, '\\')
 		p.seq, p.state = []byte{0x1b}, escape
 		fwd = p.step(t, c, fwd)
@@ -732,11 +731,10 @@ func (p *parser) endString(t *Terminal, fwd []byte) []byte {
 }
 
 // stripControls drops every C0 and C1 control character from s, decoded as
-// runes (never raw bytes: a UTF-8 continuation byte can equal a C1 byte
-// value without being one). A defence in depth for the window title, which
-// a client may render verbatim, however a control character reached it
-// (zeocouncil's review of #126, LOW 2). An invalid byte is dropped too,
-// never guessed at.
+// runes (never raw bytes: a UTF-8 continuation byte can equal a C1 byte value
+// without being one). A defence in depth for the window title, which a client
+// may render verbatim, however a control character reached it. An invalid byte
+// is dropped too, never guessed at.
 func stripControls(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))

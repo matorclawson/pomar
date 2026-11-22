@@ -102,7 +102,7 @@ func (p *execProcess) Interrupt() error {
 
 // CredentialPresent reports whether Claude Code's credential file exists in
 // configDir as a regular, non-empty file. It never opens or reads the file:
-// placing the credential is the owner's act (POMAR-CC SOW 01 §5 P4).
+// placing the credential is the owner's act.
 func CredentialPresent(configDir string) func() bool {
 	return func() bool {
 		fi, err := os.Lstat(filepath.Join(configDir, ".credentials.json"))

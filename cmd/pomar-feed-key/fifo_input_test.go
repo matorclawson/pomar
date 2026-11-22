@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/zeroemployeeorg/pomar/internal/releasefeedissuer"
+	"github.com/rodriveracom/pomar/internal/releasefeedissuer"
 	"os"
 	"path/filepath"
 	"syscall"

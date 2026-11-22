@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatdecl"
+	"github.com/rodriveracom/pomar/internal/seatdecl"
 )
 
 const pin = "c3e64a5000000000000000000000000000000001"
@@ -20,13 +20,13 @@ func declaration(class string) []byte {
 	d := seatdecl.Declaration{
 		Schema: seatdecl.Schema, Seat: "zeocreator", Project: "zeocreator",
 		Sources: []seatdecl.Source{
-			{Role: "work", Repository: "zeroemployeeorg/zeocreator", Fork: "architect/zeocreator", Branch: "main", Commit: pin, Tree: pin, Destination: "work", Writable: true},
-			{Role: "records", Repository: "owner/records", Fork: "architect/records", Branch: "records/zeocreator", Commit: pin, Tree: pin, Destination: "records", Writable: true},
+			{Role: "work", Repository: "example-org/example-app", Fork: "example-fork/example-app", Branch: "main", Commit: pin, Tree: pin, Destination: "work", Writable: true},
+			{Role: "records", Repository: "owner/records", Fork: "example-fork/records", Branch: "records/zeocreator", Commit: pin, Tree: pin, Destination: "records", Writable: true},
 		},
 		Class: class, Resources: seatdecl.Resources{CPUs: 2, MemoryGiB: 4, DiskGiB: 16},
 		Provider: seatdecl.Provider{Agent: "claude", Version: "2.1.280", Account: seatdecl.NotEstablished},
 		Resume:   seatdecl.Resume{Policy: "fresh-from-sow", HandoverSOW: "records/zeocreator@x:SOW-04"},
-		Identity: seatdecl.Identity{Role: seatdecl.NotEstablished, Forks: []string{"architect/zeocreator", "architect/records"},
+		Identity: seatdecl.Identity{Role: seatdecl.NotEstablished, Forks: []string{"example-fork/example-app", "example-fork/records"},
 			Push: []string{"refs/heads/zeocreator/*"}, Permissions: map[string]string{"contents": "write", "metadata": "read"}},
 	}
 	b, _ := json.Marshal(d)

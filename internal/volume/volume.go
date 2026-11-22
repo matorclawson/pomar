@@ -14,7 +14,7 @@ import (
 	"regexp"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/venue"
 )
 
 // Dir is the venue structure directory that holds bounded volumes.

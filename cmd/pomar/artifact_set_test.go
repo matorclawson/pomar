@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/zeroemployeeorg/pomar/internal/artifactreturn"
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/rodriveracom/pomar/internal/artifactreturn"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/manager"
 )
 
 func cliArtifactHash(data []byte) string {

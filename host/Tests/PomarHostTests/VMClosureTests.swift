@@ -1,8 +1,8 @@
 import Testing
 @testable import PomarHostCore
 
-// sow: pomar-SOW-87. These exercise the helper's actual cleanup decision,
-// without a VM, signer, or manufactured manager closure receipt.
+// These exercise the helper's actual cleanup decision, without a VM, signer, or
+// manufactured manager closure receipt.
 private enum CleanupFailure: Error { case expected }
 
 @Test func cleanupAcknowledgesOnlySuccessfulOperations() async {

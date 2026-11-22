@@ -2,13 +2,12 @@ package seatterm
 
 import "testing"
 
-// council P3 on #137: ResetAgentUnknown is called by a caller (sessiond's
-// adapter) that decided a reset was due under its OWN lock, then releases
-// it before actually calling this — a different goroutine, under this
-// session's lock, can report a fresh state in that exact gap. The fence
-// (ifStateSeq) makes a stale decision a deliberate no-op instead of a
-// clobber: it only resets if StateSeq still equals what the caller saw
-// when it decided to reset.
+// ResetAgentUnknown is called by a caller (sessiond's adapter) that decided a
+// reset was due under its OWN lock, then releases it before actually calling
+// this — a different goroutine, under this session's lock, can report a fresh
+// state in that exact gap. The fence (ifStateSeq) makes a stale decision a
+// deliberate no-op instead of a clobber: it only resets if StateSeq still
+// equals what the caller saw when it decided to reset.
 func TestResetAgentUnknownIsFencedAgainstAFreshReport(t *testing.T) {
 	h, _ := newHost(t)
 	s, _, err := h.Create("op-fence-1", "operator", sh("sleep 30"))
@@ -46,9 +45,9 @@ func TestResetAgentUnknownIsFencedAgainstAFreshReport(t *testing.T) {
 	}
 }
 
-// council P2-2 on #137: Accepted is a past fact, not a claim about the
-// program's current state. A reset must clear State and Detail but never
-// un-confirm an acceptance the program already reported.
+// Accepted is a past fact, not a claim about the program's current state. A
+// reset must clear State and Detail but never un-confirm an acceptance the
+// program already reported.
 func TestResetAgentUnknownKeepsAcceptedDirectly(t *testing.T) {
 	h, _ := newHost(t)
 	s, _, err := h.Create("op-fence-2", "operator", sh("sleep 30"))

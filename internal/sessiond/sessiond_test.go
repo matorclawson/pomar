@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/seatterm"
-	"github.com/zeroemployeeorg/pomar/internal/termstate"
+	"github.com/rodriveracom/pomar/internal/seatterm"
+	"github.com/rodriveracom/pomar/internal/termstate"
 )
 
 // root is a private root short enough for a Unix socket path.

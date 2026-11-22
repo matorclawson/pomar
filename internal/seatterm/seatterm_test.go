@@ -232,7 +232,7 @@ func (shortWriter) Write(p []byte) (int, error) {
 
 // A terminal that stops reading its input can't hold Attach: the stream is
 // still read, so the operator's disconnect is seen and the attach ends,
-// bounded, though the PTY's input is full (the POMAR Codex's review of #106).
+// bounded, though the PTY's input is full.
 func TestANonConsumingTerminalCantHoldAttach(t *testing.T) {
 	guest, near := net.Pipe()
 	defer guest.Close()
@@ -318,8 +318,8 @@ func (noDeadlines) Write(p []byte) (int, error)      { return len(p), nil }
 func (noDeadlines) SetReadDeadline(time.Time) error  { return errors.New("no deadlines") }
 func (noDeadlines) SetWriteDeadline(time.Time) error { return errors.New("no deadlines") }
 
-// Attach's command is named by an absolute path, never looked up on the
-// host's PATH (zeocouncil's review of #126, INFO on session.go:33).
+// Attach's command is named by an absolute path, never looked up on the host's
+// PATH.
 func TestAttachRefusesARelativePath(t *testing.T) {
 	_, done := dial(t, Command{Path: "sh", Args: []string{"-c", "true"}, UID: -1, GID: -1}, 80, 24)
 	select {
@@ -332,8 +332,7 @@ func TestAttachRefusesARelativePath(t *testing.T) {
 	}
 }
 
-// A nil Env is empty, never the host's own (zeocouncil's review of #126,
-// INFO on session.go:59).
+// A nil Env is empty, never the host's own.
 func TestAttachNeverInheritsTheHostsEnvironment(t *testing.T) {
 	t.Setenv("SEATTERM_MARKER_FOR_LEAK_TEST", "leaked")
 	cl, done := dial(t, Command{Path: "/usr/bin/env", UID: -1, GID: -1}, 80, 24)

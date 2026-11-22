@@ -1,16 +1,15 @@
-// Package sessiond is Pomar's per-user session service on a host (POMAR-CC
-// SOW 27, the same session host the guest seat mode will run): named
-// programs on PTYs it owns, which outlive every client, with one controller
-// at a time and an exact screen on attach. It replaces tmux for programs
-// that run natively on the host, before they move into guests.
+// Package sessiond is Pomar's per-user session service on a host that runs
+// named programs on PTYs it owns, which outlive every client, with one
+// controller at a time and an exact screen on attach. It replaces tmux for
+// programs that run natively on the host, before they move into guests.
 //
 // Its boundaries, as Pomar scoped them:
 //   - It is native execution under the OS user that runs it: not guest
 //     isolation, and not organisational admission.
 //   - Its socket admits only that same user, so it authenticates the OS
 //     principal and nothing finer: every program of that user is the same
-//     principal to it. Binding a client to a seat or an elder, and any role
-//     key, belong to RT and the Architect, and are never kept here.
+//     principal to it. External seat and role bindings belong to the
+//     controller and are never kept here.
 //   - A restart of the service, or a reboot, doesn't keep its sessions. On
 //     start it reconciles what its journal says the previous service held,
 //     and says those sessions are out of its reach, never that they exited.

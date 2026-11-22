@@ -10,16 +10,8 @@ import (
 
 const testCommit = "0123456789abcdef0123456789abcdef01234567"
 
-// canonicalTempDir returns t.TempDir(), resolved via filepath.EvalSymlinks.
-// On macOS, t.TempDir() returns an unresolved path under /var/folders/...,
-// and /var -> private/var is itself a symlink (standard, permanent macOS
-// furniture, not a defect) -- secureDirectory's own ancestor walk (by
-// design) refuses any symlink component, so an unresolved prefix always
-// failed here, for a reason having nothing to do with the behavior under
-// test. This is a test-fixture fix only; secureDirectory and PrivateDir
-// are unchanged -- a prefix reached through a symlink must still be
-// refused, which is exactly what TestInstallFailsBeforeActivation's own
-// "prefix-link" case deliberately constructs and continues to rely on.
+// Use canonical paths within the directories the test controls. Individual
+// rejection cases create their own symlinks inside those directories.
 func canonicalTempDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -28,6 +20,28 @@ func canonicalTempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return resolved
+}
+
+// Each prefix is a child of a private test directory. Keep validating
+// that directory and its descendants independently of the host's TMPDIR.
+func installFixture(bundle, prefix string) (Manifest, error) {
+	return install(bundle, prefix, filepath.Dir(filepath.Dir(prefix)))
+}
+
+func TestInstallRejectsWritableAncestor(t *testing.T) {
+	bundle := fixture(t, "v0.1.0")
+	parent := canonicalTempDir(t)
+	prefix := filepath.Join(parent, "install")
+	if err := os.Chmod(parent, 0775); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Install(bundle, prefix)
+	if err == nil || !strings.Contains(err.Error(), "writable installation parent: "+parent) {
+		t.Fatalf("install did not reject fixture ancestor: %v", err)
+	}
+	if _, err := os.Lstat(prefix); !os.IsNotExist(err) {
+		t.Fatal("refused install created its prefix")
+	}
 }
 
 func fixture(t *testing.T, version string) string {
@@ -59,7 +73,7 @@ func TestInstallVersionsAndRollback(t *testing.T) {
 	a := fixture(t, "v0.1.0")
 	b := fixture(t, "v0.2.0-rc.1")
 	for _, bundle := range []string{a, a, b, a} {
-		m, err := Install(bundle, prefix)
+		m, err := installFixture(bundle, prefix)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -80,7 +94,7 @@ func TestAgentGuidesAreVerifiedBeforeActivation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			bundle := fixture(t, "v0.1.0")
 			prefix := filepath.Join(canonicalTempDir(t), "install")
-			if _, err := Install(bundle, prefix); err != nil {
+			if _, err := installFixture(bundle, prefix); err != nil {
 				t.Fatal(err)
 			}
 			before, err := os.ReadFile(filepath.Join(prefix, "current", filepath.FromSlash(name)))
@@ -90,7 +104,7 @@ func TestAgentGuidesAreVerifiedBeforeActivation(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(bundle, filepath.FromSlash(name)), []byte("changed agent instructions"), 0644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Install(bundle, prefix); err == nil {
+			if _, err := installFixture(bundle, prefix); err == nil {
 				t.Fatal("changed guide was accepted")
 			}
 			after, err := os.ReadFile(filepath.Join(prefix, "current", filepath.FromSlash(name)))
@@ -105,7 +119,7 @@ func TestInstallFailsBeforeActivation(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			a := fixture(t, "v0.1.0")
 			prefix := filepath.Join(canonicalTempDir(t), "install")
-			if _, err := Install(a, prefix); err != nil {
+			if _, err := installFixture(a, prefix); err != nil {
 				t.Fatal(err)
 			}
 			b := fixture(t, "v0.2.0")
@@ -151,7 +165,7 @@ func TestInstallFailsBeforeActivation(t *testing.T) {
 			case "locked":
 				os.Mkdir(filepath.Join(prefix, ".install-lock"), 0700)
 			}
-			if _, err := Install(b, prefix); err == nil {
+			if _, err := installFixture(b, prefix); err == nil {
 				t.Fatal("accepted unsafe/conflicting installation")
 			}
 			if kind == "existing-current" {
@@ -213,7 +227,7 @@ func TestLegacyReleaseRemainsVerifiableAfterToolExpansion(t *testing.T) {
 	prefix := filepath.Join(canonicalTempDir(t), "install")
 	current := fixture(t, "v0.2.0")
 	for _, bundle := range []string{root, current, root} {
-		m, err := Install(bundle, prefix)
+		m, err := installFixture(bundle, prefix)
 		if err != nil {
 			t.Fatal("cross-schema install/rollback rejected", err)
 		}
@@ -232,14 +246,14 @@ func TestRetainedAgentToolInventoryRequiredBeforeActivation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			prefix := filepath.Join(canonicalTempDir(t), "install")
 			prior := fixture(t, "v0.1.0")
-			if _, err := Install(prior, prefix); err != nil {
+			if _, err := installFixture(prior, prefix); err != nil {
 				t.Fatal(err)
 			}
 			candidate := fixture(t, "v0.2.0")
 			if err := os.Remove(filepath.Join(candidate, name)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Install(candidate, prefix); err == nil {
+			if _, err := installFixture(candidate, prefix); err == nil {
 				t.Fatal("accepted incomplete retained-agent release")
 			}
 			link, err := os.Readlink(filepath.Join(prefix, "current"))

@@ -1,16 +1,16 @@
 package manager
 
-// sow: pomar-SOW-87. Synthetic persisted boundary fixtures. These tests exercise
-// the real reader/publication paths; they are not host power-loss qualification.
+// Synthetic persisted boundary fixtures. These tests exercise the real
+// reader/publication paths; they are not host power-loss qualification.
 import (
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/zeroemployeeorg/pomar/internal/cache"
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/rodriveracom/pomar/internal/cache"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/venue"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 func publicationRequest(m *Manager, id string) *httptest.ResponseRecorder {

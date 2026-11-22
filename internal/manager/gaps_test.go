@@ -8,14 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/mirror"
+	"github.com/rodriveracom/pomar/internal/capacity"
+	"github.com/rodriveracom/pomar/internal/mirror"
 )
 
 // A source the mirror cannot place is refused by name before capacity is
-// claimed, apart from a mirror that cannot be synced; a placeable source on
-// a full host meets admission as before (the elders' ruling of 2026-09-27
-// 17:21Z §4).
+// claimed, apart from a mirror that cannot be synced; a placeable source on a
+// full host meets admission as before.
 func TestSourceIsSettledBeforeAdmission(t *testing.T) {
 	env := gitEnv(t)
 	up := t.TempDir()

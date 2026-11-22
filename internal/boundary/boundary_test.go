@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// good is what the probe reports in a guest that passes: measured in POMAR-
-// SOW-06 §3, with a read-only source and no resolver.
+// good is what the probe reports in a guest that passes: a read-only source
+// and no resolver.
 const good = `uid=1000
 iface=lo
 routes=0

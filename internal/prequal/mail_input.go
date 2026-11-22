@@ -11,7 +11,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
+	"github.com/rodriveracom/pomar/internal/hostpolicy"
 )
 
 // MailInputRootBinding comes from the owner's independently admitted host
@@ -64,13 +64,14 @@ type MailInputCustody struct {
 // Backend read-only mapping, receipt authority and post-run checks are separate.
 // Source files must be private0400/0600 and the established root private0700.
 func AcquireMailInput(root *os.Root, binding MailInputRootBinding, name string, size int64, digest string) ([]byte, MailInputCustody, error) {
-	return acquireMailInput(root, binding, name, size, digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: hostpolicy.DescriptorACLSafe})
+	return acquireMailInput(root, binding, name, size, digest, mailInputHooks{acl: hostpolicy.DescriptorACLSafe, ancestorACL: hostpolicy.DescriptorACLSafe, ancestorRoot: string(os.PathSeparator)})
 }
 
 // Fault/unknown-metadata seams are package-private and never caller options.
 type mailInputHooks struct {
 	acl                   func(*os.File) bool
 	ancestorACL           func(*os.File) bool
+	ancestorRoot          string
 	beforeOpen, afterRead func()
 }
 
@@ -89,7 +90,7 @@ func acquireMailInput(root *os.Root, binding MailInputRootBinding, name string, 
 		return fail()
 	}
 	defer dir.Close()
-	rootBefore, e := checkMailInputRoot(root, dir, binding, hooks.acl, hooks.ancestorACL)
+	rootBefore, e := checkMailInputRoot(root, dir, binding, hooks)
 	if e != nil {
 		return fail()
 	}
@@ -142,7 +143,7 @@ func acquireMailInput(root *os.Root, binding MailInputRootBinding, name string, 
 	if e != nil || pathFinal != final {
 		return fail()
 	}
-	rootAfter, e := checkMailInputRoot(root, dir, binding, hooks.acl, hooks.ancestorACL)
+	rootAfter, e := checkMailInputRoot(root, dir, binding, hooks)
 	if e != nil || rootAfter != rootBefore {
 		return fail()
 	}
@@ -157,9 +158,9 @@ func safeMailInputFile(m MailInputMetadata, size int64) bool {
 	return m.Mode.IsRegular() && (m.Mode == 0400 || m.Mode == 0600) && m.UID == uint32(os.Geteuid()) && m.Links == 1 && m.Size == size
 }
 
-func checkMailInputRoot(root *os.Root, dir *os.File, binding MailInputRootBinding, acl, ancestorACL func(*os.File) bool) (MailInputMetadata, error) {
+func checkMailInputRoot(root *os.Root, dir *os.File, binding MailInputRootBinding, hooks mailInputHooks) (MailInputMetadata, error) {
 	var zero MailInputMetadata
-	if !mailInputAncestorsMatch(binding, ancestorACL) {
+	if !mailInputAncestorsMatch(binding, hooks.ancestorRoot, hooks.ancestorACL) {
 		return zero, errMailInputCustody
 	}
 	canonical, e := filepath.EvalSymlinks(binding.CanonicalPath)
@@ -179,13 +180,13 @@ func checkMailInputRoot(root *os.Root, dir *os.File, binding MailInputRootBindin
 		return zero, errMailInputCustody
 	}
 	m, e := mailInputMetadata(held)
-	if e != nil || m.Mode != os.ModeDir|0700 || m.UID != binding.OwnerUID || m.Device != binding.Device || m.Inode != binding.Inode || !acl(dir) {
+	if e != nil || m.Mode != os.ModeDir|0700 || m.UID != binding.OwnerUID || m.Device != binding.Device || m.Inode != binding.Inode || !hooks.acl(dir) {
 		return zero, errMailInputCustody
 	}
 	return m, nil
 }
 
-func mailInputAncestorsMatch(binding MailInputRootBinding, acl func(*os.File) bool) bool {
+func mailInputAncestorsMatch(binding MailInputRootBinding, ancestorRoot string, acl func(*os.File) bool) bool {
 	if len(binding.Ancestors) == 0 || len(binding.Ancestors) > 128 || len(binding.CanonicalPath) > 4096 {
 		return false
 	}
@@ -200,8 +201,11 @@ func mailInputAncestorsMatch(binding MailInputRootBinding, acl func(*os.File) bo
 	var paths []string
 	for p := filepath.Dir(binding.CanonicalPath); ; p = filepath.Dir(p) {
 		paths = append(paths, p)
-		if p == filepath.Dir(p) {
+		if p == ancestorRoot {
 			break
+		}
+		if p == filepath.Dir(p) {
+			return false
 		}
 	}
 	if len(paths) != len(binding.Ancestors) {

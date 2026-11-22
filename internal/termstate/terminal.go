@@ -1,8 +1,7 @@
-// Package termstate is Pomar's own model of a terminal's state: the screen
-// a program has drawn, both buffers, the cursor, the rendition, the modes
-// and the history. A seat's session host feeds it every byte its program
-// writes, so that a client joining later gets the screen as it stands
-// (POMAR-CC SOW 27, made agent-agnostic by SOW 28), and so that queries
+// Package termstate is Pomar's own model of a terminal's state: the screen a
+// program has drawn, both buffers, the cursor, the rendition, the modes and the
+// history. A seat's session host feeds it every byte its program writes, so
+// that a client joining later gets the screen as it stands, and so that queries
 // the program sends its terminal are answered by the host rather than by
 // whichever clients happen to be attached.
 //
@@ -307,10 +306,9 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-// pushHistory adds one line, oldest evicted first, in O(1): once history
-// is full it's a ring, overwriting the oldest slot in place rather than
-// copying the rest of it on every single scrolled line (zeocouncil's
-// review of #126, LOW 4).
+// pushHistory adds one line, oldest evicted first, in O(1): once history is
+// full it's a ring, overwriting the oldest slot in place rather than copying
+// the rest of it on every single scrolled line.
 func (t *Terminal) pushHistory(r []Cell) {
 	if t.maxHistory <= 0 {
 		return

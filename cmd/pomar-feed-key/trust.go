@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/zeroemployeeorg/pomar/internal/releasefeedissuer"
+	"github.com/rodriveracom/pomar/internal/releasefeedissuer"
 	"io"
 	"os"
 	"path/filepath"

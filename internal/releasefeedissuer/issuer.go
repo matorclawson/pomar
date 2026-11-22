@@ -11,8 +11,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/zeroemployeeorg/pomar/internal/releasefeedobserver"
-	"github.com/zeroemployeeorg/pomar/internal/releasefeedwire"
+	"github.com/rodriveracom/pomar/internal/releasefeedobserver"
+	"github.com/rodriveracom/pomar/internal/releasefeedwire"
 	"time"
 )
 

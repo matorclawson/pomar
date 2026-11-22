@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/zeroemployeeorg/pomar/internal/result"
+	"github.com/rodriveracom/pomar/internal/result"
 )
 
 // The job environment the helper gives a command with a source
@@ -211,9 +211,9 @@ func (m *Manager) resultRoutes(mux *http.ServeMux) {
 }
 
 // exact is the reply with the result document written in exactly as it was
-// signed (the elders' ruling of 2026-09-27 §2.1). An encoder would re-encode
-// it: Go's escapes <, > and & by default, and the bytes a verifier received
-// would then differ from the bytes the manager signed.
+// signed. An encoder would re-encode it: Go's escapes <, > and & by default,
+// and the bytes a verifier received would then differ from the bytes the
+// manager signed.
 func (r ResultReply) exact() []byte {
 	var b bytes.Buffer
 	b.WriteString(`{"result":`)
