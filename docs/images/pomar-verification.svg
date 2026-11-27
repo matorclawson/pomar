@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 252" role="img" aria-labelledby="title desc">
+  <title id="title">Native verification duration</title>
+  <desc id="desc">Two successful make verify runs on Apple silicon took 133 and 136 seconds. The horizontal scale starts at zero. These are build and test times.</desc>
+  <rect x="1" y="1" width="958" height="250" rx="20" fill="#f5f8f7" stroke="#d6e2df" stroke-width="2"/>
+  <g font-family="system-ui, sans-serif">
+    <text x="29" y="42" font-size="24" font-weight="700" fill="#112c2a">Native verification duration</text>
+    <text x="29" y="67" font-size="14" fill="#31514c">make verify on Apple silicon · both passed</text>
+    <g stroke="#c7d6d3" stroke-width="1">
+      <path d="M276 87 V198 M396 87 V198 M516 87 V198 M636 87 V198 M756 87 V198 M876 87 V198"/>
+    </g>
+    <g fill="#31514c" font-size="13">
+      <text x="29" y="119">Service migration and rollback</text>
+      <text x="29" y="171">License and binary notices</text>
+      <text x="276" y="223" text-anchor="middle">0</text>
+      <text x="396" y="223" text-anchor="middle">30</text>
+      <text x="516" y="223" text-anchor="middle">60</text>
+      <text x="636" y="223" text-anchor="middle">90</text>
+      <text x="756" y="223" text-anchor="middle">120</text>
+      <text x="876" y="223" text-anchor="middle">150 s</text>
+    </g>
+    <rect x="276" y="99" width="532" height="28" rx="4" fill="#31726a"/>
+    <rect x="276" y="151" width="544" height="28" rx="4" fill="#155e53"/>
+    <g font-size="13" font-weight="700" fill="#ffffff" text-anchor="end">
+      <text x="798" y="118">133 s</text>
+      <text x="810" y="170">136 s</text>
+    </g>
+  </g>
+</svg>

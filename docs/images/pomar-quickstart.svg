@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 358" role="img" aria-labelledby="title desc">
+  <title id="title">Pomar quick start terminal capture</title>
+  <desc id="desc">Actual output from an Apple silicon source run. The CLI prints its version and displays the beginning of its JSON command catalog.</desc>
+  <rect x="1" y="1" width="958" height="356" rx="20" fill="#102a28" stroke="#2e504b" stroke-width="2"/>
+  <circle cx="34" cy="31" r="4" fill="#85c9b9"/>
+  <text x="49" y="36" font-family="system-ui, sans-serif" font-size="15" font-weight="700" fill="#e2eee9">Pomar CLI · source checkout</text>
+  <path d="M26 56 H934" stroke="#365851"/>
+  <g font-family="Menlo, monospace" font-size="15" xml:space="preserve">
+    <text x="30" y="83" fill="#91dfc9">$ go run ./cmd/pomar version</text>
+    <text x="30" y="105" fill="#e3f1eb">pomar 0.0.0-dev (source unknown)</text>
+    <text x="30" y="127" fill="#e3f1eb"></text>
+    <text x="30" y="149" fill="#91dfc9">$ go run ./cmd/pomar help -json | sed -n &#x27;1,8p&#x27;</text>
+    <text x="30" y="171" fill="#e3f1eb">{</text>
+    <text x="48" y="193" fill="#e3f1eb">&quot;command_exit_codes&quot;: {</text>
+    <text x="66" y="215" fill="#e3f1eb">&quot;health&quot;: {</text>
+    <text x="84" y="237" fill="#e3f1eb">&quot;0&quot;: &quot;capacity responded and any requested key pin passed; explicit unknowns remain&quot;,</text>
+    <text x="84" y="259" fill="#e3f1eb">&quot;1&quot;: &quot;attention/read failure&quot;,</text>
+    <text x="84" y="281" fill="#e3f1eb">&quot;2&quot;: &quot;incomplete invocation or manager selection&quot;</text>
+    <text x="66" y="303" fill="#e3f1eb">},</text>
+    <text x="66" y="325" fill="#e3f1eb">&quot;result verify&quot;: {</text>
+  </g>
+</svg>
