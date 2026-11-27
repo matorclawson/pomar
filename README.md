@@ -1,47 +1,46 @@
 # Pomar
 
-Run isolated Linux jobs and development seats on an Apple silicon Mac. Pomar
-uses one disposable micro-VM per job, a Go coordinator and a Swift host built
-on Apple's [Containerization](https://github.com/apple/containerization).
-Guests run pinned inputs without host credentials; the host controls egress,
-capacity and retained results.
+Pomar runs Linux jobs in disposable micro-VMs on Apple silicon and hosts
+retained development environments for interactive seats. Use it to run a
+pinned command or repository build with controlled egress and without host
+credentials in the guest. A signing-enabled manager returns a signed result
+you can verify using its owner's public key.
 
-**Agents and scripts:** start with [AGENTS.md](AGENTS.md), or `pomar help -json`.
+## Quick start
 
-**Status:** early prototype, macOS 26 or later, Apple silicon. The release
-pipeline is prepared here; the first binary release has not yet been published.
-To try Pomar now, use a [local source build](docs/install.md#build-and-install-from-source).
-
-## Install a release
-
-Users of a published release need no Git checkout, Go or Swift compiler. Choose
-an explicit tag from [Releases](https://github.com/rodriveracom/pomar/releases),
-download that tag's `install.sh` and `SHA256SUMS`, and verify the installer before
-running it. For example, **after `v0.1.0` is published**:
+On an Apple silicon Mac with macOS 26 or later, Go 1.27.x, Swift 6.2 or later,
+and the Apple developer tools, clone the repository and inspect the CLI:
 
 ```sh
-VERSION=v0.1.0
-URL="https://github.com/rodriveracom/pomar/releases/download/$VERSION"
-curl -fL "$URL/install.sh" -o install.sh
-curl -fL "$URL/SHA256SUMS" -o SHA256SUMS
-awk '$2 == "install.sh" { print }' SHA256SUMS | shasum -a 256 -c -
-sh install.sh "$VERSION"
-export PATH="$HOME/.local/share/pomar/current/bin:$PATH"
-pomar version
-pomar help
+git clone https://github.com/rodriveracom/pomar.git
+cd pomar
+go run ./cmd/pomar help -json
 ```
 
-The bundle includes the CLI, signed VM host, Linux shim, restricted clients and
-these guides. Installation keeps versions side by side and activates only your
-user tools. See [installation and rollback](docs/install.md).
+To run your first local job, [build and install the bundle from source](docs/install.md#build-and-install-from-source),
+then follow the [development manager quickstart](docs/operations.md#development-manager).
+It starts a private manager and runs `/bin/echo hello` in a fresh Linux VM.
+For an existing manager, get the control socket and job class from its owner.
+See [AGENTS.md](AGENTS.md) for the CLI loop and result verification.
 
-## Run your first local job
+## Status
 
-After [building and installing from source](docs/install.md#build-and-install-from-source)
-or installing a published release, follow the [development manager quickstart](docs/operations.md#development-manager).
-It prepares a private development root, starts the manager in one terminal, and
-runs `/bin/echo hello` from another. The manager returns an unsigned result for
-this local smoke check.
+| Area | Status as of 27 November 2026 |
+| --- | --- |
+| Latest release | [No binary release published](https://github.com/rodriveracom/pomar/releases). Build from source to try Pomar. |
+| On `main` | Batch jobs, retained developer environments, and opt-in notification integration. The macOS service migration and rollback are in [#192](https://github.com/rodriveracom/pomar/pull/192). MIT licensing and notices in v3 bundles are in [#193](https://github.com/rodriveracom/pomar/pull/193). |
+| In review | [#188](https://github.com/rodriveracom/pomar/pull/188) expands the changelog. [#189](https://github.com/rodriveracom/pomar/pull/189) adds Makefile workflows and prerequisite diagnostics. Both are drafts. |
+
+## Measured results
+
+| Scope and exact tested commit | Command | Host | Result | Receipt SHA-256 |
+| --- | --- | --- | --- | --- |
+| License and binary-notice changes, `8f4f6ca62072307b221ded352cdc6ec23f7a5ac7` ([#193](https://github.com/rodriveracom/pomar/pull/193)) | `make verify` | Apple silicon Mac | Exit 0 in 136 s | `3f191cddd59f76ad8b7723c05a10028f415c8c1faee1203285861d76aeb438e3` |
+| Service migration and rollback source, `877390636d60a643d52ffd11050d6c039da6502f` ([#192](https://github.com/rodriveracom/pomar/pull/192)) | `make verify` | Apple silicon Mac | Exit 0 in 133 s | `a8edbb98e2d06eb9e144ab76ad6e7e4aa691c5a65ab17ca7721a6f654ff97070` |
+| Workload benchmarks on current `main` | Pending | Pending | VM startup latency, job throughput, and concurrent-seat capacity are unmeasured. | Pending |
+
+The measured durations are for the build and test gate. Live installed
+migration and rollback qualification is pending.
 
 ## Use a signed manager
 
