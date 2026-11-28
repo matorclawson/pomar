@@ -155,8 +155,16 @@ func collectSwiftLicenses(source, checkouts string) ([]byte, error) {
 				return nil, fmt.Errorf("SwiftPM license is not a regular file: %s/%q", pin.Identity, name)
 			}
 			raw, err := swiftGit(checkout, "cat-file", "blob", pin.State.Revision+":"+name)
-			if err != nil || len(bytes.TrimSpace(raw)) == 0 || len(raw) > 1<<20 {
+			if err != nil || len(raw) > 1<<20 {
 				return nil, fmt.Errorf("SwiftPM license text unavailable or oversized: %s/%q", pin.Identity, name)
+			}
+			// An empty secondary file carries no license or notice text.
+			// The pinned root must always contain its declared license.
+			if len(raw) == 0 && name != pin.name {
+				continue
+			}
+			if len(bytes.TrimSpace(raw)) == 0 {
+				return nil, fmt.Errorf("SwiftPM license has no text: %s/%q", pin.Identity, name)
 			}
 			if name == pin.name {
 				hash := sha256.Sum256(raw)

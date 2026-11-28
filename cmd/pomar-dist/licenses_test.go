@@ -46,6 +46,9 @@ func TestBuiltBundleContainsEveryLockedSwiftLicenseAndNotice(t *testing.T) {
 	for _, identity := range []string{"alpha", "beta"} {
 		files := licenses[identity]
 		checkout := filepath.Join(checkouts, identity)
+		if identity == "alpha" {
+			writeDistFixture(t, filepath.Join(checkout, "build", "LICENSE"), nil)
+		}
 		for name, data := range files {
 			writeDistFixture(t, filepath.Join(checkout, name), []byte(data))
 		}
@@ -111,6 +114,9 @@ func TestBuiltBundleContainsEveryLockedSwiftLicenseAndNotice(t *testing.T) {
 		t.Fatal("project notice or license inventory missing from archive")
 	}
 	combined := got[distribution.SwiftLicenseFile]
+	if bytes.Contains(combined, []byte("alpha/build/LICENSE")) {
+		t.Fatal("empty secondary license was included as license text")
+	}
 	for identity, files := range licenses {
 		for path, text := range files {
 			if !bytes.Contains(combined, []byte("\n--- "+identity+"/"+path+" ---\n"+text+"\n")) {
@@ -135,6 +141,28 @@ func TestBuiltBundleContainsEveryLockedSwiftLicenseAndNotice(t *testing.T) {
 	writeDistFixture(t, filepath.Join(source, swiftLicenseTable), []byte(strings.Join(lines[:2], "\n")+"\n"))
 	if _, err := collectSwiftLicenses(source, checkouts); err == nil || !strings.Contains(err.Error(), "every locked package") {
 		t.Fatalf("missing pin accepted: %v", err)
+	}
+
+	// A matching digest for an empty root still cannot satisfy the license pin.
+	checkout := filepath.Join(checkouts, "alpha")
+	writeDistFixture(t, filepath.Join(checkout, "LICENSE"), nil)
+	gitFixture(t, checkout, "add", "LICENSE")
+	gitFixture(t, checkout, "-c", "user.name=Pomar Fixture", "-c", "user.email=pomar@example.invalid",
+		"-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "empty root license")
+	oldRevision := lock.Pins[0].State.Revision
+	newRevision := gitFixture(t, checkout, "rev-parse", "HEAD")
+	lock.Pins[0].State.Revision = newRevision
+	raw, err = json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDistFixture(t, filepath.Join(source, "host", "Package.resolved"), raw)
+	emptyRootTable := strings.ReplaceAll(table, oldRevision, newRevision)
+	emptyRootTable = strings.Replace(emptyRootTable, fmt.Sprintf("%x", sha256.Sum256([]byte(licenses["alpha"]["LICENSE"]))),
+		fmt.Sprintf("%x", sha256.Sum256(nil)), 1)
+	writeDistFixture(t, filepath.Join(source, swiftLicenseTable), []byte(emptyRootTable))
+	if _, err := collectSwiftLicenses(source, checkouts); err == nil || !strings.Contains(err.Error(), "has no text") {
+		t.Fatalf("empty root license accepted: %v", err)
 	}
 }
 
