@@ -414,11 +414,11 @@ func (v *Venue) Fill() (int, error) {
 
 // Space is the data root's filesystem as admission sees it.
 type Space struct {
-	Used  int64 `json:"used"`  // bytes in use, across the APFS container
+	Used  int64 `json:"used"`  // bytes in use, across the APFS container on macOS
 	Avail int64 `json:"avail"` // bytes available to unprivileged users
-	// Device is the data root's device (for example /dev/disk3s5), and
-	// Shared reports whether it sits in the same APFS container as the
-	// system's data volume, so that its free space is the operator's too.
+	// Device is the mount source when the platform reports it.
+	// Shared keeps the fill floor on unless the platform can show that the
+	// data root is on a container separate from the system's data volume.
 	Device string `json:"device"`
 	Shared bool   `json:"shared"`
 }
@@ -426,21 +426,17 @@ type Space struct {
 // SystemData is the volume that holds the operator's data on macOS.
 const SystemData = "/System/Volumes/Data"
 
-// Space reads the data root's filesystem. Shared is true unless the data
-// root is shown to be on another container than SystemData: a figure that
-// cannot be read counts as shared, which keeps the fill floor on.
+// Space reads the data root's filesystem and the platform's disk identity.
 func (v *Venue) Space() (Space, error) {
 	var s syscall.Statfs_t
 	if err := v.statfs(v.root, &s); err != nil {
 		return Space{}, fmt.Errorf("venue: statfs: %w", err)
 	}
-	bs := int64(s.Bsize)
-	sp := Space{Used: int64(s.Blocks-s.Bfree) * bs, Avail: int64(s.Bavail) * bs, Device: cstr(s.Mntfromname[:]), Shared: true}
-	var sys syscall.Statfs_t
-	if err := v.statfs(SystemData, &sys); err == nil {
-		sp.Shared = SameContainer(sp.Device, cstr(sys.Mntfromname[:]))
-	}
-	return sp, nil
+	bs, device, shared := v.filesystemDetails(&s)
+	return Space{
+		Used: int64(s.Blocks-s.Bfree) * bs, Avail: int64(s.Bavail) * bs,
+		Device: device, Shared: shared,
+	}, nil
 }
 
 // SameContainer reports whether two /dev/diskNs… devices are volumes of one
@@ -465,17 +461,6 @@ func container(dev string) (string, bool) {
 		return "", false
 	}
 	return d[:n], true
-}
-
-func cstr(b []int8) string {
-	out := make([]byte, 0, len(b))
-	for _, c := range b {
-		if c == 0 {
-			break
-		}
-		out = append(out, byte(c))
-	}
-	return string(out)
 }
 
 // ErrDiskFull is returned by CheckHeavy when the fill limit is exceeded.
