@@ -267,11 +267,16 @@ func venueStatus(args []string, stdout, stderr io.Writer) int {
 	})
 	fmt.Fprintf(stdout, "fill: %d%% (limit %d%% from %s, heavy work %s)\n", pct, limit.Percent, limit.Source, heavy)
 	if sp, err := v.Space(); err == nil {
+		device := sp.Device
 		floor := "shared with " + venue.SystemData + ": admission keeps the fill floor"
-		if !sp.Shared {
+		switch {
+		case device == "":
+			device = "unknown source"
+			floor = "admission keeps the fill floor"
+		case !sp.Shared:
 			floor = "a dedicated container: no fill floor, peak plus headroom only"
 		}
-		fmt.Fprintf(stdout, "disk: %s, %s\n", sp.Device, floor)
+		fmt.Fprintf(stdout, "disk: %s, %s\n", device, floor)
 	}
 	fmt.Fprintf(stdout, "open objects: %d\n", len(open))
 	for _, o := range open {

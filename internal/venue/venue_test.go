@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -367,8 +368,14 @@ func TestSpaceReadsTheFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sp.Avail <= 0 || sp.Used <= 0 || !strings.HasPrefix(sp.Device, "/dev/") {
+	if sp.Avail <= 0 || sp.Used <= 0 {
 		t.Fatalf("Space() = %+v", sp)
+	}
+	if runtime.GOOS == "darwin" && !strings.HasPrefix(sp.Device, "/dev/") {
+		t.Fatalf("Space() mount source = %q", sp.Device)
+	}
+	if runtime.GOOS == "linux" && (sp.Device != "" || !sp.Shared) {
+		t.Fatalf("Space() did not keep the Linux fill floor: %+v", sp)
 	}
 }
 
