@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 304" role="img" aria-labelledby="title desc">
+  <title id="title">How a Pomar job runs</title>
+  <desc id="desc">A caller submits a job over a Unix socket. The Go manager starts the Swift VM host, which runs a fresh Linux micro-VM. The manager returns results and logs to the caller.</desc>
+  <rect x="1" y="1" width="958" height="302" rx="20" fill="#f5f8f7" stroke="#d6e2df" stroke-width="2"/>
+  <g font-family="system-ui, sans-serif">
+    <text x="29" y="42" font-size="24" font-weight="700" fill="#112c2a">How a job runs</text>
+    <rect x="249" y="61" width="682" height="162" rx="14" fill="#e8f1ef" stroke="#b9d1ca"/>
+    <text x="269" y="88" font-size="14" font-weight="700" fill="#31514c">Apple silicon Mac</text>
+    <g fill="#ffffff" stroke="#a9c4bc">
+      <rect x="29" y="108" width="164" height="92" rx="12"/>
+      <rect x="269" y="108" width="179" height="92" rx="12"/>
+      <rect x="491" y="108" width="179" height="92" rx="12"/>
+    </g>
+    <rect x="713" y="108" width="198" height="92" rx="12" fill="#14483f"/>
+    <g fill="none" stroke="#155e53" stroke-width="2">
+      <path d="M193 154 H265"/>
+      <path d="M448 154 H487"/>
+      <path d="M670 154 H709"/>
+      <path d="M352 201 V260 H108 V204"/>
+    </g>
+    <path d="M265 154 l-8 -4 v8 Z M487 154 l-8 -4 v8 Z M709 154 l-8 -4 v8 Z M108 204 l-4 8 h8 Z"
+          fill="#155e53"/>
+    <g fill="#112c2a" font-size="16" font-weight="700">
+      <text x="45" y="141">Pomar CLI</text>
+      <text x="285" y="141">Go manager</text>
+      <text x="507" y="141">Swift VM host</text>
+    </g>
+    <g fill="#31514c" font-size="13">
+      <text x="45" y="166">Submit a pinned job</text>
+      <text x="229" y="137" text-anchor="middle" font-size="11">Unix socket</text>
+      <text x="285" y="166">Admission and results</text>
+      <text x="507" y="166">Starts the guest</text>
+      <text x="228" y="283" text-anchor="middle">Result and logs</text>
+    </g>
+    <text x="729" y="141" font-size="16" font-weight="700" fill="#ffffff">Linux micro-VM</text>
+    <text x="729" y="166" font-size="13" fill="#dbefe9">Fresh for each batch job</text>
+  </g>
+</svg>
