@@ -19,21 +19,13 @@ func (noProcs) List() ([]proc.Process, error) { return nil, nil }
 // The test binary is ad-hoc signed without the Virtualization entitlement,
 // so using it as the helper must be refused before anything is created.
 func TestStartRefusesUnentitledHelper(t *testing.T) {
-	v, err := openFixtureVenue(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Reach the entitlement boundary independently of the live disk floor.
+	// Reach the entitlement boundary independently of live host resources.
 	// Admission refusal remains covered by TestStartAdmission.
-	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour, Space: healthyFixtureSpace})
+	space, err := healthyFixtureSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer m.Close()
+	m, v := openAdmission(t, capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB}, space)
 	before := len(v.OpenObjects())
 	if _, err := m.Start("a1", []string{"/bin/true"}, nil); !errors.Is(err, sign.ErrMissing) {
 		t.Fatalf("Start with unentitled helper = %v, want sign.ErrMissing", err)
